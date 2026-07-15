@@ -114,7 +114,7 @@ export function mintChild({ sessionId, agentId }) {
   const activeRunId = activeRunFor(parentCapability);
   if (!activeRunId) return null;
   const agentHash = sha256(String(agentId));
-  const capability = deriveCapability('child', parent.session_hash, agentHash);
+  const capability = deriveCapability('child', parent.session_hash, activeRunId, agentHash);
   if (!readJson(capabilityPath(capability), null)) {
     writeCapability(capability, {
       kind: 'child',
@@ -647,10 +647,11 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       return { status: 'CHECKPOINTED', run_id: runId };
     }
     const evaluations = Object.values(current.evaluations);
+    const closingEvaluations = evaluations.filter((evaluation) => evaluation.status !== 'STALE');
     const blockers = [];
     if (!Object.keys(current.pr_snapshots).length) blockers.push('PR_SNAPSHOT_REQUIRED');
-    if (!evaluations.length) blockers.push('EVALUATION_REQUIRED');
-    for (const evaluation of evaluations) {
+    if (!closingEvaluations.length) blockers.push('EVALUATION_REQUIRED');
+    for (const evaluation of closingEvaluations) {
       if (!['RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION'].includes(evaluation.status)) blockers.push(`EVALUATION_${evaluation.id}_${evaluation.status}`);
       if (!evaluation.child_receipt_id) blockers.push(`CHILD_RECEIPT_${evaluation.id}_OPEN`);
       if (!evaluation.child_receipt_retrieved) blockers.push(`CHILD_RECEIPT_${evaluation.id}_NOT_RETRIEVED`);

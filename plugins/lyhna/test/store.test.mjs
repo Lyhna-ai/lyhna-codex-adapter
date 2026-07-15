@@ -96,6 +96,11 @@ test('full run distinguishes hook evidence and seals only after evaluator receip
   assert.throws(() => recordClaim(parent, 'late mutation', []), /NO_ACTIVE_RUN/);
   const nextRun = beginRun(parent, { mode: 'full', objective: 'A new explicit run.' });
   assert.notEqual(nextRun.id, state.id);
+  addPrSnapshot(parent, stableSnapshot);
+  const nextEvaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, path: 'fixture' });
+  const reboundChild = mintChild({ sessionId: 'parent-session', agentId: 'evaluator-agent' });
+  assert.notEqual(reboundChild, child);
+  assert.equal(claimEvaluation(reboundChild, nextEvaluation.id).status, 'CLAIMED');
   assert.equal(readSealedReceipt(parent, childReceipt.id).id, childReceipt.id);
   assert.equal(readLedger(state.id, { allowOpen: false }).length, parsed.evidence.length);
 });
@@ -206,9 +211,34 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
   });
   const refresh = markSnapshotRefreshed(parent, stableSnapshot.id, 'd'.repeat(40));
   assert.equal(refresh.stale, true);
-  const current = getRunForTesting(beginRun(parent, { mode: 'full' }).id).state;
+  const run = beginRun(parent, { mode: 'full' });
+  let current = getRunForTesting(run.id).state;
   assert.equal(current.evaluations[evaluation.id].status, 'STALE');
   assert.equal(current.pr_snapshots[stableSnapshot.id].status, 'STALE');
+
+  const freshSnapshot = {
+    ...stableSnapshot,
+    id: 'pr_fresh',
+    head_before: 'd'.repeat(40),
+    head_after: 'd'.repeat(40)
+  };
+  addPrSnapshot(parent, freshSnapshot);
+  const freshEvaluation = beginEvaluation(parent, freshSnapshot.id, { head: freshSnapshot.head_after, clean: true, path: 'fixture-fresh' });
+  const freshChild = mintChild({ sessionId: 'stale-parent', agentId: 'fresh-evaluator' });
+  claimEvaluation(freshChild, freshEvaluation.id);
+  recordEvaluation(freshChild, freshEvaluation.id, 'Fresh exact-head finding.', [], {
+    head_before: freshSnapshot.head_after,
+    head_after: freshSnapshot.head_after,
+    clean_before: true,
+    clean_after: true
+  });
+  const freshReceipt = sealChildByAgent({ sessionId: 'stale-parent', agentId: 'fresh-evaluator' });
+  readSealedReceipt(parent, freshReceipt.id);
+  requestClose(parent, 'Fresh evaluation supersedes stale history.');
+  assert.equal(checkpointOrSeal(parent).status, 'SEALED');
+  current = getRunForTesting(run.id).state;
+  assert.equal(current.evaluations[evaluation.id].status, 'STALE');
+  assert.equal(current.evaluations[freshEvaluation.id].status, 'RECORDED');
 });
 
 test('ledger mutation, deletion, reordering, and sealed-tail truncation are detected', { concurrency: false }, (t) => {
