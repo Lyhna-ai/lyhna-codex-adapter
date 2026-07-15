@@ -49,6 +49,59 @@ test('capabilities are hook-bound, isolated, and parent cannot self-review', { c
   assert.equal(getRunForTesting(run.id).state.evaluations[evaluation.id].status, 'CLAIMED');
 });
 
+test('open legacy runs drop persisted child receipt paths on the next save', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const parent = mintSession({ sessionId: 'legacy-path-migration', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Migrate an open run.' });
+  mintChild({ sessionId: 'legacy-path-migration', agentId: 'ordinary-child' });
+  const receipt = sealChildByAgent({ sessionId: 'legacy-path-migration', agentId: 'ordinary-child' });
+  const stateFile = join(getRunForTesting(run.id).directory, 'state.json');
+  const legacy = JSON.parse(readFileSync(stateFile, 'utf8'));
+  legacy.child_receipts[receipt.id].path = receipt.path;
+  writeFileSync(stateFile, `${JSON.stringify(legacy, null, 2)}\n`);
+
+  recordClaim(parent, 'Continue the migrated open run.', []);
+
+  const migratedText = readFileSync(stateFile, 'utf8');
+  const migrated = JSON.parse(migratedText);
+  assert.equal(migrated.child_receipts[receipt.id].path, undefined);
+  assert(!migratedText.includes(data));
+  assert.equal(readSealedReceipt(parent, receipt.id).id, receipt.id);
+});
+
+test('close-ready legacy runs drop persisted child receipt paths before sealing', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const parent = mintSession({ sessionId: 'legacy-path-seal', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Seal a migrated run.' });
+  addPrSnapshot(parent, stableSnapshot);
+  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, detached: true, path: 'fixture' });
+  const child = mintChild({ sessionId: 'legacy-path-seal', agentId: 'evaluator-child' });
+  claimEvaluation(child, evaluation.id);
+  recordEvaluation(child, evaluation.id, 'No material mismatch.', [], {
+    head_before: stableSnapshot.head_after,
+    head_after: stableSnapshot.head_after,
+    clean_before: true,
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
+  });
+  const receipt = sealChildByAgent({ sessionId: 'legacy-path-seal', agentId: 'evaluator-child' });
+  readSealedReceipt(parent, receipt.id);
+  requestClose(parent, 'Seal after migration.');
+  const stateFile = join(getRunForTesting(run.id).directory, 'state.json');
+  const legacy = JSON.parse(readFileSync(stateFile, 'utf8'));
+  legacy.child_receipts[receipt.id].path = receipt.path;
+  writeFileSync(stateFile, `${JSON.stringify(legacy, null, 2)}\n`);
+
+  assert.equal(checkpointOrSeal(parent).status, 'SEALED');
+
+  const sealedText = readFileSync(stateFile, 'utf8');
+  const sealed = JSON.parse(sealedText);
+  assert.equal(sealed.child_receipts[receipt.id].path, undefined);
+  assert(!sealedText.includes(data));
+  assert.equal(verifySealedRun(run.id).status, 'ALREADY_SEALED');
+});
+
 test('full run distinguishes hook evidence and seals only after evaluator receipt retrieval', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'parent-session', cwd: process.cwd() });

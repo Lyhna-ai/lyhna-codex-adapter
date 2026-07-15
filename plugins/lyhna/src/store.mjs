@@ -49,6 +49,14 @@ function runDir(runId) {
   return join(root(), 'runs', runId);
 }
 
+function childReceiptPath(runId, receiptId) {
+  return join(runDir(runId), 'child-receipts', receiptId, 'receipt.json');
+}
+
+function withChildReceiptPath(runId, receipt) {
+  return { ...receipt, path: childReceiptPath(runId, receipt.id) };
+}
+
 function statePath(runId) {
   return join(runDir(runId), 'state.json');
 }
@@ -75,8 +83,9 @@ function sessionLockPath(capability) {
 
 function verifyChildReceipts(state) {
   for (const receipt of Object.values(state.child_receipts || {})) {
-    assert(receipt.path && receipt.content_hash && existsSync(receipt.path), 'LOCAL_CHAIN_BROKEN');
-    assert(sha256(readFileSync(receipt.path, 'utf8')) === receipt.content_hash, 'LOCAL_CHAIN_BROKEN');
+    const path = childReceiptPath(state.id, receipt.id);
+    assert(receipt.content_hash && existsSync(path), 'LOCAL_CHAIN_BROKEN');
+    assert(sha256(readFileSync(path, 'utf8')) === receipt.content_hash, 'LOCAL_CHAIN_BROKEN');
   }
 }
 
@@ -179,7 +188,12 @@ function loadState(runId) {
   return state;
 }
 
+function stripLegacyChildReceiptPaths(state) {
+  for (const receipt of Object.values(state.child_receipts || {})) delete receipt.path;
+}
+
 function saveState(state) {
+  if (!state.sealed) stripLegacyChildReceiptPaths(state);
   atomicWriteJson(statePath(state.id), state);
 }
 
@@ -639,7 +653,7 @@ export function sealChildByAgent({ sessionId, agentId, hookPayload = null, hookD
     if (evaluation?.child_receipt_id) {
       atomicWriteJson(receiptIndexPath(evaluation.child_receipt_id), { receipt_id: evaluation.child_receipt_id, run_id: runId });
       saveState(current);
-      return current.child_receipts[evaluation.child_receipt_id];
+      return withChildReceiptPath(runId, current.child_receipts[evaluation.child_receipt_id]);
     }
 
     const assignedEvaluation = Object.values(current.evaluations).find((item) => item.child_agent_hash === agentHash);
@@ -652,7 +666,7 @@ export function sealChildByAgent({ sessionId, agentId, hookPayload = null, hookD
     if (!evaluation && child.receipt_id) {
       atomicWriteJson(receiptIndexPath(child.receipt_id), { receipt_id: child.receipt_id, run_id: runId });
       saveState(current);
-      return current.child_receipts[child.receipt_id];
+      return withChildReceiptPath(runId, current.child_receipts[child.receipt_id]);
     }
     const role = evaluation || assignedEvaluation ? 'evaluator' : 'delegated_agent';
     const status = evaluation ? evaluation.status : 'STOP_OBSERVED';
@@ -703,8 +717,7 @@ export function sealChildByAgent({ sessionId, agentId, hookPayload = null, hookD
         evaluation_status: assignedEvaluation.status
       } : {})
     };
-    const dir = join(runDir(runId), 'child-receipts', receiptId);
-    const path = join(dir, 'receipt.json');
+    const path = childReceiptPath(runId, receiptId);
     const content = canonicalJson(receipt, true);
     const contentHash = sha256(content);
     atomicWriteText(path, content);
@@ -714,7 +727,7 @@ export function sealChildByAgent({ sessionId, agentId, hookPayload = null, hookD
       payload: { receipt_id: receiptId, role, status, content_ref: contentHash },
       idempotencyKey: `child-seal:${receiptId}`
     });
-    current.child_receipts[receiptId] = { id: receiptId, role, status, path, content_hash: contentHash, retrieved: false };
+    current.child_receipts[receiptId] = { id: receiptId, role, status, content_hash: contentHash, retrieved: false };
     if (evaluation) evaluation.child_receipt_id = receiptId;
     if (child) {
       child.role = role;
@@ -723,7 +736,7 @@ export function sealChildByAgent({ sessionId, agentId, hookPayload = null, hookD
     }
     atomicWriteJson(receiptIndexPath(receiptId), { receipt_id: receiptId, run_id: runId });
     saveState(current);
-    return current.child_receipts[receiptId];
+    return withChildReceiptPath(runId, current.child_receipts[receiptId]);
   });
 }
 
@@ -750,7 +763,7 @@ export function readSealedReceipt(capability, receiptId) {
     if (current.sealed) repairSeal(runId);
     const receipt = current.child_receipts[receiptId];
     assert(receipt, 'CHILD_RECEIPT_NOT_FOUND');
-    const content = readFileSync(receipt.path, 'utf8');
+    const content = readFileSync(childReceiptPath(runId, receiptId), 'utf8');
     assert(receipt.content_hash === sha256(content), 'LOCAL_CHAIN_BROKEN');
     if (current.sealed) return JSON.parse(content);
     appendEventUnlocked(runId, current, {
@@ -825,6 +838,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       idempotencyKey: `seal:${runId}`
     });
     const { events, tip } = parseLedger(runId);
+    stripLegacyChildReceiptPaths(current);
     current.sealed = true;
     current.ledger_count = events.length;
     current.ledger_tip = tip;

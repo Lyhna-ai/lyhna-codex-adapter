@@ -61,7 +61,11 @@ test('real hook processes mint distinct capabilities and repeated delivery is id
   const childReceipts = Object.values(getRunForTesting(run.id).state.child_receipts);
   assert.equal(childReceipts.length, 1);
   assert.equal(childReceipts[0].role, 'delegated_agent');
-  const childLifecycle = JSON.parse(readFileSync(childReceipts[0].path, 'utf8')).lifecycle;
+  assert.equal(childReceipts[0].path, undefined);
+  const current = getRunForTesting(run.id);
+  const childPath = join(current.directory, 'child-receipts', childReceipts[0].id, 'receipt.json');
+  const childLifecycle = JSON.parse(readFileSync(childPath, 'utf8')).lifecycle;
+  assert(!readFileSync(join(current.directory, 'state.json'), 'utf8').includes(data));
   assert.equal(childLifecycle.start.support, 'lifecycle_observed_not_execution');
   assert.equal(childLifecycle.stop.support, 'lifecycle_observed_not_execution');
   assert.match(childLifecycle.start.event_ref, /^[a-f0-9]{64}$/);
