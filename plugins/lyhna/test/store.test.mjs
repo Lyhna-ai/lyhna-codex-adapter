@@ -62,12 +62,16 @@ test('full run distinguishes hook evidence and seals only after evaluator receip
   const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, path: 'fixture' });
   const child = mintChild({ sessionId: 'parent-session', agentId: 'evaluator-agent' });
   claimEvaluation(child, evaluation.id);
-  recordEvaluation(child, evaluation.id, 'Seeded requirement mismatch remains.', ['test:seeded-mismatch'], {
+  const seededCheckout = {
     head_before: stableSnapshot.head_after,
     head_after: stableSnapshot.head_after,
     clean_before: true,
     clean_after: true
-  });
+  };
+  recordEvaluation(child, evaluation.id, 'Seeded requirement mismatch remains.', ['test:seeded-mismatch'], seededCheckout);
+  const retriedFinding = recordEvaluation(child, evaluation.id, 'Seeded requirement mismatch remains.', ['test:seeded-mismatch'], seededCheckout);
+  assert.equal(retriedFinding.findings.length, 1);
+  assert.equal(getRunForTesting(state.id).events.filter((event) => event.type === 'evaluation_finding').length, 1);
   const multiFinding = recordEvaluation(child, evaluation.id, 'Documentation evidence was also examined.', ['test:docs'], {
     head_before: stableSnapshot.head_after,
     head_after: stableSnapshot.head_after,
@@ -312,6 +316,27 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
   assert.equal(freshReceipt.id, `child_${freshEvaluation.id}`);
   readSealedReceipt(parent, freshReceipt.id);
   requestClose(parent, 'Fresh evaluation supersedes stale history.');
+  const latestSnapshot = {
+    ...stableSnapshot,
+    id: 'pr_latest',
+    head_before: 'e'.repeat(40),
+    head_after: 'e'.repeat(40)
+  };
+  addPrSnapshot(parent, latestSnapshot);
+  const deferred = checkpointOrSeal(parent);
+  assert.equal(deferred.status, 'CLOSE_DEFERRED');
+  assert(deferred.blockers.includes('EVALUATION_pr_latest_REQUIRED'));
+  const latestEvaluation = beginEvaluation(parent, latestSnapshot.id, { head: latestSnapshot.head_after, clean: true, path: 'fixture-latest' });
+  const latestChild = mintChild({ sessionId: 'stale-parent', agentId: 'latest-evaluator' });
+  claimEvaluation(latestChild, latestEvaluation.id);
+  recordEvaluation(latestChild, latestEvaluation.id, 'Latest exact-head finding.', [], {
+    head_before: latestSnapshot.head_after,
+    head_after: latestSnapshot.head_after,
+    clean_before: true,
+    clean_after: true
+  });
+  const latestReceipt = sealChildByAgent({ sessionId: 'stale-parent', agentId: 'latest-evaluator' });
+  readSealedReceipt(parent, latestReceipt.id);
   assert.equal(checkpointOrSeal(parent).status, 'SEALED');
   current = getRunForTesting(run.id).state;
   assert.equal(current.evaluations[evaluation.id].status, 'STALE');

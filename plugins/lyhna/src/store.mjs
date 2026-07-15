@@ -505,13 +505,14 @@ export function recordEvaluation(childCapability, evaluationId, finding, evidenc
       checkout_clean_after: cleanAfter,
       checkout_integrity: integrityOk ? 'CONSISTENT_CLEAN' : 'CHECKOUT_INTEGRITY_EXCEPTION'
     };
+    const findingAlreadyRecorded = item.findings.some((existing) => sha256(canonicalJson(existing)) === sha256(canonicalJson(payload)));
     appendEventUnlocked(runId, current, {
       type: 'evaluation_finding',
       origin: 'evaluator_reported',
       payload,
       idempotencyKey: `evaluation-finding:${evaluationId}:${sha256(canonicalJson(payload))}`
     });
-    item.findings.push(payload);
+    if (!findingAlreadyRecorded) item.findings.push(payload);
     item.checkout_head_before = headBefore;
     item.checkout_head_after = headAfter;
     item.checkout_clean_before = cleanBefore;
@@ -666,14 +667,20 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       return { status: 'CHECKPOINTED', run_id: runId };
     }
     const evaluations = Object.values(current.evaluations);
-    const closingEvaluations = evaluations.filter((evaluation) => evaluation.status !== 'STALE');
+    const closingSnapshots = Object.values(current.pr_snapshots).filter((snapshot) => snapshot.status === 'CONSISTENT');
     const blockers = [];
-    if (!Object.keys(current.pr_snapshots).length) blockers.push('PR_SNAPSHOT_REQUIRED');
-    if (!closingEvaluations.length) blockers.push('EVALUATION_REQUIRED');
-    for (const evaluation of closingEvaluations) {
-      if (!['RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION'].includes(evaluation.status)) blockers.push(`EVALUATION_${evaluation.id}_${evaluation.status}`);
-      if (!evaluation.child_receipt_id) blockers.push(`CHILD_RECEIPT_${evaluation.id}_OPEN`);
-      if (!evaluation.child_receipt_retrieved) blockers.push(`CHILD_RECEIPT_${evaluation.id}_NOT_RETRIEVED`);
+    if (!closingSnapshots.length) blockers.push('PR_SNAPSHOT_REQUIRED');
+    for (const snapshot of closingSnapshots) {
+      const snapshotEvaluations = evaluations.filter((evaluation) => evaluation.snapshot_id === snapshot.id && evaluation.status !== 'STALE');
+      if (!snapshotEvaluations.length) {
+        blockers.push(`EVALUATION_${snapshot.id}_REQUIRED`);
+        continue;
+      }
+      for (const evaluation of snapshotEvaluations) {
+        if (!['RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION'].includes(evaluation.status)) blockers.push(`EVALUATION_${evaluation.id}_${evaluation.status}`);
+        if (!evaluation.child_receipt_id) blockers.push(`CHILD_RECEIPT_${evaluation.id}_OPEN`);
+        if (!evaluation.child_receipt_retrieved) blockers.push(`CHILD_RECEIPT_${evaluation.id}_NOT_RETRIEVED`);
+      }
     }
     if (blockers.length) {
       blockers.sort();
