@@ -189,6 +189,33 @@ test('stale lock ownership is recovered and free-form credentials never persist'
   assert(!all.includes('private customer feature'));
 });
 
+test('invocation capture requires a leading Lyhna mention token', { concurrency: false }, (t) => {
+  isolatedData(t);
+  for (const [index, prompt] of [
+    'Email adam@lyhna.example about the report.',
+    'Do not invoke @lyhna for this task.',
+    'Quoted example: "@lyhna review this PR".',
+    '`@lyhna` is the documented syntax.',
+    '@lyhnatic is a different token.',
+    '@lyhna-reviewer is a different token.',
+    '$lyhna-other is a different token.',
+    '[@Lyhna](plugin://lyhna-reviewer@lyhna-ai) is a different plugin.',
+    '[@Lyhna](plugin://lyhna-codex-adapter@another-marketplace) is a different marketplace.'
+  ].entries()) {
+    assert.equal(rememberInvocation({ sessionId: `negative-${index}`, prompt }), false);
+    const parent = mintSession({ sessionId: `negative-${index}`, cwd: process.cwd() });
+    assert.equal(beginRun(parent, { mode: 'full', objective: 'Fallback objective.' }).objective_origin, 'agent_reported');
+  }
+  assert.equal(rememberInvocation({ sessionId: 'positive-at', prompt: '  @Lyhna review PR #1.' }), true);
+  const atParent = mintSession({ sessionId: 'positive-at', cwd: process.cwd() });
+  assert.equal(beginRun(atParent, { mode: 'full', objective: 'Fallback objective.' }).objective_origin, 'runtime_hook');
+  assert.equal(rememberInvocation({ sessionId: 'positive-dollar', prompt: '$lyhna: examine this PR.' }), true);
+  assert.equal(rememberInvocation({
+    sessionId: 'positive-plugin',
+    prompt: ' [@Lyhna](plugin://lyhna-codex-adapter@lyhna-ai) examine this PR.'
+  }), true);
+});
+
 test('dirty evaluator tree is an explicit integrity exception', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'dirty-parent', cwd: process.cwd() });

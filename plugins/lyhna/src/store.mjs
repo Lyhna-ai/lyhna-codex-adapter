@@ -341,11 +341,16 @@ export function beginRun(capability, { mode, objective = '' }) {
 }
 
 export function rememberInvocation({ sessionId, prompt }) {
-  if (!sessionId || !/@lyhna|\$lyhna/i.test(String(prompt || ''))) return false;
+  const promptText = String(prompt || '');
+  const leadingText = promptText.trimStart();
+  const literalMention = /^(?:@lyhna|\$lyhna)(?=$|[\s,:;.!?])/i.test(leadingText);
+  const structuredPluginMention = /^\[@lyhna\]\(plugin:\/\/lyhna-codex-adapter@lyhna-ai\)(?=$|\s)/i.test(leadingText);
+  const explicitlyInvoked = literalMention || structuredPluginMention;
+  if (!sessionId || !explicitlyInvoked) return false;
   const sessionHash = sha256(String(sessionId));
   atomicWriteJson(join(root(), 'pending', `${sessionHash}.json`), {
-    summary: promptSynopsis(prompt),
-    ref: sha256(String(prompt))
+    summary: promptSynopsis(promptText),
+    ref: sha256(promptText)
   });
   return true;
 }
