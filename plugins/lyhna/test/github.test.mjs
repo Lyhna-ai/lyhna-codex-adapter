@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { prepareEvaluatorCheckout, snapshotPr } from '../src/github.mjs';
+import { inspectCheckout, prepareEvaluatorCheckout, snapshotPr } from '../src/github.mjs';
 
 function runnerWithHeads(beforeHead, afterHead) {
   return (_command, args) => {
@@ -54,4 +54,16 @@ test('evaluator checkout rejects a source repository mismatch before fetching', 
     runner
   }), /SOURCE_REPOSITORY_MISMATCH/);
   assert.equal(calls.length, 1);
+});
+
+test('checkout inspection distinguishes detached HEAD from a branch at the same commit', () => {
+  const head = 'f'.repeat(40);
+  const runner = (_command, args) => {
+    const joined = args.join(' ');
+    if (joined === 'rev-parse HEAD') return head;
+    if (joined === 'status --porcelain --untracked-files=no') return '';
+    if (joined === 'rev-parse --abbrev-ref HEAD') return 'feature/attached';
+    throw new Error(`unexpected command ${joined}`);
+  };
+  assert.deepEqual(inspectCheckout({ path: 'fixture', runner }), { head, clean: true, detached: false });
 });

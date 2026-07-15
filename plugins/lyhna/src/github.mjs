@@ -113,7 +113,8 @@ function git(runner, cwd, args) {
 export function inspectCheckout({ path, runner = processRunner }) {
   const head = git(runner, path, ['rev-parse', 'HEAD']);
   const dirty = git(runner, path, ['status', '--porcelain', '--untracked-files=no']);
-  return { head: head.trim(), clean: dirty.trim() === '' };
+  const branch = git(runner, path, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  return { head: head.trim(), clean: dirty.trim() === '', detached: branch.trim() === 'HEAD' };
 }
 
 function repositoryFromRemote(value) {
@@ -131,7 +132,7 @@ export function prepareEvaluatorCheckout({ sourceCwd, destination, head, reposit
   mkdirSync(dirname(destination), { recursive: true });
   if (existsSync(destination)) {
     const existing = inspectCheckout({ path: destination, runner });
-    assert(existing.head === head && existing.clean, 'EXISTING_CHECKOUT_MISMATCH');
+    assert(existing.head === head && existing.clean && existing.detached, 'EXISTING_CHECKOUT_MISMATCH');
     return { path: join(destination), ...existing };
   }
   try {
@@ -142,6 +143,6 @@ export function prepareEvaluatorCheckout({ sourceCwd, destination, head, reposit
   }
   git(runner, sourceCwd, ['worktree', 'add', '--detach', destination, head]);
   const inspected = inspectCheckout({ path: destination, runner });
-  assert(inspected.head === head, 'CHECKOUT_HEAD_MISMATCH');
+  assert(inspected.head === head && inspected.detached, 'CHECKOUT_HEAD_MISMATCH');
   return { path: join(destination), ...inspected };
 }

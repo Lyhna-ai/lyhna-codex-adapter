@@ -1,6 +1,6 @@
 {
   "name": "lyhna-codex-adapter",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "description": "Start and close local, evidence-scoped Lyhna witnessed runs in Codex.",
   "author": {
     "name": "Lyhna AI"

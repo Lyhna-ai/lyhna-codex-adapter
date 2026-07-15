@@ -459,7 +459,7 @@ export function beginEvaluation(capability, snapshotId, checkout = {}) {
     const snapshot = current.pr_snapshots[snapshotId];
     assert(snapshot, 'SNAPSHOT_NOT_FOUND');
     assert(snapshot.status === 'CONSISTENT', 'INCONSISTENT_SNAPSHOT');
-    assert(checkout.path && checkout.head === snapshot.head_after && checkout.clean === true, 'EVALUATOR_CHECKOUT_REQUIRED');
+    assert(checkout.path && checkout.head === snapshot.head_after && checkout.clean === true && checkout.detached === true, 'EVALUATOR_CHECKOUT_REQUIRED');
     const existing = Object.values(current.evaluations).find((item) => item.snapshot_id === snapshotId && !['STALE', 'INVALID'].includes(item.status));
     if (existing) return existing;
     const id = `eval_${sha256(`${runId}:${snapshotId}`).slice(0, 24)}`;
@@ -479,6 +479,7 @@ export function beginEvaluation(capability, snapshotId, checkout = {}) {
       checkout_path: checkout.path,
       checkout_head_before: checkout.head,
       checkout_clean_before: checkout.clean,
+      checkout_detached_before: checkout.detached,
       findings: []
     };
     saveState(current);
@@ -529,7 +530,9 @@ export function recordEvaluation(childCapability, evaluationId, finding, evidenc
     const cleanAfter = checkout.clean_after ?? null;
     const headBefore = checkout.head_before ?? item.checkout_head_before;
     const headAfter = checkout.head_after ?? null;
-    const integrityOk = headBefore === item.expected_head && headAfter === item.expected_head && cleanBefore === true && cleanAfter === true;
+    const detachedBefore = checkout.detached_before ?? item.checkout_detached_before;
+    const detachedAfter = checkout.detached_after ?? null;
+    const integrityOk = headBefore === item.expected_head && headAfter === item.expected_head && cleanBefore === true && cleanAfter === true && detachedBefore === true && detachedAfter === true;
     const payload = {
       ...sanitizeClaim(finding, evidenceRefs),
       evaluation_request_id: evaluationId,
@@ -538,6 +541,8 @@ export function recordEvaluation(childCapability, evaluationId, finding, evidenc
       checkout_head_after: headAfter,
       checkout_clean_before: cleanBefore,
       checkout_clean_after: cleanAfter,
+      checkout_detached_before: detachedBefore,
+      checkout_detached_after: detachedAfter,
       checkout_integrity: integrityOk ? 'CONSISTENT_CLEAN' : 'CHECKOUT_INTEGRITY_EXCEPTION'
     };
     const findingAlreadyRecorded = item.findings.some((existing) => sha256(canonicalJson(existing)) === sha256(canonicalJson(payload)));
@@ -552,6 +557,8 @@ export function recordEvaluation(childCapability, evaluationId, finding, evidenc
     item.checkout_head_after = headAfter;
     item.checkout_clean_before = cleanBefore;
     item.checkout_clean_after = cleanAfter;
+    item.checkout_detached_before = detachedBefore;
+    item.checkout_detached_after = detachedAfter;
     item.status = integrityOk && !priorIntegrityException ? 'RECORDED' : 'CHECKOUT_INTEGRITY_EXCEPTION';
     saveState(current);
     return item;

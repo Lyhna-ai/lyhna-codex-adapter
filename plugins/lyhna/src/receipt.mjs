@@ -33,6 +33,8 @@ export function buildReceipt(state, events) {
     checkout_head_after: evaluation.checkout_head_after || null,
     checkout_clean_before: evaluation.checkout_clean_before ?? null,
     checkout_clean_after: evaluation.checkout_clean_after ?? null,
+    checkout_detached_before: evaluation.checkout_detached_before ?? null,
+    checkout_detached_after: evaluation.checkout_detached_after ?? null,
     child_receipt_id: evaluation.child_receipt_id || null,
     child_receipt_retrieved: Boolean(evaluation.child_receipt_retrieved)
   })).sort((a, b) => a.id.localeCompare(b.id));

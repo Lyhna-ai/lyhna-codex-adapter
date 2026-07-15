@@ -21,7 +21,7 @@ export const toolDefinitions = [
   ['snapshot_pr', 'Capture sanitized GitHub metadata at an exact observed PR head.', ['session_capability', 'repository', 'pr_number']],
   ['begin_evaluation', 'Create an evaluator request and detached exact-head checkout.', ['session_capability', 'pr_snapshot_id']],
   ['claim_evaluation', 'Bind a hook-issued child capability to an evaluator request.', ['child_capability', 'evaluation_request_id']],
-  ['record_evaluation', 'Record an attributed evaluator finding and checkout integrity observations.', ['child_capability', 'evaluation_request_id', 'finding']],
+  ['record_evaluation', 'Record an attributed evaluator finding and checkout integrity observations.', ['child_capability', 'evaluation_request_id', 'finding', 'checkout_head_before', 'checkout_clean_before', 'checkout_detached_before']],
   ['refresh_pr', 'Explicitly recheck whether a PR snapshot head is current.', ['session_capability', 'pr_snapshot_id']],
   ['list_child_receipts', 'List sealed child receipts for the active run.', ['session_capability']],
   ['read_sealed_receipt', 'Retrieve and mark a child receipt as read by the parent.', ['session_capability', 'receipt_id']],
@@ -48,6 +48,8 @@ export const toolDefinitions = [
       checkout_head_after: { type: 'string' },
       checkout_clean_before: { type: 'boolean' },
       checkout_clean_after: { type: 'boolean' },
+      checkout_detached_before: { type: 'boolean' },
+      checkout_detached_after: { type: 'boolean' },
       receipt_id: { type: 'string' },
       reason: { type: 'string' }
     },
@@ -100,15 +102,19 @@ export function createService({ githubRunner } = {}) {
             head_before: args.checkout_head_before,
             head_after: args.checkout_head_after,
             clean_before: args.checkout_clean_before,
-            clean_after: args.checkout_clean_after
+            clean_after: args.checkout_clean_after,
+            detached_before: args.checkout_detached_before,
+            detached_after: args.checkout_detached_after
           };
           if (evaluation?.checkout_path) {
             const live = inspectCheckout({ path: evaluation.checkout_path, runner: githubRunner });
             observed = {
-              head_before: evaluation.checkout_head_before,
+              head_before: args.checkout_head_before,
               head_after: live.head,
-              clean_before: evaluation.checkout_clean_before,
-              clean_after: live.clean
+              clean_before: args.checkout_clean_before,
+              clean_after: live.clean,
+              detached_before: args.checkout_detached_before,
+              detached_after: live.detached
             };
           }
           return recordEvaluationStore(args.child_capability, args.evaluation_request_id, args.finding, args.evidence_refs || [], observed);

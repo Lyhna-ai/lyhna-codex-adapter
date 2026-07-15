@@ -34,7 +34,8 @@ test('capabilities are hook-bound, isolated, and parent cannot self-review', { c
   assert.notEqual(mintSession({ sessionId: 'session-b', cwd: process.cwd() }), parent);
   const run = beginRun(parent, { mode: 'full', objective: 'Build the requested feature.' });
   addPrSnapshot(parent, stableSnapshot);
-  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, path: 'fixture' });
+  assert.throws(() => beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, detached: false, path: 'attached-fixture' }), /EVALUATOR_CHECKOUT_REQUIRED/);
+  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, detached: true, path: 'fixture' });
   assert.throws(() => claimEvaluation(parent, evaluation.id), /CHILD_CAPABILITY_REQUIRED/);
   const siblingSession = mintSession({ sessionId: 'session-c', cwd: process.cwd() });
   beginRun(siblingSession, { mode: 'full', objective: 'Other run' });
@@ -61,14 +62,16 @@ test('full run distinguishes hook evidence and seals only after evaluator receip
   assert.equal(checkpointOrSeal(parent).status, 'CHECKPOINTED');
 
   addPrSnapshot(parent, stableSnapshot);
-  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, path: 'fixture' });
+  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, detached: true, path: 'fixture' });
   const child = mintChild({ sessionId: 'parent-session', agentId: 'evaluator-agent' });
   claimEvaluation(child, evaluation.id);
   const seededCheckout = {
     head_before: stableSnapshot.head_after,
     head_after: stableSnapshot.head_after,
     clean_before: true,
-    clean_after: true
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
   };
   recordEvaluation(child, evaluation.id, 'Seeded requirement mismatch remains.', ['test:seeded-mismatch'], seededCheckout);
   const retriedFinding = recordEvaluation(child, evaluation.id, 'Seeded requirement mismatch remains.', ['test:seeded-mismatch'], seededCheckout);
@@ -78,7 +81,9 @@ test('full run distinguishes hook evidence and seals only after evaluator receip
     head_before: stableSnapshot.head_after,
     head_after: stableSnapshot.head_after,
     clean_before: true,
-    clean_after: true
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
   });
   assert.equal(multiFinding.findings.length, 2);
   requestClose(parent, 'Evaluation recorded.');
@@ -101,7 +106,9 @@ test('full run distinguishes hook evidence and seals only after evaluator receip
     head_before: stableSnapshot.head_after,
     head_after: stableSnapshot.head_after,
     clean_before: true,
-    clean_after: true
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
   }), /EVALUATION_RECEIPT_SEALED/);
   const childOriginal = readFileSync(childReceipt.path, 'utf8');
   const evaluatorContent = JSON.parse(childOriginal);
@@ -132,7 +139,7 @@ test('full run distinguishes hook evidence and seals only after evaluator receip
   const nextRun = beginRun(parent, { mode: 'full', objective: 'A new explicit run.' });
   assert.notEqual(nextRun.id, state.id);
   addPrSnapshot(parent, stableSnapshot);
-  const nextEvaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, path: 'fixture' });
+  const nextEvaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, detached: true, path: 'fixture' });
   const reboundChild = mintChild({ sessionId: 'parent-session', agentId: 'evaluator-agent' });
   assert.notEqual(reboundChild, child);
   assert.equal(claimEvaluation(reboundChild, nextEvaluation.id).status, 'CLAIMED');
@@ -145,10 +152,10 @@ test('sealed state and rendered receipt tampering are detected', { concurrency: 
   const parent = mintSession({ sessionId: 'artifact-tamper', cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'Bind rendered artifacts.' });
   addPrSnapshot(parent, stableSnapshot);
-  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, path: 'fixture' });
+  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, detached: true, path: 'fixture' });
   const child = mintChild({ sessionId: 'artifact-tamper', agentId: 'artifact-evaluator' });
   claimEvaluation(child, evaluation.id);
-  recordEvaluation(child, evaluation.id, 'Examined.', [], { head_before: stableSnapshot.head_after, head_after: stableSnapshot.head_after, clean_before: true, clean_after: true });
+  recordEvaluation(child, evaluation.id, 'Examined.', [], { head_before: stableSnapshot.head_after, head_after: stableSnapshot.head_after, clean_before: true, clean_after: true, detached_before: true, detached_after: true });
   const childReceipt = sealChildByAgent({ sessionId: 'artifact-tamper', agentId: 'artifact-evaluator' });
   readSealedReceipt(parent, childReceipt.id);
   requestClose(parent, 'Close.');
@@ -257,21 +264,25 @@ test('dirty evaluator tree is an explicit integrity exception', { concurrency: f
   const parent = mintSession({ sessionId: 'dirty-parent', cwd: process.cwd() });
   beginRun(parent, { mode: 'full', objective: 'Check dirty state.' });
   addPrSnapshot(parent, stableSnapshot);
-  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, path: 'fixture' });
+  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, detached: true, path: 'fixture' });
   const child = mintChild({ sessionId: 'dirty-parent', agentId: 'dirty-evaluator' });
   claimEvaluation(child, evaluation.id);
   const result = recordEvaluation(child, evaluation.id, 'Finding from modified tree.', [], {
     head_before: stableSnapshot.head_after,
     head_after: stableSnapshot.head_after,
     clean_before: true,
-    clean_after: false
+    clean_after: false,
+    detached_before: true,
+    detached_after: true
   });
   assert.equal(result.status, 'CHECKOUT_INTEGRITY_EXCEPTION');
   const laterCleanFinding = recordEvaluation(child, evaluation.id, 'A later check was clean.', [], {
     head_before: stableSnapshot.head_after,
     head_after: stableSnapshot.head_after,
     clean_before: true,
-    clean_after: true
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
   });
   assert.equal(laterCleanFinding.findings.length, 2);
   assert.equal(laterCleanFinding.status, 'CHECKOUT_INTEGRITY_EXCEPTION');
@@ -284,14 +295,16 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
   addPrSnapshot(parent, { ...stableSnapshot, id: 'bad', head_after: 'c'.repeat(40), status: 'INCONSISTENT_SNAPSHOT' });
   assert.throws(() => beginEvaluation(parent, 'bad'), /INCONSISTENT_SNAPSHOT/);
   addPrSnapshot(parent, stableSnapshot);
-  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, path: 'fixture' });
+  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, detached: true, path: 'fixture' });
   const child = mintChild({ sessionId: 'stale-parent', agentId: 'stale-evaluator' });
   claimEvaluation(child, evaluation.id);
   recordEvaluation(child, evaluation.id, 'Exact-head finding.', [], {
     head_before: stableSnapshot.head_after,
     head_after: stableSnapshot.head_after,
     clean_before: true,
-    clean_after: true
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
   });
   const refresh = markSnapshotRefreshed(parent, stableSnapshot.id, 'd'.repeat(40));
   assert.equal(refresh.stale, true);
@@ -299,7 +312,9 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
     head_before: stableSnapshot.head_after,
     head_after: stableSnapshot.head_after,
     clean_before: true,
-    clean_after: true
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
   }), /EVALUATION_NOT_RECORDABLE/);
   const run = beginRun(parent, { mode: 'full' });
   let current = getRunForTesting(run.id).state;
@@ -308,7 +323,7 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
 
   const unclaimedSnapshot = { ...stableSnapshot, id: 'pr_stale_unclaimed' };
   addPrSnapshot(parent, unclaimedSnapshot);
-  const unclaimed = beginEvaluation(parent, unclaimedSnapshot.id, { head: unclaimedSnapshot.head_after, clean: true, path: 'fixture-unclaimed' });
+  const unclaimed = beginEvaluation(parent, unclaimedSnapshot.id, { head: unclaimedSnapshot.head_after, clean: true, detached: true, path: 'fixture-unclaimed' });
   markSnapshotRefreshed(parent, unclaimedSnapshot.id, 'e'.repeat(40));
   const unclaimedChild = mintChild({ sessionId: 'stale-parent', agentId: 'unclaimed-evaluator' });
   assert.throws(() => claimEvaluation(unclaimedChild, unclaimed.id), /EVALUATION_NOT_CLAIMABLE/);
@@ -321,7 +336,7 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
     head_after: 'd'.repeat(40)
   };
   addPrSnapshot(parent, freshSnapshot);
-  const freshEvaluation = beginEvaluation(parent, freshSnapshot.id, { head: freshSnapshot.head_after, clean: true, path: 'fixture-fresh' });
+  const freshEvaluation = beginEvaluation(parent, freshSnapshot.id, { head: freshSnapshot.head_after, clean: true, detached: true, path: 'fixture-fresh' });
   const freshChild = mintChild({ sessionId: 'stale-parent', agentId: 'fresh-evaluator' });
   assert.notEqual(freshChild, child);
   claimEvaluation(freshChild, freshEvaluation.id);
@@ -329,7 +344,9 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
     head_before: freshSnapshot.head_after,
     head_after: freshSnapshot.head_after,
     clean_before: true,
-    clean_after: true
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
   });
   const freshReceipt = sealChildByAgent({ sessionId: 'stale-parent', agentId: 'fresh-evaluator' });
   assert.equal(freshReceipt.id, `child_${freshEvaluation.id}`);
@@ -345,14 +362,16 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
   const deferred = checkpointOrSeal(parent);
   assert.equal(deferred.status, 'CLOSE_DEFERRED');
   assert(deferred.blockers.includes('EVALUATION_pr_latest_REQUIRED'));
-  const latestEvaluation = beginEvaluation(parent, latestSnapshot.id, { head: latestSnapshot.head_after, clean: true, path: 'fixture-latest' });
+  const latestEvaluation = beginEvaluation(parent, latestSnapshot.id, { head: latestSnapshot.head_after, clean: true, detached: true, path: 'fixture-latest' });
   const latestChild = mintChild({ sessionId: 'stale-parent', agentId: 'latest-evaluator' });
   claimEvaluation(latestChild, latestEvaluation.id);
   recordEvaluation(latestChild, latestEvaluation.id, 'Latest exact-head finding.', [], {
     head_before: latestSnapshot.head_after,
     head_after: latestSnapshot.head_after,
     clean_before: true,
-    clean_after: true
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
   });
   const latestReceipt = sealChildByAgent({ sessionId: 'stale-parent', agentId: 'latest-evaluator' });
   readSealedReceipt(parent, latestReceipt.id);
@@ -375,10 +394,10 @@ test('ledger mutation, deletion, reordering, and sealed-tail truncation are dete
   const parent = mintSession({ sessionId: 'tamper-parent', cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'Tamper test.' });
   addPrSnapshot(parent, stableSnapshot);
-  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, path: 'fixture' });
+  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, detached: true, path: 'fixture' });
   const child = mintChild({ sessionId: 'tamper-parent', agentId: 'tamper-evaluator' });
   claimEvaluation(child, evaluation.id);
-  recordEvaluation(child, evaluation.id, 'No material mismatch.', [], { head_before: stableSnapshot.head_after, head_after: stableSnapshot.head_after, clean_before: true, clean_after: true });
+  recordEvaluation(child, evaluation.id, 'No material mismatch.', [], { head_before: stableSnapshot.head_after, head_after: stableSnapshot.head_after, clean_before: true, clean_after: true, detached_before: true, detached_after: true });
   const receipt = sealChildByAgent({ sessionId: 'tamper-parent', agentId: 'tamper-evaluator' });
   readSealedReceipt(parent, receipt.id);
   requestClose(parent, 'Done');
@@ -414,10 +433,10 @@ test('open ledger tail and interrupted seal artifacts recover idempotently', { c
   assert.equal(readLedger(run.id).length, current.events.length);
 
   addPrSnapshot(parent, stableSnapshot);
-  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, path: 'fixture' });
+  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, detached: true, path: 'fixture' });
   const child = mintChild({ sessionId: 'recovery-parent', agentId: 'recovery-evaluator' });
   claimEvaluation(child, evaluation.id);
-  recordEvaluation(child, evaluation.id, 'Recovery path examined.', [], { head_before: stableSnapshot.head_after, head_after: stableSnapshot.head_after, clean_before: true, clean_after: true });
+  recordEvaluation(child, evaluation.id, 'Recovery path examined.', [], { head_before: stableSnapshot.head_after, head_after: stableSnapshot.head_after, clean_before: true, clean_after: true, detached_before: true, detached_after: true });
   const receipt = sealChildByAgent({ sessionId: 'recovery-parent', agentId: 'recovery-evaluator' });
   readSealedReceipt(parent, receipt.id);
   requestClose(parent, 'Close recovery test.');

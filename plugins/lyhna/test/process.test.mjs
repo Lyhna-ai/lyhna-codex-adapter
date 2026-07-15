@@ -82,14 +82,16 @@ test('concurrent child start and parent close never seal an accepted child outsi
   const parent = mintSession({ sessionId: 'race-session', cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'Race child registration against close.' });
   addPrSnapshot(parent, stableSnapshot);
-  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, path: 'fixture' });
+  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, detached: true, path: 'fixture' });
   const evaluator = mintChild({ sessionId: 'race-session', agentId: 'race-evaluator' });
   claimEvaluation(evaluator, evaluation.id);
   recordEvaluation(evaluator, evaluation.id, 'Race precondition examined.', [], {
     head_before: stableSnapshot.head_after,
     head_after: stableSnapshot.head_after,
     clean_before: true,
-    clean_after: true
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
   });
   const evaluatorReceipt = sealChildByAgent({ sessionId: 'race-session', agentId: 'race-evaluator' });
   readSealedReceipt(parent, evaluatorReceipt.id);
