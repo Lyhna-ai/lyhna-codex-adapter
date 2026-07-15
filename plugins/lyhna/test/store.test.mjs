@@ -56,6 +56,8 @@ test('full run distinguishes hook evidence and seals only after evaluator receip
   recordHookForParent(parent, sanitizeHook({ hook_event_name: 'PostToolUse', tool_name: 'exec_command', tool_use_id: 'call-1', status: 'failed' }), 'post-1');
   recordHookForParent(parent, sanitizeHook({ hook_event_name: 'PermissionRequest', tool_name: 'exec_command', event_id: 'perm-1' }), 'perm-1');
   recordClaim(parent, 'The feature is complete.', []);
+  const ordinaryChild = mintChild({ sessionId: 'parent-session', agentId: 'ordinary-worker' });
+  assert.notEqual(ordinaryChild, parent);
   assert.equal(checkpointOrSeal(parent).status, 'CHECKPOINTED');
 
   addPrSnapshot(parent, stableSnapshot);
@@ -80,7 +82,19 @@ test('full run distinguishes hook evidence and seals only after evaluator receip
   });
   assert.equal(multiFinding.findings.length, 2);
   requestClose(parent, 'Evaluation recorded.');
-  assert.equal(checkpointOrSeal(parent).status, 'CLOSE_DEFERRED');
+  const openChildren = checkpointOrSeal(parent);
+  assert.equal(openChildren.status, 'CLOSE_DEFERRED');
+  assert(openChildren.blockers.some((blocker) => /^CHILD_child_agent_.*_OPEN$/.test(blocker)));
+  const ordinaryReceipt = sealChildByAgent({ sessionId: 'parent-session', agentId: 'ordinary-worker' });
+  assert.equal(ordinaryReceipt.role, 'delegated_agent');
+  assert.equal(ordinaryReceipt.status, 'STOP_OBSERVED');
+  assert.equal(sealChildByAgent({ sessionId: 'parent-session', agentId: 'ordinary-worker' }).id, ordinaryReceipt.id);
+  const ordinaryContent = readSealedReceipt(parent, ordinaryReceipt.id);
+  assert.equal(ordinaryContent.lifecycle.start.support, 'lifecycle_observed_not_execution');
+  assert.equal(ordinaryContent.lifecycle.stop.support, 'lifecycle_observed_not_execution');
+  assert.match(ordinaryContent.lifecycle.start.event_ref, /^[a-f0-9]{64}$/);
+  assert.match(ordinaryContent.lifecycle.stop.event_ref, /^[a-f0-9]{64}$/);
+  assert.match(ordinaryContent.limitations[0], /lifecycle coverage only/);
   const childReceipt = sealChildByAgent({ sessionId: 'parent-session', agentId: 'evaluator-agent' });
   assert.equal(childReceipt.status, 'RECORDED');
   assert.throws(() => recordEvaluation(child, evaluation.id, 'Late finding.', [], {
@@ -90,10 +104,13 @@ test('full run distinguishes hook evidence and seals only after evaluator receip
     clean_after: true
   }), /EVALUATION_RECEIPT_SEALED/);
   const childOriginal = readFileSync(childReceipt.path, 'utf8');
+  const evaluatorContent = JSON.parse(childOriginal);
+  assert.match(evaluatorContent.lifecycle.start.event_ref, /^[a-f0-9]{64}$/);
+  assert.match(evaluatorContent.lifecycle.stop.event_ref, /^[a-f0-9]{64}$/);
   writeFileSync(childReceipt.path, childOriginal.replace('RECORDED', 'ALTERED'));
   assert.throws(() => readSealedReceipt(parent, childReceipt.id), /LOCAL_CHAIN_BROKEN/);
   writeFileSync(childReceipt.path, childOriginal);
-  assert.equal(listChildReceipts(parent).length, 1);
+  assert.equal(listChildReceipts(parent).length, 2);
   assert.equal(checkpointOrSeal(parent).status, 'CLOSE_DEFERRED');
   readSealedReceipt(parent, childReceipt.id);
   const sealed = checkpointOrSeal(parent);
@@ -109,6 +126,7 @@ test('full run distinguishes hook evidence and seals only after evaluator receip
   assert(labels.includes('permission_observed_not_execution'));
   assert(parsed.evidence.some((event) => event.origin === 'agent_reported'));
   assert(parsed.evidence.some((event) => event.origin === 'evaluator_reported'));
+  assert.deepEqual(parsed.child_receipts.map((item) => item.role).sort(), ['delegated_agent', 'evaluator']);
   assert.equal(activeRunFor(parent), null);
   assert.throws(() => recordClaim(parent, 'late mutation', []), /NO_ACTIVE_RUN/);
   const nextRun = beginRun(parent, { mode: 'full', objective: 'A new explicit run.' });
@@ -294,6 +312,7 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
   markSnapshotRefreshed(parent, unclaimedSnapshot.id, 'e'.repeat(40));
   const unclaimedChild = mintChild({ sessionId: 'stale-parent', agentId: 'unclaimed-evaluator' });
   assert.throws(() => claimEvaluation(unclaimedChild, unclaimed.id), /EVALUATION_NOT_CLAIMABLE/);
+  assert.equal(sealChildByAgent({ sessionId: 'stale-parent', agentId: 'unclaimed-evaluator' }).role, 'delegated_agent');
 
   const freshSnapshot = {
     ...stableSnapshot,
@@ -303,8 +322,8 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
   };
   addPrSnapshot(parent, freshSnapshot);
   const freshEvaluation = beginEvaluation(parent, freshSnapshot.id, { head: freshSnapshot.head_after, clean: true, path: 'fixture-fresh' });
-  const freshChild = mintChild({ sessionId: 'stale-parent', agentId: 'stale-evaluator' });
-  assert.equal(freshChild, child);
+  const freshChild = mintChild({ sessionId: 'stale-parent', agentId: 'fresh-evaluator' });
+  assert.notEqual(freshChild, child);
   claimEvaluation(freshChild, freshEvaluation.id);
   recordEvaluation(freshChild, freshEvaluation.id, 'Fresh exact-head finding.', [], {
     head_before: freshSnapshot.head_after,
@@ -312,7 +331,7 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
     clean_before: true,
     clean_after: true
   });
-  const freshReceipt = sealChildByAgent({ sessionId: 'stale-parent', agentId: 'stale-evaluator' });
+  const freshReceipt = sealChildByAgent({ sessionId: 'stale-parent', agentId: 'fresh-evaluator' });
   assert.equal(freshReceipt.id, `child_${freshEvaluation.id}`);
   readSealedReceipt(parent, freshReceipt.id);
   requestClose(parent, 'Fresh evaluation supersedes stale history.');
@@ -337,6 +356,14 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
   });
   const latestReceipt = sealChildByAgent({ sessionId: 'stale-parent', agentId: 'latest-evaluator' });
   readSealedReceipt(parent, latestReceipt.id);
+  const staleChildBlocker = checkpointOrSeal(parent);
+  assert.equal(staleChildBlocker.status, 'CLOSE_DEFERRED');
+  assert(staleChildBlocker.blockers.some((blocker) => /^CHILD_child_agent_.*_OPEN$/.test(blocker)));
+  const staleLifecycleReceipt = sealChildByAgent({ sessionId: 'stale-parent', agentId: 'stale-evaluator' });
+  assert.equal(staleLifecycleReceipt.role, 'evaluator');
+  assert.equal(staleLifecycleReceipt.status, 'STOP_OBSERVED');
+  const staleLifecycleContent = readFileSync(staleLifecycleReceipt.path, 'utf8');
+  assert.equal(JSON.parse(staleLifecycleContent).evaluation_status, 'STALE');
   assert.equal(checkpointOrSeal(parent).status, 'SEALED');
   current = getRunForTesting(run.id).state;
   assert.equal(current.evaluations[evaluation.id].status, 'STALE');

@@ -109,6 +109,11 @@ export function renderReceiptMarkdown(state, events) {
   for (const evaluation of receipt.evaluations) {
     lines.push(`- \`${evaluation.id}\` at \`${evaluation.expected_head}\`: **${evaluation.status}**; child receipt retrieved: **${evaluation.child_receipt_retrieved ? 'yes' : 'no'}**`);
   }
+  lines.push('', '## Child receipts', '');
+  if (!receipt.child_receipts.length) lines.push('- None recorded.');
+  for (const child of receipt.child_receipts) {
+    lines.push(`- \`${child.id}\` (${child.role}): **${child.status}**; retrieved: **${child.retrieved ? 'yes' : 'no'}**`);
+  }
   lines.push('', '## Limitations', '');
   for (const limitation of receipt.limitations) lines.push(`- ${limitation}`);
   return `${lines.join('\n')}\n`;

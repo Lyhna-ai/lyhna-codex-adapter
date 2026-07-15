@@ -4,8 +4,20 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFile
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { beginRun, getRunForTesting } from '../src/store.mjs';
-import { isolatedData } from './helpers.mjs';
+import {
+  addPrSnapshot,
+  beginEvaluation,
+  beginRun,
+  claimEvaluation,
+  getRunForTesting,
+  mintChild,
+  mintSession,
+  readSealedReceipt,
+  recordEvaluation,
+  requestClose,
+  sealChildByAgent
+} from '../src/store.mjs';
+import { isolatedData, stableSnapshot } from './helpers.mjs';
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -42,6 +54,19 @@ test('real hook processes mint distinct capabilities and repeated delivery is id
   const childOutput = runNode(hook, JSON.stringify({ hook_event_name: 'SubagentStart', session_id: 'live-session', agent_id: 'child-1' }), env)[0];
   const child = childOutput.hookSpecificOutput.additionalContext.match(/LYHNA_CHILD_CAPABILITY=([^\s.]+)/)[1];
   assert.notEqual(child, parent);
+  const childStop = JSON.stringify({ hook_event_name: 'SubagentStop', session_id: 'live-session', agent_id: 'child-1', event_id: 'child-stop-1' });
+  runNode(hook, childStop, env);
+  runNode(hook, childStop, env);
+  const childReceipts = Object.values(getRunForTesting(run.id).state.child_receipts);
+  assert.equal(childReceipts.length, 1);
+  assert.equal(childReceipts[0].role, 'delegated_agent');
+  const childLifecycle = JSON.parse(readFileSync(childReceipts[0].path, 'utf8')).lifecycle;
+  assert.equal(childLifecycle.start.support, 'lifecycle_observed_not_execution');
+  assert.equal(childLifecycle.stop.support, 'lifecycle_observed_not_execution');
+  assert.match(childLifecycle.start.event_ref, /^[a-f0-9]{64}$/);
+  assert.match(childLifecycle.stop.event_ref, /^[a-f0-9]{64}$/);
+  runNode(hook, JSON.stringify({ hook_event_name: 'SubagentStop', session_id: 'live-session', agent_id: 'never-started', event_id: 'orphan-stop' }), env);
+  assert.equal(Object.values(getRunForTesting(run.id).state.child_receipts).length, 1);
   const pre = JSON.stringify({ hook_event_name: 'PreToolUse', session_id: 'live-session', tool_name: 'exec_command', tool_use_id: 'same-delivery' });
   runNode(hook, pre, env);
   runNode(hook, pre, env);
@@ -50,6 +75,55 @@ test('real hook processes mint distinct capabilities and repeated delivery is id
   const events = getRunForTesting(run.id).events;
   assert.equal(events.filter((event) => event.payload?.event_id === 'same-delivery').length, 1);
   assert.equal(events.filter((event) => event.type === 'turn_checkpoint').length, 1);
+});
+
+test('concurrent child start and parent close never seal an accepted child outside state', { concurrency: false }, async (t) => {
+  const data = isolatedData(t);
+  const parent = mintSession({ sessionId: 'race-session', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Race child registration against close.' });
+  addPrSnapshot(parent, stableSnapshot);
+  const evaluation = beginEvaluation(parent, stableSnapshot.id, { head: stableSnapshot.head_after, clean: true, path: 'fixture' });
+  const evaluator = mintChild({ sessionId: 'race-session', agentId: 'race-evaluator' });
+  claimEvaluation(evaluator, evaluation.id);
+  recordEvaluation(evaluator, evaluation.id, 'Race precondition examined.', [], {
+    head_before: stableSnapshot.head_after,
+    head_after: stableSnapshot.head_after,
+    clean_before: true,
+    clean_after: true
+  });
+  const evaluatorReceipt = sealChildByAgent({ sessionId: 'race-session', agentId: 'race-evaluator' });
+  readSealedReceipt(parent, evaluatorReceipt.id);
+  requestClose(parent, 'Race close requested.');
+
+  const env = {
+    ...process.env,
+    LYHNA_CODEX_DATA: data,
+    STORE_URL: pathToFileURL(join(pluginRoot, 'src', 'store.mjs')).href,
+    PARENT_CAPABILITY: parent
+  };
+  const startSource = `
+    const store = await import(process.env.STORE_URL);
+    try { store.mintChild({ sessionId: 'race-session', agentId: 'race-ordinary' }); } catch {}
+  `;
+  const closeSource = `
+    const store = await import(process.env.STORE_URL);
+    store.checkpointOrSeal(process.env.PARENT_CAPABILITY);
+  `;
+  await Promise.all([runNodeEval(startSource, env), runNodeEval(closeSource, env)]);
+
+  const observed = getRunForTesting(run.id);
+  const ordinaryChildren = Object.values(observed.state.children).filter((child) => child.role === 'delegated_agent');
+  const registeredIds = new Set(Object.values(observed.state.children).map((child) => child.id));
+  for (const event of observed.events.filter((item) => item.type === 'child_started')) {
+    assert(registeredIds.has(event.payload.child_id));
+  }
+  if (observed.state.sealed) {
+    assert.equal(ordinaryChildren.length, 0);
+  } else {
+    assert.equal(ordinaryChildren.length, 1);
+    assert.equal(ordinaryChildren[0].status, 'STARTED');
+    assert(observed.events.some((event) => event.type === 'child_started' && event.payload.child_id === ordinaryChildren[0].id));
+  }
 });
 
 test('MCP stdio process initializes, lists tools, accepts a valid call, and rejects malformed input', { concurrency: false }, (t) => {

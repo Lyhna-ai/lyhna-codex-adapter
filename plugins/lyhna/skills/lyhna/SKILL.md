@@ -22,9 +22,9 @@ Never say Lyhna approves, blocks, certifies, guarantees, merges, or proves comme
 5. When a PR exists, call `snapshot_pr` for the repository and PR number.
 6. Call `begin_evaluation`, then delegate that request to a fresh child evaluator. Do not give it builder narration as primary evidence.
 7. The evaluator uses its hook-issued `LYHNA_CHILD_CAPABILITY`, calls `claim_evaluation`, inspects the detached exact-head checkout, runs its own checks without fixing code, and calls `record_evaluation`.
-8. After the child stops, call `list_child_receipts`, then `read_sealed_receipt` for its evaluator receipt.
+8. After delegated children stop, call `list_child_receipts`. Call `read_sealed_receipt` for every evaluator receipt before relying on its report; ordinary child receipts prove only lifecycle coverage and are already surfaced in the parent receipt.
 9. Address findings in the builder lane. A changed PR head requires a new snapshot and evaluator pass.
-10. Call `request_close`. The next Stop hook seals only if required evaluation and receipt retrieval are complete.
+10. Call `request_close`. The next Stop hook seals only if every ordinary child has stopped with a sealed lifecycle receipt and required evaluator receipt retrieval is complete.
 
 ## Examine an existing PR
 

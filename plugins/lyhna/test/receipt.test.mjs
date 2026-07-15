@@ -22,4 +22,12 @@ test('identical normalized receipt input is byte-identical and PR-only limitatio
   assert.equal(parsed.build_record, 'unavailable');
   assert(parsed.limitations.some((item) => /No witnessed build record/.test(item)));
   assert.match(renderReceiptMarkdown(fixedState, events), /Build record: \*\*unavailable\*\*/);
+  assert.match(renderReceiptMarkdown(fixedState, events), /## Child receipts\n\n- None recorded\./);
+  const withChild = {
+    ...fixedState,
+    child_receipts: {
+      child_agent_fixed: { id: 'child_agent_fixed', role: 'delegated_agent', status: 'STOP_OBSERVED', retrieved: false }
+    }
+  };
+  assert.match(renderReceiptMarkdown(withChild, events), /`child_agent_fixed` \(delegated_agent\): \*\*STOP_OBSERVED\*\*; retrieved: \*\*no\*\*/);
 });

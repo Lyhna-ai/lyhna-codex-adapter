@@ -36,18 +36,31 @@ function main(input) {
   if (event === 'UserPromptSubmit') rememberInvocation({ sessionId: input.session_id, prompt: input.prompt || input.user_prompt || input.message });
 
   const parentCapability = findParentCapabilityBySession(input.session_id);
-  if (parentCapability && activeRunFor(parentCapability)) {
-    const payload = sanitizeHook(input);
-    const deliveryKey = input.event_id || input.tool_use_id || input.call_id || sha256(JSON.stringify(payload));
+  const payload = sanitizeHook(input);
+  const deliveryKey = input.event_id || input.tool_use_id || input.call_id || sha256(JSON.stringify(payload));
+  const childLifecycle = event === 'SubagentStart' || event === 'SubagentStop';
+  if (parentCapability && activeRunFor(parentCapability) && !childLifecycle) {
     recordHookForParent(parentCapability, payload, `hook:${event}:${deliveryKey}`);
   }
 
   if (event === 'SubagentStart') {
-    const child = mintChild({ sessionId: input.session_id, agentId: input.agent_id });
+    const child = mintChild({
+      sessionId: input.session_id,
+      agentId: input.agent_id,
+      hookPayload: payload,
+      hookDeliveryKey: `hook:${event}:${deliveryKey}`
+    });
     if (child) return contextOutput('SubagentStart', `This child has a hook-issued Lyhna identity. Use LYHNA_CHILD_CAPABILITY=${child} only for an assigned evaluator request. It cannot act as the parent builder.`);
   }
 
-  if (event === 'SubagentStop') sealChildByAgent({ sessionId: input.session_id, agentId: input.agent_id });
+  if (event === 'SubagentStop') {
+    sealChildByAgent({
+      sessionId: input.session_id,
+      agentId: input.agent_id,
+      hookPayload: payload,
+      hookDeliveryKey: `hook:${event}:${deliveryKey}`
+    });
+  }
   if (event === 'Stop' && parentCapability) {
     const deliveryKey = input.event_id || input.turn_id || sha256(JSON.stringify(sanitizeHook(input)));
     checkpointOrSeal(parentCapability, deliveryKey);

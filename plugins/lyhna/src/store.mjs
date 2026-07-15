@@ -107,7 +107,7 @@ export function mintSession({ sessionId, cwd = '', model = '' }) {
   return capability;
 }
 
-export function mintChild({ sessionId, agentId }) {
+export function mintChild({ sessionId, agentId, hookPayload = null, hookDeliveryKey = null }) {
   assert(sessionId, 'MISSING_SESSION_ID');
   assert(agentId, 'MISSING_AGENT_ID');
   const parentCapability = deriveCapability('session', sha256(String(sessionId)));
@@ -116,14 +116,46 @@ export function mintChild({ sessionId, agentId }) {
   if (!activeRunId) return null;
   const agentHash = sha256(String(agentId));
   const capability = deriveCapability('child', parent.session_hash, activeRunId, agentHash);
-  if (!readJson(capabilityPath(capability), null)) {
-    writeCapability(capability, {
-      kind: 'child',
-      agent_hash: agentHash,
-      parent_capability_hash: sha256(parentCapability),
-      parent_run_id: activeRunId
-    });
-  }
+  withLock(lockPath(activeRunId), () => {
+    const current = loadState(activeRunId);
+    assert(!current.sealed, 'RUN_SEALED');
+    if (!readJson(capabilityPath(capability), null)) {
+      writeCapability(capability, {
+        kind: 'child',
+        agent_hash: agentHash,
+        parent_capability_hash: sha256(parentCapability),
+        parent_run_id: activeRunId
+      });
+    }
+    let startEvent = null;
+    if (hookPayload) {
+      startEvent = appendEventUnlocked(activeRunId, current, {
+        type: 'hook_subagentstart',
+        origin: 'runtime_hook',
+        payload: hookPayload,
+        idempotencyKey: hookDeliveryKey || `hook:SubagentStart:${sha256(canonicalJson(hookPayload))}`
+      });
+    }
+    current.children ||= {};
+    if (!current.children[agentHash]) {
+      const childId = `child_agent_${sha256(`${activeRunId}\0${agentHash}`).slice(0, 24)}`;
+      const childStartedEvent = appendEventUnlocked(activeRunId, current, {
+        type: 'child_started',
+        origin: 'runtime_hook',
+        payload: { child_id: childId, role: 'delegated_agent', status: 'STARTED' },
+        idempotencyKey: `child-start:${childId}`
+      });
+      current.children[agentHash] = {
+        id: childId,
+        role: 'delegated_agent',
+        status: 'STARTED',
+        start_event_ref: startEvent?.event_hash || childStartedEvent.event_hash,
+        stop_event_ref: null,
+        receipt_id: null
+      };
+    }
+    saveState(current);
+  });
   return capability;
 }
 
@@ -328,6 +360,7 @@ export function beginRun(capability, { mode, objective = '' }) {
       close_requested: null,
       pr_snapshots: {},
       evaluations: {},
+      children: {},
       child_receipts: {}
     };
     mkdirSync(runDir(runId), { recursive: true });
@@ -474,6 +507,8 @@ export function claimEvaluation(childCapability, evaluationId) {
     item.child_capability_hash = childHash;
     item.child_agent_hash = record.agent_hash;
     item.status = 'CLAIMED';
+    current.children ||= {};
+    if (current.children[record.agent_hash]) current.children[record.agent_hash].role = 'evaluator';
     saveState(current);
     return item;
   });
@@ -560,7 +595,7 @@ export function requestClose(capability, reason) {
   });
 }
 
-export function sealChildByAgent({ sessionId, agentId }) {
+export function sealChildByAgent({ sessionId, agentId, hookPayload = null, hookDeliveryKey = null }) {
   const parentCapability = findParentCapabilityBySession(sessionId);
   if (!parentCapability) return null;
   const runId = activeRunFor(parentCapability);
@@ -568,25 +603,98 @@ export function sealChildByAgent({ sessionId, agentId }) {
   const agentHash = sha256(String(agentId || ''));
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
+    let stopEvent = null;
+    if (hookPayload) {
+      stopEvent = appendEventUnlocked(runId, current, {
+        type: 'hook_subagentstop',
+        origin: 'runtime_hook',
+        payload: hookPayload,
+        idempotencyKey: hookDeliveryKey || `hook:SubagentStop:${sha256(canonicalJson(hookPayload))}`
+      });
+    }
+    current.children ||= {};
+    const child = current.children[agentHash];
+    if (child) {
+      const childStoppedEvent = appendEventUnlocked(runId, current, {
+        type: 'child_stop_observed',
+        origin: 'runtime_hook',
+        payload: { child_id: child.id, role: child.role, status: 'STOP_OBSERVED' },
+        idempotencyKey: `child-stop:${child.id}`
+      });
+      child.status = 'STOP_OBSERVED';
+      child.stop_event_ref = stopEvent?.event_hash || childStoppedEvent.event_hash;
+    }
     const recordable = Object.values(current.evaluations).filter((item) => (
       item.child_agent_hash === agentHash
       && ['RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION'].includes(item.status)
     ));
     const evaluation = recordable.find((item) => !item.child_receipt_id) || recordable.find((item) => item.child_receipt_id);
-    if (!evaluation) return null;
-    if (evaluation.child_receipt_id) {
+    if (evaluation?.child_receipt_id) {
       atomicWriteJson(receiptIndexPath(evaluation.child_receipt_id), { receipt_id: evaluation.child_receipt_id, run_id: runId });
+      saveState(current);
       return current.child_receipts[evaluation.child_receipt_id];
     }
-    const receiptId = `child_${evaluation.id}`;
-    const receipt = {
+
+    const assignedEvaluation = Object.values(current.evaluations).find((item) => item.child_agent_hash === agentHash);
+    if (!evaluation && !child) {
+      saveState(current);
+      return null;
+    }
+
+    const receiptId = evaluation ? `child_${evaluation.id}` : child.id;
+    if (!evaluation && child.receipt_id) {
+      atomicWriteJson(receiptIndexPath(child.receipt_id), { receipt_id: child.receipt_id, run_id: runId });
+      saveState(current);
+      return current.child_receipts[child.receipt_id];
+    }
+    const role = evaluation || assignedEvaluation ? 'evaluator' : 'delegated_agent';
+    const status = evaluation ? evaluation.status : 'STOP_OBSERVED';
+    const receipt = evaluation ? {
       schema: 'lyhna.codex.child-receipt.v0',
       id: receiptId,
-      role: 'evaluator',
+      role,
       evaluation_id: evaluation.id,
       expected_head: evaluation.expected_head,
-      status: evaluation.status,
-      findings: evaluation.findings
+      status,
+      findings: evaluation.findings,
+      ...(child ? {
+        lifecycle: {
+          start: {
+            origin: 'runtime_hook',
+            support: 'lifecycle_observed_not_execution',
+            event_ref: child.start_event_ref
+          },
+          stop: {
+            origin: 'runtime_hook',
+            support: 'lifecycle_observed_not_execution',
+            event_ref: child.stop_event_ref
+          }
+        }
+      } : {})
+    } : {
+      schema: 'lyhna.codex.child-receipt.v0',
+      id: receiptId,
+      role,
+      status,
+      lifecycle: {
+        start: {
+          origin: 'runtime_hook',
+          support: 'lifecycle_observed_not_execution',
+          event_ref: child.start_event_ref
+        },
+        stop: {
+          origin: 'runtime_hook',
+          support: 'lifecycle_observed_not_execution',
+          event_ref: child.stop_event_ref
+        }
+      },
+      limitations: [
+        'This child receipt records lifecycle coverage only; it does not claim what the delegated agent inspected, changed, or completed.'
+      ],
+      ...(assignedEvaluation ? {
+        evaluation_id: assignedEvaluation.id,
+        evaluation_status: assignedEvaluation.status
+      } : {})
     };
     const dir = join(runDir(runId), 'child-receipts', receiptId);
     const path = join(dir, 'receipt.json');
@@ -596,11 +704,16 @@ export function sealChildByAgent({ sessionId, agentId }) {
     appendEventUnlocked(runId, current, {
       type: 'child_receipt_sealed',
       origin: 'runtime_hook',
-      payload: { receipt_id: receiptId, role: 'evaluator', status: evaluation.status, content_ref: contentHash },
+      payload: { receipt_id: receiptId, role, status, content_ref: contentHash },
       idempotencyKey: `child-seal:${receiptId}`
     });
-    current.child_receipts[receiptId] = { id: receiptId, role: 'evaluator', status: evaluation.status, path, content_hash: contentHash, retrieved: false };
-    evaluation.child_receipt_id = receiptId;
+    current.child_receipts[receiptId] = { id: receiptId, role, status, path, content_hash: contentHash, retrieved: false };
+    if (evaluation) evaluation.child_receipt_id = receiptId;
+    if (child) {
+      child.role = role;
+      child.status = 'STOP_OBSERVED';
+      child.receipt_id = receiptId;
+    }
     atomicWriteJson(receiptIndexPath(receiptId), { receipt_id: receiptId, run_id: runId });
     saveState(current);
     return current.child_receipts[receiptId];
@@ -680,6 +793,11 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         if (!['RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION'].includes(evaluation.status)) blockers.push(`EVALUATION_${evaluation.id}_${evaluation.status}`);
         if (!evaluation.child_receipt_id) blockers.push(`CHILD_RECEIPT_${evaluation.id}_OPEN`);
         if (!evaluation.child_receipt_retrieved) blockers.push(`CHILD_RECEIPT_${evaluation.id}_NOT_RETRIEVED`);
+      }
+    }
+    for (const child of Object.values(current.children || {})) {
+      if (child.status !== 'STOP_OBSERVED' || !child.receipt_id) {
+        blockers.push(`CHILD_${child.id}_OPEN`);
       }
     }
     if (blockers.length) {
