@@ -15,6 +15,12 @@ import {
   requestClose
 } from './store.mjs';
 
+function requireSnapshot(state, snapshotId) {
+  const snapshot = state.pr_snapshots[snapshotId];
+  if (!snapshot) throw Object.assign(new Error('SNAPSHOT_NOT_FOUND'), { code: 'SNAPSHOT_NOT_FOUND' });
+  return snapshot;
+}
+
 export const toolDefinitions = [
   ['begin_run', 'Start an explicitly requested Lyhna run.', ['session_capability', 'mode']],
   ['record_claim', 'Record a builder assertion with optional evidence references.', ['session_capability', 'statement']],
@@ -75,7 +81,7 @@ export function createService({ githubRunner } = {}) {
         case 'begin_evaluation': {
           const active = (await import('./store.mjs')).activeRunFor(args.session_capability);
           const state = (await import('./store.mjs')).getRunForTesting(active).state;
-          const snapshot = state.pr_snapshots[args.pr_snapshot_id];
+          const snapshot = requireSnapshot(state, args.pr_snapshot_id);
           const evaluationPath = join(dataRoot(), 'evaluations', `${active}-${args.pr_snapshot_id}`, 'worktree');
           const existing = Object.values(state.evaluations).find((item) => item.snapshot_id === args.pr_snapshot_id && !['STALE', 'INVALID'].includes(item.status));
           if (existing) return { ...existing, checkout_path: evaluationPath };
@@ -124,7 +130,7 @@ export function createService({ githubRunner } = {}) {
         case 'refresh_pr': {
           const active = (await import('./store.mjs')).activeRunFor(args.session_capability);
           const state = (await import('./store.mjs')).getRunForTesting(active).state;
-          const snapshot = state.pr_snapshots[args.pr_snapshot_id];
+          const snapshot = requireSnapshot(state, args.pr_snapshot_id);
           const head = refreshPrHead({ repository: snapshot.repository, prNumber: snapshot.pr_number, runner: githubRunner });
           return markSnapshotRefreshed(args.session_capability, args.pr_snapshot_id, head);
         }

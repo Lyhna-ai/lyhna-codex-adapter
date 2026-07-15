@@ -17,6 +17,7 @@ import {
   requestClose,
   sealChildByAgent
 } from '../src/store.mjs';
+import { ADAPTER_VERSION } from '../src/version.mjs';
 import { isolatedData, stableSnapshot } from './helpers.mjs';
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -146,6 +147,7 @@ test('MCP stdio process initializes, lists tools, accepts a valid call, and reje
   const output = runNode(join(pluginRoot, 'src', 'mcp-server.mjs'), `${requests.map(JSON.stringify).join('\n')}\n`, env);
   const byId = Object.fromEntries(output.filter((item) => item.id !== undefined).map((item) => [item.id, item]));
   assert.equal(byId[1].result.serverInfo.name, 'lyhna-codex-adapter');
+  assert.equal(byId[1].result.serverInfo.version, ADAPTER_VERSION);
   assert.equal(byId[2].result.tools.length, 10);
   assert.equal(byId[3].result.structuredContent.status, 'OPEN');
   assert.equal(byId[4].error.message, 'INVALID_ARGUMENTS');

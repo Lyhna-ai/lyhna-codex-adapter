@@ -1,5 +1,6 @@
 import { createInterface } from 'node:readline';
 import { createService, toolDefinitions } from './service.mjs';
+import { ADAPTER_VERSION } from './version.mjs';
 
 const service = createService();
 
@@ -41,7 +42,7 @@ async function handle(message) {
       result: {
         protocolVersion: params.protocolVersion || '2025-03-26',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'lyhna-codex-adapter', version: '0.1.21' }
+        serverInfo: { name: 'lyhna-codex-adapter', version: ADAPTER_VERSION }
       }
     };
   }

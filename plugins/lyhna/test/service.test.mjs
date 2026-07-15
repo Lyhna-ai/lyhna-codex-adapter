@@ -4,6 +4,25 @@ import { createService } from '../src/service.mjs';
 import { addPrSnapshot, beginRun, getRunForTesting, mintChild, mintSession } from '../src/store.mjs';
 import { isolatedData, stableSnapshot } from './helpers.mjs';
 
+test('unknown snapshots fail explicitly before GitHub operations', { concurrency: false }, async (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'unknown-snapshot', cwd: process.cwd() });
+  beginRun(parent, { mode: 'full', objective: 'Reject unknown snapshots.' });
+  const service = createService({
+    githubRunner: () => {
+      throw new Error('GitHub runner must not be called for an unknown snapshot');
+    }
+  });
+  await assert.rejects(
+    service.call('begin_evaluation', { session_capability: parent, pr_snapshot_id: 'missing', source_cwd: process.cwd() }),
+    /SNAPSHOT_NOT_FOUND/
+  );
+  await assert.rejects(
+    service.call('refresh_pr', { session_capability: parent, pr_snapshot_id: 'missing' }),
+    /SNAPSHOT_NOT_FOUND/
+  );
+});
+
 test('checkout preparation failure does not create an evaluation', { concurrency: false }, async (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'checkout-failure', cwd: process.cwd() });
