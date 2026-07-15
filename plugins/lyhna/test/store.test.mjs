@@ -68,10 +68,23 @@ test('full run distinguishes hook evidence and seals only after evaluator receip
     clean_before: true,
     clean_after: true
   });
+  const multiFinding = recordEvaluation(child, evaluation.id, 'Documentation evidence was also examined.', ['test:docs'], {
+    head_before: stableSnapshot.head_after,
+    head_after: stableSnapshot.head_after,
+    clean_before: true,
+    clean_after: true
+  });
+  assert.equal(multiFinding.findings.length, 2);
   requestClose(parent, 'Evaluation recorded.');
   assert.equal(checkpointOrSeal(parent).status, 'CLOSE_DEFERRED');
   const childReceipt = sealChildByAgent({ sessionId: 'parent-session', agentId: 'evaluator-agent' });
   assert.equal(childReceipt.status, 'RECORDED');
+  assert.throws(() => recordEvaluation(child, evaluation.id, 'Late finding.', [], {
+    head_before: stableSnapshot.head_after,
+    head_after: stableSnapshot.head_after,
+    clean_before: true,
+    clean_after: true
+  }), /EVALUATION_RECEIPT_SEALED/);
   const childOriginal = readFileSync(childReceipt.path, 'utf8');
   writeFileSync(childReceipt.path, childOriginal.replace('RECORDED', 'ALTERED'));
   assert.throws(() => readSealedReceipt(parent, childReceipt.id), /LOCAL_CHAIN_BROKEN/);
@@ -191,6 +204,14 @@ test('dirty evaluator tree is an explicit integrity exception', { concurrency: f
     clean_after: false
   });
   assert.equal(result.status, 'CHECKOUT_INTEGRITY_EXCEPTION');
+  const laterCleanFinding = recordEvaluation(child, evaluation.id, 'A later check was clean.', [], {
+    head_before: stableSnapshot.head_after,
+    head_after: stableSnapshot.head_after,
+    clean_before: true,
+    clean_after: true
+  });
+  assert.equal(laterCleanFinding.findings.length, 2);
+  assert.equal(laterCleanFinding.status, 'CHECKOUT_INTEGRITY_EXCEPTION');
 });
 
 test('inconsistent snapshots are blocked and explicit refresh marks prior work stale', { concurrency: false }, (t) => {
@@ -211,6 +232,12 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
   });
   const refresh = markSnapshotRefreshed(parent, stableSnapshot.id, 'd'.repeat(40));
   assert.equal(refresh.stale, true);
+  assert.throws(() => recordEvaluation(child, evaluation.id, 'Stale late finding.', [], {
+    head_before: stableSnapshot.head_after,
+    head_after: stableSnapshot.head_after,
+    clean_before: true,
+    clean_after: true
+  }), /EVALUATION_NOT_RECORDABLE/);
   const run = beginRun(parent, { mode: 'full' });
   let current = getRunForTesting(run.id).state;
   assert.equal(current.evaluations[evaluation.id].status, 'STALE');
@@ -224,7 +251,8 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
   };
   addPrSnapshot(parent, freshSnapshot);
   const freshEvaluation = beginEvaluation(parent, freshSnapshot.id, { head: freshSnapshot.head_after, clean: true, path: 'fixture-fresh' });
-  const freshChild = mintChild({ sessionId: 'stale-parent', agentId: 'fresh-evaluator' });
+  const freshChild = mintChild({ sessionId: 'stale-parent', agentId: 'stale-evaluator' });
+  assert.equal(freshChild, child);
   claimEvaluation(freshChild, freshEvaluation.id);
   recordEvaluation(freshChild, freshEvaluation.id, 'Fresh exact-head finding.', [], {
     head_before: freshSnapshot.head_after,
@@ -232,7 +260,8 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
     clean_before: true,
     clean_after: true
   });
-  const freshReceipt = sealChildByAgent({ sessionId: 'stale-parent', agentId: 'fresh-evaluator' });
+  const freshReceipt = sealChildByAgent({ sessionId: 'stale-parent', agentId: 'stale-evaluator' });
+  assert.equal(freshReceipt.id, `child_${freshEvaluation.id}`);
   readSealedReceipt(parent, freshReceipt.id);
   requestClose(parent, 'Fresh evaluation supersedes stale history.');
   assert.equal(checkpointOrSeal(parent).status, 'SEALED');

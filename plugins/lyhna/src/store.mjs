@@ -475,6 +475,9 @@ export function recordEvaluation(childCapability, evaluationId, finding, evidenc
     assert(item, 'EVALUATION_NOT_FOUND');
     assert(item.child_capability_hash === sha256(childCapability), 'EVALUATOR_NOT_BOUND');
     assert(item.child_agent_hash === record.agent_hash, 'EVALUATOR_NOT_BOUND');
+    assert(!item.child_receipt_id, 'EVALUATION_RECEIPT_SEALED');
+    assert(['CLAIMED', 'RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION'].includes(item.status), 'EVALUATION_NOT_RECORDABLE');
+    const priorIntegrityException = item.status === 'CHECKOUT_INTEGRITY_EXCEPTION';
     const cleanBefore = checkout.clean_before ?? item.checkout_clean_before;
     const cleanAfter = checkout.clean_after ?? null;
     const headBefore = checkout.head_before ?? item.checkout_head_before;
@@ -501,7 +504,7 @@ export function recordEvaluation(childCapability, evaluationId, finding, evidenc
     item.checkout_head_after = headAfter;
     item.checkout_clean_before = cleanBefore;
     item.checkout_clean_after = cleanAfter;
-    item.status = integrityOk ? 'RECORDED' : 'CHECKOUT_INTEGRITY_EXCEPTION';
+    item.status = integrityOk && !priorIntegrityException ? 'RECORDED' : 'CHECKOUT_INTEGRITY_EXCEPTION';
     saveState(current);
     return item;
   });
@@ -552,8 +555,12 @@ export function sealChildByAgent({ sessionId, agentId }) {
   const agentHash = sha256(String(agentId || ''));
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
-    const evaluation = Object.values(current.evaluations).find((item) => item.child_agent_hash === agentHash);
-    if (!evaluation || !['RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION'].includes(evaluation.status)) return null;
+    const recordable = Object.values(current.evaluations).filter((item) => (
+      item.child_agent_hash === agentHash
+      && ['RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION'].includes(item.status)
+    ));
+    const evaluation = recordable.find((item) => !item.child_receipt_id) || recordable.find((item) => item.child_receipt_id);
+    if (!evaluation) return null;
     if (evaluation.child_receipt_id) {
       atomicWriteJson(receiptIndexPath(evaluation.child_receipt_id), { receipt_id: evaluation.child_receipt_id, run_id: runId });
       return current.child_receipts[evaluation.child_receipt_id];
