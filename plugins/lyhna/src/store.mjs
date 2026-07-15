@@ -64,6 +64,10 @@ function anchorPath(runId) {
   return join(runDir(runId), 'seal-anchor.json');
 }
 
+function receiptIndexPath(receiptId) {
+  return join(root(), 'receipt-index', `${sha256(receiptId)}.json`);
+}
+
 function sessionLockPath(capability) {
   return join(root(), 'session-locks', `${sha256(capability)}.lock`);
 }
@@ -107,8 +111,8 @@ export function mintChild({ sessionId, agentId }) {
   assert(agentId, 'MISSING_AGENT_ID');
   const parentCapability = deriveCapability('session', sha256(String(sessionId)));
   const parent = getCapability(parentCapability);
-  const active = readJson(activePath(parentCapability), null);
-  if (!active) return null;
+  const activeRunId = activeRunFor(parentCapability);
+  if (!activeRunId) return null;
   const agentHash = sha256(String(agentId));
   const capability = deriveCapability('child', parent.session_hash, agentHash);
   if (!readJson(capabilityPath(capability), null)) {
@@ -116,7 +120,7 @@ export function mintChild({ sessionId, agentId }) {
       kind: 'child',
       agent_hash: agentHash,
       parent_capability_hash: sha256(parentCapability),
-      parent_run_id: active.run_id
+      parent_run_id: activeRunId
     });
   }
   return capability;
@@ -128,9 +132,12 @@ export function findParentCapabilityBySession(sessionId) {
   return readJson(capabilityPath(capability), null) ? capability : null;
 }
 
-export function activeRunFor(capability) {
+export function activeRunFor(capability, { includeSealed = false } = {}) {
   const record = readJson(activePath(capability), null);
-  return record?.run_id || null;
+  if (!record?.run_id) return null;
+  const state = readJson(statePath(record.run_id), null);
+  if (!includeSealed && state?.sealed && existsSync(anchorPath(record.run_id))) return null;
+  return record.run_id;
 }
 
 function loadState(runId) {
@@ -272,7 +279,7 @@ export function appendEvent(runId, input) {
 function requireParent(capability, { mutable = true } = {}) {
   const record = getCapability(capability);
   assert(record.kind === 'parent', 'PARENT_CAPABILITY_REQUIRED');
-  const runId = activeRunFor(capability);
+  const runId = activeRunFor(capability, { includeSealed: !mutable });
   assert(runId, 'NO_ACTIVE_RUN');
   const state = loadState(runId);
   if (mutable) assert(!state.sealed, 'RUN_SEALED');
@@ -293,11 +300,11 @@ export function beginRun(capability, { mode, objective = '' }) {
   assert(parent.kind === 'parent', 'PARENT_CAPABILITY_REQUIRED');
   assert(mode === 'full' || mode === 'pr_only', 'INVALID_MODE');
   return withLock(sessionLockPath(capability), () => {
-    const current = activeRunFor(capability);
+    const current = activeRunFor(capability, { includeSealed: true });
     if (current) {
       const state = loadState(current);
-      assert(!state.sealed, 'RUN_ALREADY_SEALED');
-      return state;
+      if (!state.sealed) return state;
+      if (!existsSync(anchorPath(current))) repairSeal(current);
     }
     const runId = `run_${randomUUID()}`;
     const pending = readJson(join(root(), 'pending', `${parent.session_hash}.json`), null);
@@ -357,6 +364,7 @@ export function recordClaim(capability, statement, evidenceRefs = []) {
 export function recordHookForParent(capability, payload, idempotencyKey) {
   const runId = activeRunFor(capability);
   if (!runId) return null;
+  if (loadState(runId).sealed) return null;
   return appendEvent(runId, {
     type: `hook_${String(payload.event || 'unknown').toLowerCase()}`,
     origin: 'runtime_hook',
@@ -546,7 +554,10 @@ export function sealChildByAgent({ sessionId, agentId }) {
     const current = loadState(runId);
     const evaluation = Object.values(current.evaluations).find((item) => item.child_agent_hash === agentHash);
     if (!evaluation || !['RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION'].includes(evaluation.status)) return null;
-    if (evaluation.child_receipt_id) return current.child_receipts[evaluation.child_receipt_id];
+    if (evaluation.child_receipt_id) {
+      atomicWriteJson(receiptIndexPath(evaluation.child_receipt_id), { receipt_id: evaluation.child_receipt_id, run_id: runId });
+      return current.child_receipts[evaluation.child_receipt_id];
+    }
     const receiptId = `child_${evaluation.id}`;
     const receipt = {
       schema: 'lyhna.codex.child-receipt.v0',
@@ -570,6 +581,7 @@ export function sealChildByAgent({ sessionId, agentId }) {
     });
     current.child_receipts[receiptId] = { id: receiptId, role: 'evaluator', status: evaluation.status, path, content_hash: contentHash, retrieved: false };
     evaluation.child_receipt_id = receiptId;
+    atomicWriteJson(receiptIndexPath(receiptId), { receipt_id: receiptId, run_id: runId });
     saveState(current);
     return current.child_receipts[receiptId];
   });
@@ -581,9 +593,21 @@ export function listChildReceipts(capability) {
 }
 
 export function readSealedReceipt(capability, receiptId) {
-  const { runId } = requireParent(capability, { mutable: false });
+  const parent = getCapability(capability);
+  assert(parent.kind === 'parent', 'PARENT_CAPABILITY_REQUIRED');
+  let runId = activeRunFor(capability, { includeSealed: true });
+  let initial = runId ? loadState(runId) : null;
+  if (!initial?.child_receipts?.[receiptId]) {
+    const index = readJson(receiptIndexPath(receiptId), null);
+    assert(index?.receipt_id === receiptId && index.run_id, 'CHILD_RECEIPT_NOT_FOUND');
+    runId = index.run_id;
+    initial = loadState(runId);
+    assert(initial.sealed, 'CHILD_RECEIPT_NOT_SEALED');
+  }
+  assert(initial.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
+    if (current.sealed) repairSeal(runId);
     const receipt = current.child_receipts[receiptId];
     assert(receipt, 'CHILD_RECEIPT_NOT_FOUND');
     const content = readFileSync(receipt.path, 'utf8');
@@ -608,7 +632,10 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
   if (!runId) return { status: 'NO_ACTIVE_RUN' };
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
-    if (current.sealed) return repairSeal(runId);
+    if (current.sealed) {
+      const repaired = repairSeal(runId);
+      return repaired;
+    }
     if (!current.close_requested) {
       appendEventUnlocked(runId, current, {
         type: 'turn_checkpoint',
@@ -664,6 +691,10 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     });
     return { status: 'SEALED', run_id: runId, receipt_path: join(runDir(runId), 'RECEIPT.md') };
   });
+}
+
+export function verifySealedRun(runId) {
+  return withLock(lockPath(runId), () => repairSeal(runId));
 }
 
 export function getRunForTesting(runId) {

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   addPrSnapshot,
+  activeRunFor,
   beginEvaluation,
   beginRun,
   checkpointOrSeal,
@@ -20,7 +21,8 @@ import {
   recordEvaluation,
   recordHookForParent,
   requestClose,
-  sealChildByAgent
+  sealChildByAgent,
+  verifySealedRun
 } from '../src/store.mjs';
 import { sanitizeHook } from '../src/redact.mjs';
 import { isolatedData, stableSnapshot } from './helpers.mjs';
@@ -90,7 +92,11 @@ test('full run distinguishes hook evidence and seals only after evaluator receip
   assert(labels.includes('permission_observed_not_execution'));
   assert(parsed.evidence.some((event) => event.origin === 'agent_reported'));
   assert(parsed.evidence.some((event) => event.origin === 'evaluator_reported'));
-  assert.throws(() => recordClaim(parent, 'late mutation', []), /RUN_SEALED|RUN_ALREADY_SEALED/);
+  assert.equal(activeRunFor(parent), null);
+  assert.throws(() => recordClaim(parent, 'late mutation', []), /NO_ACTIVE_RUN/);
+  const nextRun = beginRun(parent, { mode: 'full', objective: 'A new explicit run.' });
+  assert.notEqual(nextRun.id, state.id);
+  assert.equal(readSealedReceipt(parent, childReceipt.id).id, childReceipt.id);
   assert.equal(readLedger(state.id, { allowOpen: false }).length, parsed.evidence.length);
 });
 
@@ -111,7 +117,7 @@ test('sealed state and rendered receipt tampering are detected', { concurrency: 
   const childPath = childReceipt.path;
   const childOriginal = readFileSync(childPath, 'utf8');
   writeFileSync(childPath, `${childOriginal}\nlocal alteration\n`);
-  assert.throws(() => checkpointOrSeal(parent), /LOCAL_CHAIN_BROKEN/);
+  assert.throws(() => verifySealedRun(run.id), /LOCAL_CHAIN_BROKEN/);
   assert.throws(() => readSealedReceipt(parent, childReceipt.id), /LOCAL_CHAIN_BROKEN/);
   writeFileSync(childPath, childOriginal);
   assert.equal(readSealedReceipt(parent, childReceipt.id).id, childReceipt.id);
@@ -129,7 +135,8 @@ test('sealed state and rendered receipt tampering are detected', { concurrency: 
     const changed = alter(original);
     assert.notEqual(changed, original);
     writeFileSync(path, changed);
-    assert.throws(() => checkpointOrSeal(parent), /LOCAL_CHAIN_BROKEN/);
+    assert.throws(() => verifySealedRun(run.id), /LOCAL_CHAIN_BROKEN/);
+    assert.throws(() => readSealedReceipt(parent, childReceipt.id), /LOCAL_CHAIN_BROKEN/);
     writeFileSync(path, original);
   }
 });

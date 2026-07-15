@@ -15,6 +15,21 @@ function validate(tool, args) {
   }
   const unknown = Object.keys(args).find((key) => !Object.hasOwn(schema.properties, key));
   if (unknown) throw Object.assign(new Error(`UNKNOWN_ARGUMENT: ${unknown}`), { code: 'INVALID_ARGUMENTS' });
+  for (const [key, value] of Object.entries(args)) {
+    const property = schema.properties[key];
+    const validType = property.type === 'string' ? typeof value === 'string'
+      : property.type === 'integer' ? Number.isInteger(value)
+        : property.type === 'boolean' ? typeof value === 'boolean'
+          : property.type === 'array' ? Array.isArray(value)
+            : property.type === 'object' ? value && typeof value === 'object' && !Array.isArray(value)
+              : true;
+    if (!validType) throw Object.assign(new Error(`INVALID_TYPE: ${key}`), { code: 'INVALID_ARGUMENTS' });
+    if (property.enum && !property.enum.includes(value)) throw Object.assign(new Error(`INVALID_ENUM: ${key}`), { code: 'INVALID_ARGUMENTS' });
+    if (property.minimum !== undefined && value < property.minimum) throw Object.assign(new Error(`BELOW_MINIMUM: ${key}`), { code: 'INVALID_ARGUMENTS' });
+    if (property.type === 'array' && property.items?.type === 'string' && value.some((item) => typeof item !== 'string')) {
+      throw Object.assign(new Error(`INVALID_ITEM_TYPE: ${key}`), { code: 'INVALID_ARGUMENTS' });
+    }
+  }
 }
 
 async function handle(message) {
@@ -26,7 +41,7 @@ async function handle(message) {
       result: {
         protocolVersion: params.protocolVersion || '2025-03-26',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'lyhna-codex-adapter', version: '0.1.10' }
+        serverInfo: { name: 'lyhna-codex-adapter', version: '0.1.13' }
       }
     };
   }

@@ -51,7 +51,9 @@ test('MCP stdio process initializes, lists tools, accepts a valid call, and reje
     { jsonrpc: '2.0', method: 'notifications/initialized' },
     { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'begin_run', arguments: { session_capability: parent, mode: 'full', objective: 'MCP process test' } } },
-    { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'record_claim', arguments: { session_capability: parent } } }
+    { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'record_claim', arguments: { session_capability: parent } } },
+    { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'record_claim', arguments: { session_capability: parent, statement: 123 } } },
+    { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'record_claim', arguments: { session_capability: parent, statement: 'typed', evidence_refs: ['ok', 123] } } }
   ];
   const output = runNode(join(pluginRoot, 'src', 'mcp-server.mjs'), `${requests.map(JSON.stringify).join('\n')}\n`, env);
   const byId = Object.fromEntries(output.filter((item) => item.id !== undefined).map((item) => [item.id, item]));
@@ -59,6 +61,8 @@ test('MCP stdio process initializes, lists tools, accepts a valid call, and reje
   assert.equal(byId[2].result.tools.length, 10);
   assert.equal(byId[3].result.structuredContent.status, 'OPEN');
   assert.equal(byId[4].error.message, 'INVALID_ARGUMENTS');
+  assert.equal(byId[6].error.message, 'INVALID_ARGUMENTS');
+  assert.equal(byId[7].error.message, 'INVALID_ARGUMENTS');
   const listOutput = runNode(join(pluginRoot, 'src', 'mcp-server.mjs'), `${JSON.stringify({
     jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'list_child_receipts', arguments: { session_capability: parent } }
   })}\n`, env)[0];
