@@ -20,5 +20,5 @@ test('portable plugin package points to existing skill, hook, and MCP entrypoint
   for (const event of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop']) {
     assert(Array.isArray(hooks.hooks[event]), `${event} hook missing`);
   }
-  assert.match(skill, /^---\nname: lyhna\n/m);
+  assert.match(skill, /^---\r?\nname: lyhna\r?\n/m);
 });

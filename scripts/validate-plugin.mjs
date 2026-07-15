@@ -34,7 +34,7 @@ for (const event of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Permissi
   }
 }
 
-assert.match(skill, /^---\nname: lyhna\n/m);
+assert.match(skill, /^---\r?\nname: lyhna\r?\n/m);
 const entry = marketplace.plugins?.find((item) => item.name === manifest.name);
 assert(entry, 'marketplace entry missing');
 assert.equal(entry.source?.path, './plugins/lyhna');

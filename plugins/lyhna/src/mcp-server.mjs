@@ -26,7 +26,7 @@ async function handle(message) {
       result: {
         protocolVersion: params.protocolVersion || '2025-03-26',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'lyhna-codex-adapter', version: '0.1.9' }
+        serverInfo: { name: 'lyhna-codex-adapter', version: '0.1.10' }
       }
     };
   }
