@@ -1,0 +1,20 @@
+{
+  "name": "lyhna-ai",
+  "interface": {
+    "displayName": "Lyhna Ai"
+  },
+  "plugins": [
+    {
+      "name": "lyhna-codex-adapter",
+      "source": {
+        "source": "local",
+        "path": "./plugins/lyhna"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "developer-tools"
+    }
+  ]
+}

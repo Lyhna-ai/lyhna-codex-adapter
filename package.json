@@ -1,0 +1,9 @@
+{
+  "name": "lyhna-codex-adapter-repo",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "test": "npm --prefix plugins/lyhna test",
+    "validate:plugin": "node scripts/validate-plugin.mjs"
+  }
+}
