@@ -87,9 +87,15 @@ export function sanitizeHook(input) {
 }
 
 export function sanitizeClaim(statement, evidenceRefs = []) {
+  const normalizeEvidenceRef = (item) => {
+    const text = String(item).trim();
+    if (/^sha256:[a-f0-9]{64}$/i.test(text)) return text.toLowerCase();
+    if (/^[a-f0-9]{64}$/i.test(text)) return `sha256:${text.toLowerCase()}`;
+    return `sha256:${sha256(text)}`;
+  };
   return {
     statement: structuralSummary(statement, 'Attributed statement'),
     statement_ref: reference(statement),
-    evidence_refs: [...new Set(evidenceRefs.map((item) => `sha256:${sha256(String(item))}`))].sort()
+    evidence_refs: [...new Set(evidenceRefs.map(normalizeEvidenceRef))].sort()
   };
 }

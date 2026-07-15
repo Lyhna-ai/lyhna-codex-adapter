@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { boundedText, safeSummary, sanitizeHook } from '../src/redact.mjs';
+import { boundedText, safeSummary, sanitizeClaim, sanitizeHook } from '../src/redact.mjs';
 
 test('hook and object summaries exclude secret values and full tool output', () => {
   const secret = 'github_pat_1234567890abcdefghijklmnopqrstuvwxyz';
@@ -23,4 +23,12 @@ test('generic assigned credentials, Basic authorization, and capabilities are re
   assert(!text.includes('AKIAIOSFODNN7EXAMPLE'));
   assert.match(text, /\[REDACTED\]/);
   assert.match(text, /\[REDACTED_CAPABILITY\]/);
+});
+
+test('normalized evidence digests remain joinable while raw references are hashed', () => {
+  const digest = 'a'.repeat(64);
+  const claim = sanitizeClaim('Supported claim.', [digest, `sha256:${digest}`, 'artifact:test-output']);
+  assert.equal(claim.evidence_refs.filter((item) => item === `sha256:${digest}`).length, 1);
+  assert.equal(claim.evidence_refs.length, 2);
+  assert(claim.evidence_refs.every((item) => /^sha256:[a-f0-9]{64}$/.test(item)));
 });

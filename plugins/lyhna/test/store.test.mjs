@@ -9,6 +9,7 @@ import {
   beginRun,
   checkpointOrSeal,
   claimEvaluation,
+  getCapability,
   getRunForTesting,
   listChildReceipts,
   markSnapshotRefreshed,
@@ -191,8 +192,12 @@ test('sealed state and rendered receipt tampering are detected', { concurrency: 
 test('stale lock ownership is recovered and free-form credentials never persist', { concurrency: false }, (t) => {
   const root = isolatedData(t);
   const rawPrompt = '@lyhna build the private customer feature password=hunter2 Authorization: Basic dXNlcjpwYXNz without copying this full prompt';
+  const sensitiveCwd = 'C:\\Users\\Adam\\Customers\\private-customer';
   rememberInvocation({ sessionId: 'privacy-lock', prompt: rawPrompt });
-  const parent = mintSession({ sessionId: 'privacy-lock', cwd: process.cwd() });
+  const parent = mintSession({ sessionId: 'privacy-lock', cwd: sensitiveCwd });
+  const capability = getCapability(parent);
+  assert.equal(capability.cwd, undefined);
+  assert.equal(capability.cwd_ref.sha256.length, 64);
   const run = beginRun(parent, { mode: 'full', objective: 'password=hunter2' });
   const directory = getRunForTesting(run.id).directory;
   const lock = join(directory, '.lock');
@@ -214,6 +219,7 @@ test('stale lock ownership is recovered and free-form credentials never persist'
   assert(!all.includes('hunter2'));
   assert(!all.includes('dXNlcjpwYXNz'));
   assert(!all.includes(rawPrompt));
+  assert(!all.includes(sensitiveCwd));
   assert(all.includes('Invocation objective retained by hash'));
   assert(!all.includes('private customer feature'));
 });

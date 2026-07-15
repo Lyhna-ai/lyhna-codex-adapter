@@ -53,6 +53,7 @@ export function buildReceipt(state, events) {
     },
     evidence: events.map((event) => ({
       seq: event.seq,
+      ref: `sha256:${event.event_hash}`,
       type: event.type,
       origin: event.origin,
       label: eventLabel(event),

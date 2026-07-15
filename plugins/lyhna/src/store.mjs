@@ -9,7 +9,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteJson, atomicWriteText, assert, canonicalJson, dataRoot, ORIGINS, readJson, sha256, withLock } from './util.mjs';
-import { boundedText, promptSynopsis, sanitizeClaim, structuralSummary } from './redact.mjs';
+import { boundedText, promptSynopsis, reference, sanitizeClaim, structuralSummary } from './redact.mjs';
 import { renderReceiptJson, renderReceiptMarkdown } from './receipt.mjs';
 
 const ZERO_HASH = '0'.repeat(64);
@@ -100,7 +100,7 @@ export function mintSession({ sessionId, cwd = '', model = '' }) {
     writeCapability(capability, {
       kind: 'parent',
       session_hash: sessionHash,
-      cwd: String(cwd || ''),
+      cwd_ref: cwd ? reference(String(cwd)) : null,
       model: boundedText(model, 100) || null
     });
   }
@@ -476,7 +476,7 @@ export function beginEvaluation(capability, snapshotId, checkout = {}) {
       status: 'OPEN',
       child_capability_hash: null,
       child_agent_hash: null,
-      checkout_path: checkout.path,
+      checkout_path_ref: reference(checkout.path),
       checkout_head_before: checkout.head,
       checkout_clean_before: checkout.clean,
       checkout_detached_before: checkout.detached,

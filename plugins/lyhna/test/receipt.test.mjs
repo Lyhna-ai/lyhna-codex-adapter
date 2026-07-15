@@ -15,11 +15,12 @@ const fixedState = {
 };
 
 test('identical normalized receipt input is byte-identical and PR-only limitation is explicit', () => {
-  const events = [{ seq: 1, type: 'run_begun', origin: 'mcp_routed', payload: { mode: 'pr_only' } }];
+  const events = [{ seq: 1, event_hash: 'a'.repeat(64), type: 'run_begun', origin: 'mcp_routed', payload: { mode: 'pr_only' } }];
   assert.equal(renderReceiptJson(fixedState, events), renderReceiptJson(structuredClone(fixedState), structuredClone(events)));
   assert.equal(renderReceiptMarkdown(fixedState, events), renderReceiptMarkdown(structuredClone(fixedState), structuredClone(events)));
   const parsed = JSON.parse(renderReceiptJson(fixedState, events));
   assert.equal(parsed.build_record, 'unavailable');
+  assert.equal(parsed.evidence[0].ref, `sha256:${'a'.repeat(64)}`);
   assert(parsed.limitations.some((item) => /No witnessed build record/.test(item)));
   assert.match(renderReceiptMarkdown(fixedState, events), /Build record: \*\*unavailable\*\*/);
   assert.match(renderReceiptMarkdown(fixedState, events), /## Child receipts\n\n- None recorded\./);

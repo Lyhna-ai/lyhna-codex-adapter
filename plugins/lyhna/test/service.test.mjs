@@ -16,7 +16,7 @@ test('checkout preparation failure does not create an evaluation', { concurrency
     }
   });
   await assert.rejects(
-    service.call('begin_evaluation', { session_capability: parent, pr_snapshot_id: stableSnapshot.id }),
+    service.call('begin_evaluation', { session_capability: parent, pr_snapshot_id: stableSnapshot.id, source_cwd: process.cwd() }),
     /CHECKOUT_PREPARATION_FAILED.*SOURCE_REPOSITORY_MISMATCH/
   );
   assert.deepEqual(getRunForTesting(run.id).state.evaluations, {});
@@ -38,7 +38,11 @@ test('managed evaluation preserves the evaluator before-check and re-inspects de
     throw new Error(`unexpected command ${joined}`);
   };
   const service = createService({ githubRunner: runner });
-  const evaluation = await service.call('begin_evaluation', { session_capability: parent, pr_snapshot_id: stableSnapshot.id });
+  const evaluation = await service.call('begin_evaluation', { session_capability: parent, pr_snapshot_id: stableSnapshot.id, source_cwd: process.cwd() });
+  assert.equal(typeof evaluation.checkout_path, 'string');
+  const durableEvaluation = getRunForTesting(run.id).state.evaluations[evaluation.id];
+  assert.equal(durableEvaluation.checkout_path, undefined);
+  assert.equal(durableEvaluation.checkout_path_ref.sha256.length, 64);
   const child = mintChild({ sessionId: 'managed-before', agentId: 'managed-evaluator' });
   await service.call('claim_evaluation', { child_capability: child, evaluation_request_id: evaluation.id });
   const recorded = await service.call('record_evaluation', {

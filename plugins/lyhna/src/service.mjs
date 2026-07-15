@@ -19,7 +19,7 @@ export const toolDefinitions = [
   ['begin_run', 'Start an explicitly requested Lyhna run.', ['session_capability', 'mode']],
   ['record_claim', 'Record a builder assertion with optional evidence references.', ['session_capability', 'statement']],
   ['snapshot_pr', 'Capture sanitized GitHub metadata at an exact observed PR head.', ['session_capability', 'repository', 'pr_number']],
-  ['begin_evaluation', 'Create an evaluator request and detached exact-head checkout.', ['session_capability', 'pr_snapshot_id']],
+  ['begin_evaluation', 'Create an evaluator request and detached exact-head checkout.', ['session_capability', 'pr_snapshot_id', 'source_cwd']],
   ['claim_evaluation', 'Bind a hook-issued child capability to an evaluator request.', ['child_capability', 'evaluation_request_id']],
   ['record_evaluation', 'Record an attributed evaluator finding and checkout integrity observations.', ['child_capability', 'evaluation_request_id', 'finding', 'checkout_head_before', 'checkout_clean_before', 'checkout_detached_before']],
   ['refresh_pr', 'Explicitly recheck whether a PR snapshot head is current.', ['session_capability', 'pr_snapshot_id']],
@@ -42,6 +42,7 @@ export const toolDefinitions = [
       repository: { type: 'string' },
       pr_number: { type: 'integer', minimum: 1 },
       pr_snapshot_id: { type: 'string' },
+      source_cwd: { type: 'string' },
       evaluation_request_id: { type: 'string' },
       finding: { type: 'string' },
       checkout_head_before: { type: 'string' },
@@ -72,24 +73,24 @@ export function createService({ githubRunner } = {}) {
           return addPrSnapshot(args.session_capability, snapshot);
         }
         case 'begin_evaluation': {
-          const parent = getCapability(args.session_capability);
           const active = (await import('./store.mjs')).activeRunFor(args.session_capability);
           const state = (await import('./store.mjs')).getRunForTesting(active).state;
           const snapshot = state.pr_snapshots[args.pr_snapshot_id];
+          const evaluationPath = join(dataRoot(), 'evaluations', `${active}-${args.pr_snapshot_id}`, 'worktree');
           const existing = Object.values(state.evaluations).find((item) => item.snapshot_id === args.pr_snapshot_id && !['STALE', 'INVALID'].includes(item.status));
-          if (existing) return existing;
+          if (existing) return { ...existing, checkout_path: evaluationPath };
           let checkout = {};
           if (snapshot?.status === 'CONSISTENT') {
-            const evaluationPath = join(dataRoot(), 'evaluations', `${active}-${args.pr_snapshot_id}`, 'worktree');
             try {
-              checkout = prepareEvaluatorCheckout({ sourceCwd: parent.cwd, destination: evaluationPath, head: snapshot.head_after, repository: snapshot.repository, runner: githubRunner });
+              checkout = prepareEvaluatorCheckout({ sourceCwd: args.source_cwd, destination: evaluationPath, head: snapshot.head_after, repository: snapshot.repository, runner: githubRunner });
             } catch (error) {
               const failure = new Error(`CHECKOUT_PREPARATION_FAILED: ${error.message}`);
               failure.code = 'CHECKOUT_PREPARATION_FAILED';
               throw failure;
             }
           }
-          return beginEvaluationStore(args.session_capability, args.pr_snapshot_id, checkout);
+          const stored = beginEvaluationStore(args.session_capability, args.pr_snapshot_id, checkout);
+          return { ...stored, checkout_path: checkout.path };
         }
         case 'claim_evaluation':
           return claimEvaluation(args.child_capability, args.evaluation_request_id);
@@ -106,8 +107,9 @@ export function createService({ githubRunner } = {}) {
             detached_before: args.checkout_detached_before,
             detached_after: args.checkout_detached_after
           };
-          if (evaluation?.checkout_path) {
-            const live = inspectCheckout({ path: evaluation.checkout_path, runner: githubRunner });
+          if (evaluation?.checkout_path_ref) {
+            const evaluationPath = join(dataRoot(), 'evaluations', `${active}-${evaluation.snapshot_id}`, 'worktree');
+            const live = inspectCheckout({ path: evaluationPath, runner: githubRunner });
             observed = {
               head_before: args.checkout_head_before,
               head_after: live.head,
