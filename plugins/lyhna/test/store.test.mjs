@@ -216,6 +216,20 @@ test('invocation capture requires a leading Lyhna mention token', { concurrency:
   }), true);
 });
 
+test('pending invocation evidence is consumed by begin_run', { concurrency: false }, (t) => {
+  const root = isolatedData(t);
+  const sessionId = 'consume-invocation';
+  assert.equal(rememberInvocation({ sessionId, prompt: '@lyhna begin this run.' }), true);
+  assert.equal(readdirSync(join(root, 'pending')).length, 1);
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Fallback.' });
+  assert.equal(run.objective_origin, 'runtime_hook');
+  assert.equal(readdirSync(join(root, 'pending')).length, 0);
+  assert.equal(rememberInvocation({ sessionId, prompt: '@lyhna continue this run.' }), true);
+  assert.equal(beginRun(parent, { mode: 'full', objective: 'Ignored.' }).id, run.id);
+  assert.equal(readdirSync(join(root, 'pending')).length, 0);
+});
+
 test('dirty evaluator tree is an explicit integrity exception', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'dirty-parent', cwd: process.cwd() });
@@ -269,6 +283,13 @@ test('inconsistent snapshots are blocked and explicit refresh marks prior work s
   let current = getRunForTesting(run.id).state;
   assert.equal(current.evaluations[evaluation.id].status, 'STALE');
   assert.equal(current.pr_snapshots[stableSnapshot.id].status, 'STALE');
+
+  const unclaimedSnapshot = { ...stableSnapshot, id: 'pr_stale_unclaimed' };
+  addPrSnapshot(parent, unclaimedSnapshot);
+  const unclaimed = beginEvaluation(parent, unclaimedSnapshot.id, { head: unclaimedSnapshot.head_after, clean: true, path: 'fixture-unclaimed' });
+  markSnapshotRefreshed(parent, unclaimedSnapshot.id, 'e'.repeat(40));
+  const unclaimedChild = mintChild({ sessionId: 'stale-parent', agentId: 'unclaimed-evaluator' });
+  assert.throws(() => claimEvaluation(unclaimedChild, unclaimed.id), /EVALUATION_NOT_CLAIMABLE/);
 
   const freshSnapshot = {
     ...stableSnapshot,

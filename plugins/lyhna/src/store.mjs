@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   writeFileSync
 } from 'node:fs';
 import { join } from 'node:path';
@@ -300,14 +301,18 @@ export function beginRun(capability, { mode, objective = '' }) {
   assert(parent.kind === 'parent', 'PARENT_CAPABILITY_REQUIRED');
   assert(mode === 'full' || mode === 'pr_only', 'INVALID_MODE');
   return withLock(sessionLockPath(capability), () => {
+    const pendingPath = join(root(), 'pending', `${parent.session_hash}.json`);
+    const pending = readJson(pendingPath, null);
     const current = activeRunFor(capability, { includeSealed: true });
     if (current) {
       const state = loadState(current);
-      if (!state.sealed) return state;
+      if (!state.sealed) {
+        if (pending) rmSync(pendingPath, { force: true });
+        return state;
+      }
       if (!existsSync(anchorPath(current))) repairSeal(current);
     }
     const runId = `run_${randomUUID()}`;
-    const pending = readJson(join(root(), 'pending', `${parent.session_hash}.json`), null);
     const state = {
       schema: 'lyhna.codex.run.v0',
       id: runId,
@@ -336,6 +341,7 @@ export function beginRun(capability, { mode, objective = '' }) {
       saveState(state);
     });
     atomicWriteJson(activePath(capability), { run_id: runId });
+    if (pending) rmSync(pendingPath, { force: true });
     return state;
   });
 }
@@ -458,6 +464,7 @@ export function claimEvaluation(childCapability, evaluationId) {
     const item = current.evaluations[evaluationId];
     assert(item, 'EVALUATION_NOT_FOUND');
     assert(!item.child_capability_hash, 'EVALUATION_ALREADY_CLAIMED');
+    assert(item.status === 'OPEN', 'EVALUATION_NOT_CLAIMABLE');
     appendEventUnlocked(runId, current, {
       type: 'evaluation_claimed',
       origin: 'mcp_routed',
