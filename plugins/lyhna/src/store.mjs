@@ -417,6 +417,15 @@ function detectInvocation(promptText) {
   return null;
 }
 
+function maskContextCharacter(ch) {
+  if (/\s/.test(ch)) return ' ';
+  if (/[\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]/.test(ch)) return ch;
+  if (/\p{Nd}/u.test(ch)) return '9';
+  if (/\p{Lu}/u.test(ch)) return 'A';
+  if (/[\p{L}\p{M}\p{N}]/u.test(ch)) return 'a';
+  return '?';
+}
+
 function maskedMentionContexts(promptText) {
   const contexts = [];
   const pattern = /lyhna/gi;
@@ -424,7 +433,7 @@ function maskedMentionContexts(promptText) {
   while ((match = pattern.exec(promptText)) && contexts.length < 8) {
     const start = Math.max(0, match.index - 16);
     const end = Math.min(promptText.length, match.index + match[0].length + 16);
-    contexts.push(promptText.slice(start, end).replace(/[a-z0-9]/gi, (ch) => (/[0-9]/.test(ch) ? '9' : ch === ch.toUpperCase() ? 'A' : 'a')));
+    contexts.push(Array.from(promptText.slice(start, end), maskContextCharacter).join(''));
   }
   return contexts;
 }

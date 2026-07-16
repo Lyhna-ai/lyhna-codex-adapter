@@ -433,6 +433,13 @@ test('unrecognized prompts leave a content-free miss marker', { concurrency: fal
   assert.match(shapeMarker.mention_contexts[0], /\[@aaaaa-aaaaaa\]\(aaaaaa:/);
   assert(!JSON.stringify(shapeMarker).includes('widget'));
 
+  const unicodePrompt = '秘密のlyhnaトークン désolé';
+  assert.equal(rememberInvocation({ sessionId: 'miss-unicode', prompt: unicodePrompt }), false);
+  const unicodeMarker = JSON.parse(readFileSync(missMarkerPath(root, unicodePrompt), 'utf8'));
+  assert.match(unicodeMarker.mention_contexts[0], /^[\x20-\x7e]*$/);
+  assert(!JSON.stringify(unicodeMarker.mention_contexts).includes('秘'));
+  assert(!JSON.stringify(unicodeMarker.mention_contexts).includes('désolé'));
+
   assert.equal(rememberInvocation({ sessionId: 'miss-foo', prompt: '@lyhnafoo hello' }), false);
   assert(existsSync(missMarkerPath(root, '@lyhnafoo hello')));
   assert(!existsSync(join(root, 'debug')));
