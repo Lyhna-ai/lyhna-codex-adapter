@@ -1,0 +1,9 @@
+{
+  "lyhna": {
+    "command": "node",
+    "args": ["./src/mcp-server.mjs"],
+    "env_vars": ["LYHNA_CODEX_DATA"],
+    "cwd": ".",
+    "default_tools_approval_mode": "approve"
+  }
+}
