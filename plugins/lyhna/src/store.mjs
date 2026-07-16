@@ -396,7 +396,7 @@ export function beginRun(capability, { mode, objective = '' }) {
   });
 }
 
-const INVOCATION_NON_BOUNDARY_BEFORE = /[a-z0-9@]/i;
+const INVOCATION_NON_BOUNDARY_BEFORE = /[\p{L}\p{M}\p{N}_@]/u;
 const INVOCATION_STRUCTURED = /^\[@?lyhna[^\]]*\]\(plugin:\/\/lyhna-codex-adapter(?=[^\p{L}\p{M}\p{N}_-])[^)]*\)/iu;
 const INVOCATION_URI = /plugin:\/\/lyhna-codex-adapter(?=$|[^\p{L}\p{M}\p{N}_-])/iu;
 const INVOCATION_LITERAL_LONG = /^@lyhna-codex-adapter(?:@[a-z0-9-]+)?(?=$|[^\p{L}\p{M}\p{N}_-])/iu;

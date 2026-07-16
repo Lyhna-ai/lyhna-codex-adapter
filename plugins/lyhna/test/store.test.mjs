@@ -305,7 +305,9 @@ test('invocation capture recognizes a boundary Lyhna mention anywhere in the pro
     'see plugin://lyhna-codex-adapter_beta docs',
     '@lyhnaトークン is a different handle.',
     '$lyhnaé is a different handle.',
-    'see plugin://lyhna-codex-adapterトークン docs'
+    'see plugin://lyhna-codex-adapterトークン docs',
+    'email adam_@lyhna.example about it',
+    '秘密@lyhna.example is an address.'
   ].entries()) {
     assert.equal(rememberInvocation({ sessionId: `negative-${index}`, prompt }), false);
     const parent = mintSession({ sessionId: `negative-${index}`, cwd: process.cwd() });
