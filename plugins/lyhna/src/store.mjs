@@ -398,7 +398,7 @@ export function beginRun(capability, { mode, objective = '' }) {
 
 const INVOCATION_NON_BOUNDARY_BEFORE = /[\p{L}\p{M}\p{N}_@]/u;
 const INVOCATION_STRUCTURED = /^\[@?lyhna[^\]]*\]\(plugin:\/\/lyhna-codex-adapter(?=[^\p{L}\p{M}\p{N}_-])[^)]*\)/iu;
-const INVOCATION_URI = /plugin:\/\/lyhna-codex-adapter(?=$|[^\p{L}\p{M}\p{N}_-])/iu;
+const INVOCATION_URI = /plugin:\/\/lyhna-codex-adapter(?=$|[^\p{L}\p{M}\p{N}_-])/giu;
 const INVOCATION_LITERAL_LONG = /^@lyhna-codex-adapter(?:@[a-z0-9-]+)?(?=$|[^\p{L}\p{M}\p{N}_-])/iu;
 const INVOCATION_LITERAL_SHORT = /^@lyhna(?=$|[^\p{L}\p{M}\p{N}_-])/iu;
 const INVOCATION_LITERAL_DOLLAR = /^\$lyhna(?=$|[^\p{L}\p{M}\p{N}_-])/iu;
@@ -412,8 +412,11 @@ function detectInvocation(promptText) {
     if (INVOCATION_LITERAL_SHORT.test(rest)) return { matched_form: 'literal_short', mention_offset: index };
     if (INVOCATION_LITERAL_DOLLAR.test(rest)) return { matched_form: 'literal_dollar', mention_offset: index };
   }
-  const uriMatch = INVOCATION_URI.exec(promptText);
-  if (uriMatch) return { matched_form: 'structured', mention_offset: uriMatch.index };
+  for (const uriMatch of promptText.matchAll(INVOCATION_URI)) {
+    if (uriMatch.index === 0 || !INVOCATION_NON_BOUNDARY_BEFORE.test(promptText[uriMatch.index - 1])) {
+      return { matched_form: 'structured', mention_offset: uriMatch.index };
+    }
+  }
   return null;
 }
 
