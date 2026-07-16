@@ -5,6 +5,8 @@
 
 Independent third-party evaluation record for the Lyhna Codex Adapter and the Lyhna product direction. Assembled by the evaluator session at Adam's direction; nothing here approves, certifies, or merges anything — canonical/adoption status of every document is Adam's decision.
 
+**Taking over from a prior session? Read [HANDOFF-2026-07-16.md](HANDOFF-2026-07-16.md) first** — it carries the role, the exact current state, the operating loop, and the continuation prompt.
+
 Read in this order:
 
 1. **[CUSTOMER-ZERO-REVIEW-2026-07-16.md](CUSTOMER-ZERO-REVIEW-2026-07-16.md)** — the most recent and most actionable document. Findings from the first real customer-zero run (ChatGPT Work, Homestead repos), the updated product verdict, and the dependency-ordered work order for the next adapter slice. **This is the handoff for the builder.**
