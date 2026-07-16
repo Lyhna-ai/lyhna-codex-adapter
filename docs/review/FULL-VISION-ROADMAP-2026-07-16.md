@@ -47,9 +47,19 @@ Front door, run-type rule, seal semantics, packet self-containment. Not part of 
 
 ### Step 3 — The dual axis, made explicit
 
-Record the **institution's response class** on every consequential event — approved / escalated / refused / corrected / blocked-by-gate — derived from hook evidence (permission requests, gate stops), never from agent claims. The Rooms run showed this data already flows (three authority-gate stops recorded); this step types it and puts it on the receipt.
+The second axis of every decision trace is **the environment's observed response**: what the runtime and the institution's own systems *did* next, witnessed by hooks as it happened. Typed as past-tense observations:
 
-**Gate:** a blind reader can reconstruct "how the institution responded" from the receipt without prose.
+- `PROCEEDED` — the call was forwarded and returned
+- `HELD` — the runtime raised its own approval prompt (a PermissionRequest event was observed)
+- `TURNED_BACK` — the runtime or tool declined the action
+- `GATE_STOPPED` — an external system's own rule halted forward motion (e.g., a required status check)
+- `REDONE` — a later observed event superseded this one
+
+**Vocabulary guard — constitutional for this step.** These are records of events Lyhna *witnessed*, never verbs Lyhna *performs*. Lyhna approves nothing, escalates nothing, refuses nothing, blocks nothing — it has no part in the response axis except seeing it and writing it down, exactly as it has no part in the agent's claim axis except recording it. Every response label must trace to an observed external event (hook event ref on the receipt); if any label is ever computed from Lyhna's own decision rather than an observed event, that is bind returning through a field name — stop that change. The permission-flavored words (approve/escalate/refuse/block) are banned from this axis's schema and surfaces; the project has already lost 60–90 days to that vocabulary once, and it rode in through exactly this kind of naming.
+
+The Rooms run showed the data already flows (three external gate stops observed and recorded); this step only types what is already seen.
+
+**Gate:** a blind reader can reconstruct "what the environment did in response" from the receipt without prose — and cannot mistake any of it for something Lyhna decided.
 
 ### Step 4 — The corpus: runs become a population
 
