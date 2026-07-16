@@ -434,7 +434,6 @@ function coercePromptText(prompt) {
   if (Array.isArray(prompt)) {
     return prompt.map((part) => {
       if (typeof part === 'string') return part;
-      if (part && typeof part.text === 'string') return part.text;
       return part === null || part === undefined ? '' : canonicalJson(part);
     }).join('\n');
   }

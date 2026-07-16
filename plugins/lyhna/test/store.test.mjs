@@ -386,6 +386,10 @@ test('invocation capture records the matched form and structural offset', { conc
   assert.equal(rememberInvocation({ sessionId: 'object-payload', prompt: objectPayload }), true);
   assert.equal(pendingRecord(root, 'object-payload').matched_form, 'structured');
 
+  const displayTextMention = [{ text: 'Lyhna', uri: 'plugin://lyhna-codex-adapter@lyhna-ai' }, { text: 'please continue.' }];
+  assert.equal(rememberInvocation({ sessionId: 'display-text-mention', prompt: displayTextMention }), true);
+  assert.equal(pendingRecord(root, 'display-text-mention').matched_form, 'structured');
+
   assert.equal(rememberInvocation({ sessionId: 'preamble-long-e2e', prompt: preambleLong }), true);
   const e2eParent = mintSession({ sessionId: 'preamble-long-e2e', cwd: process.cwd() });
   const e2eRun = beginRun(e2eParent, { mode: 'full', objective: 'Continue the reviewed loop.' });
