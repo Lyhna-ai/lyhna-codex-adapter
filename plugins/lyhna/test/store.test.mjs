@@ -298,7 +298,11 @@ test('invocation capture recognizes a boundary Lyhna mention anywhere in the pro
     '@lyhna-reviewer is a different token.',
     '$lyhna-other is a different token.',
     'see plugin://lyhna-codex-adapter-test docs',
-    '[fork docs](plugin://lyhna-codex-adapter-test) for the fork'
+    '[fork docs](plugin://lyhna-codex-adapter-test) for the fork',
+    '@lyhna_adapter is a different token.',
+    '$lyhna_other is a different token.',
+    '@lyhna-codex-adapter_beta is a different token.',
+    'see plugin://lyhna-codex-adapter_beta docs'
   ].entries()) {
     assert.equal(rememberInvocation({ sessionId: `negative-${index}`, prompt }), false);
     const parent = mintSession({ sessionId: `negative-${index}`, cwd: process.cwd() });
