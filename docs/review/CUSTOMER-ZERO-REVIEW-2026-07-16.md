@@ -171,4 +171,14 @@ The readable evaluator verdict (CZ-5) is now independently demanded by every cla
 
 ---
 
+## PART H — SECOND LOOK AT THE ROOMS-THREAD RECORD (2026-07-16, old plugin)
+
+A fuller Sources-pane dump of the original Rooms thread (now three runs — the two analyzed above plus `run_76553275…`, all `agent_reported`, confirming the pre-fix plugin) surfaced two findings the first pass missed. Both are candidates for the Slice B scope decision:
+
+**CZ-11 — P2 — A rejected claim attempt leaves no durable trace.** One `record_claim` call failed with `UNKNOWN_CAPABILITY` and nothing in any run record marks the attempt. For a witness product, a claim the narrator tried and failed to place on the record is itself evidence — its silent disappearance means the receipt cannot distinguish "the agent never claimed this" from "the agent claimed it and the recording failed." Smallest correction: failed tool calls that carry a syntactically plausible capability record a value-free `claim_rejected` observation (error code only, no content) in whatever run that capability's session maps to — or, when unmappable, a content-free marker beside the pending-miss family.
+
+**CZ-12 — P2 — An abandoned open run is invisible.** `run_76553275…` opened `full` and never requested close; nothing ever surfaces that a run began witnessing and simply stopped. Smallest correction: `begin_run` and the receipt inbox surface any prior run left `OPEN` without a close request ("witnessing started and was abandoned at event N"), and a new run in the same session states the abandoned predecessor on its face.
+
+---
+
 *The builder produces. The evaluator examines. Lyhna witnesses. Adam decides.*
