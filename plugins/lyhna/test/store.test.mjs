@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
@@ -26,7 +26,20 @@ import {
   verifySealedRun
 } from '../src/store.mjs';
 import { sanitizeHook } from '../src/redact.mjs';
+import { sha256 } from '../src/util.mjs';
 import { isolatedData, stableSnapshot } from './helpers.mjs';
+
+function pendingRecord(root, sessionId) {
+  return JSON.parse(readFileSync(join(root, 'pending', `${sha256(sessionId)}.json`), 'utf8'));
+}
+
+function missMarkerPath(root, prompt) {
+  return join(root, 'pending-miss', `miss-${sha256(prompt).slice(0, 16)}.json`);
+}
+
+function runBegunEvent(runId) {
+  return getRunForTesting(runId).events.find((event) => event.type === 'run_begun');
+}
 
 test('capabilities are hook-bound, isolated, and parent cannot self-review', { concurrency: false }, (t) => {
   isolatedData(t);
@@ -277,22 +290,28 @@ test('stale lock ownership is recovered and free-form credentials never persist'
   assert(!all.includes('private customer feature'));
 });
 
-test('invocation capture requires a leading Lyhna mention token', { concurrency: false }, (t) => {
+test('invocation capture recognizes a boundary Lyhna mention anywhere in the prompt', { concurrency: false }, (t) => {
   isolatedData(t);
   for (const [index, prompt] of [
     'Email adam@lyhna.example about the report.',
-    'Do not invoke @lyhna for this task.',
-    'Quoted example: "@lyhna review this PR".',
     '`@lyhna` is the documented syntax.',
     '@lyhnatic is a different token.',
     '@lyhna-reviewer is a different token.',
     '$lyhna-other is a different token.',
-    '[@Lyhna](plugin://lyhna-reviewer@lyhna-ai) is a different plugin.',
-    '[@Lyhna](plugin://lyhna-codex-adapter@another-marketplace) is a different marketplace.'
+    '[@Lyhna](plugin://lyhna-reviewer@lyhna-ai) is a different plugin.'
   ].entries()) {
     assert.equal(rememberInvocation({ sessionId: `negative-${index}`, prompt }), false);
     const parent = mintSession({ sessionId: `negative-${index}`, cwd: process.cwd() });
     assert.equal(beginRun(parent, { mode: 'full', objective: 'Fallback objective.' }).objective_origin, 'agent_reported');
+  }
+  for (const [index, prompt] of [
+    'Do not invoke @lyhna for this task.',
+    'Quoted example: "@lyhna review this PR".',
+    '[@Lyhna](plugin://lyhna-codex-adapter@another-marketplace) is a different marketplace.'
+  ].entries()) {
+    assert.equal(rememberInvocation({ sessionId: `boundary-positive-${index}`, prompt }), true);
+    const parent = mintSession({ sessionId: `boundary-positive-${index}`, cwd: process.cwd() });
+    assert.equal(beginRun(parent, { mode: 'full', objective: 'Fallback objective.' }).objective_origin, 'runtime_hook');
   }
   assert.equal(rememberInvocation({ sessionId: 'positive-at', prompt: '  @Lyhna review PR #1.' }), true);
   const atParent = mintSession({ sessionId: 'positive-at', cwd: process.cwd() });
@@ -302,6 +321,78 @@ test('invocation capture requires a leading Lyhna mention token', { concurrency:
     sessionId: 'positive-plugin',
     prompt: ' [@Lyhna](plugin://lyhna-codex-adapter@lyhna-ai) examine this PR.'
   }), true);
+});
+
+test('invocation capture records the matched form and structural offset', { concurrency: false }, (t) => {
+  const root = isolatedData(t);
+
+  const preambleLong = 'Great job , thank you.\n\n@lyhna-codex-adapter Please move forward with this above plan.';
+  assert.equal(rememberInvocation({ sessionId: 'preamble-long', prompt: preambleLong }), true);
+  const longRecord = pendingRecord(root, 'preamble-long');
+  assert.equal(longRecord.matched_form, 'literal_long');
+  assert.equal(longRecord.mention_offset, preambleLong.indexOf('@lyhna-codex-adapter'));
+  assert.equal(longRecord.prompt_bytes, Buffer.byteLength(preambleLong));
+  assert.match(longRecord.summary, /Invocation objective retained by hash/);
+
+  const midSentence = 'please use @lyhna for this';
+  assert.equal(rememberInvocation({ sessionId: 'mid-short', prompt: midSentence }), true);
+  const shortRecord = pendingRecord(root, 'mid-short');
+  assert.equal(shortRecord.matched_form, 'literal_short');
+  assert.equal(shortRecord.mention_offset, midSentence.indexOf('@lyhna'));
+
+  const dollar = '$lyhna please examine this PR.';
+  assert.equal(rememberInvocation({ sessionId: 'lead-dollar', prompt: dollar }), true);
+  const dollarRecord = pendingRecord(root, 'lead-dollar');
+  assert.equal(dollarRecord.matched_form, 'literal_dollar');
+  assert.equal(dollarRecord.mention_offset, 0);
+
+  const structured = 'Thanks for the plan. [@Lyhna](plugin://lyhna-codex-adapter@lyhna-ai) please examine it.';
+  assert.equal(rememberInvocation({ sessionId: 'preamble-structured', prompt: structured }), true);
+  const structuredRecord = pendingRecord(root, 'preamble-structured');
+  assert.equal(structuredRecord.matched_form, 'structured');
+  assert.equal(structuredRecord.mention_offset, structured.indexOf('[@Lyhna'));
+});
+
+test('unrecognized prompts leave a content-free miss marker', { concurrency: false }, (t) => {
+  const root = isolatedData(t);
+
+  const email = 'email adam@lyhna.ai about it';
+  assert.equal(rememberInvocation({ sessionId: 'miss-email', prompt: email }), false);
+  assert(!existsSync(join(root, 'pending', `${sha256('miss-email')}.json`)));
+  const emailMarker = JSON.parse(readFileSync(missMarkerPath(root, email), 'utf8'));
+  assert.equal(emailMarker.ref, sha256(email));
+  assert.equal(emailMarker.prompt_bytes, Buffer.byteLength(email));
+  assert.equal(emailMarker.contains_at_sigil, true);
+  assert.equal(emailMarker.contains_plugin_uri, false);
+  assert(!JSON.stringify(emailMarker).includes(email));
+
+  const bareMention = 'the lyhna adapter is neat';
+  assert.equal(rememberInvocation({ sessionId: 'miss-bare', prompt: bareMention }), false);
+  const bareMarker = JSON.parse(readFileSync(missMarkerPath(root, bareMention), 'utf8'));
+  assert.equal(bareMarker.contains_at_sigil, false);
+  assert.equal(bareMarker.contains_dollar_sigil, false);
+  assert.equal(bareMarker.contains_plugin_uri, false);
+
+  assert.equal(rememberInvocation({ sessionId: 'miss-foo', prompt: '@lyhnafoo hello' }), false);
+  assert(existsSync(missMarkerPath(root, '@lyhnafoo hello')));
+  assert(!existsSync(join(root, 'debug')));
+});
+
+test('remembered invocation threads structural evidence into run_begun', { concurrency: false }, (t) => {
+  isolatedData(t);
+  assert.equal(rememberInvocation({ sessionId: 'thread-parent', prompt: 'please run @lyhna on this.' }), true);
+  const parent = mintSession({ sessionId: 'thread-parent', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Fallback objective.' });
+  assert.equal(run.objective_origin, 'runtime_hook');
+  const begun = runBegunEvent(run.id);
+  assert.equal(begun.payload.invocation.matched_form, 'literal_short');
+  assert.equal(begun.payload.invocation.mention_offset, 'please run '.length);
+
+  const plain = mintSession({ sessionId: 'thread-plain', cwd: process.cwd() });
+  const plainRun = beginRun(plain, { mode: 'full', objective: 'No prior invocation.' });
+  assert.equal(plainRun.objective_origin, 'agent_reported');
+  const plainBegun = runBegunEvent(plainRun.id);
+  assert.equal('invocation' in plainBegun.payload, false);
 });
 
 test('pending invocation evidence is consumed by begin_run', { concurrency: false }, (t) => {

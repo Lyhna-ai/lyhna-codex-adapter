@@ -17,7 +17,7 @@ The adapter records what was observed. It never approves, blocks, certifies, mer
 
 ### Full witnessed run
 
-1. The user explicitly invokes Lyhna (`[@Lyhna](plugin://lyhna-codex-adapter@lyhna-ai)` when the desktop composer serializes the plugin mention, a literal leading `@lyhna`, or a leading `$lyhna` where Codex uses skill mentions).
+1. The user explicitly invokes Lyhna. The mention is recognized anywhere in the prompt, not only at its start, on a real word boundary, in any of four accepted forms: a structured plugin mention (`[@Lyhna](plugin://lyhna-codex-adapter…)`) when the desktop composer serializes it, the literal long form `@lyhna-codex-adapter`, the literal short form `@lyhna`, or `$lyhna` where Codex uses skill mentions. Preamble text before the mention no longer defeats capture.
 2. The skill calls `begin_run` before consequential work.
 3. Supported Codex lifecycle hooks append coverage-scoped events while the run is active.
 4. Consequential agent assertions use `record_claim` with evidence references.

@@ -13,6 +13,10 @@ The builder produces. The evaluator examines. Lyhna witnesses. The user decides.
 
 Never say Lyhna approves, blocks, certifies, guarantees, merges, or proves commercial, architectural, legal, operational, or product correctness. Hook absence means only `not observed` within configured coverage.
 
+## Choosing the mode
+
+Use `mode: "full"` whenever the request asks to build, change, fix, continue, or delegate work — even partially. Use `mode: "pr_only"` only when the request is explicitly and solely a retrospective examination of an existing PR with no build work. When ambiguous, choose `full`: a full run that observes little is honest, while a retrospective run over active build work misattributes the session.
+
 ## Start a full witnessed run
 
 1. Read the `LYHNA_SESSION_CAPABILITY` supplied in SessionStart context.

@@ -22,7 +22,7 @@ function requireSnapshot(state, snapshotId) {
 }
 
 export const toolDefinitions = [
-  ['begin_run', 'Start an explicitly requested Lyhna run.', ['session_capability', 'mode']],
+  ['begin_run', 'Start an explicitly requested Lyhna run. Use mode "full" whenever the request asks to build, change, fix, continue, or delegate work; use "pr_only" only for a solely retrospective examination of an existing PR; when ambiguous, choose "full".', ['session_capability', 'mode']],
   ['record_claim', 'Record a builder assertion with optional evidence references.', ['session_capability', 'statement']],
   ['snapshot_pr', 'Capture sanitized GitHub metadata at an exact observed PR head.', ['session_capability', 'repository', 'pr_number']],
   ['begin_evaluation', 'Create an evaluator request and detached exact-head checkout.', ['session_capability', 'pr_snapshot_id', 'source_cwd']],
@@ -41,7 +41,7 @@ export const toolDefinitions = [
     properties: {
       session_capability: { type: 'string' },
       child_capability: { type: 'string' },
-      mode: { type: 'string', enum: ['full', 'pr_only'] },
+      mode: { type: 'string', enum: ['full', 'pr_only'], description: '"full" for any request to build, change, fix, continue, or delegate work; "pr_only" only for a solely retrospective PR examination; prefer "full" when ambiguous.' },
       objective: { type: 'string' },
       statement: { type: 'string' },
       evidence_refs: { type: 'array', items: { type: 'string' } },

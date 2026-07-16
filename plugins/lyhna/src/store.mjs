@@ -378,11 +378,13 @@ export function beginRun(capability, { mode, objective = '' }) {
       child_receipts: {}
     };
     mkdirSync(runDir(runId), { recursive: true });
+    const runBegunPayload = { mode, objective_origin: state.objective_origin };
+    if (pending) runBegunPayload.invocation = { matched_form: pending.matched_form, mention_offset: pending.mention_offset };
     withLock(lockPath(runId), () => {
       appendEventUnlocked(runId, state, {
         type: 'run_begun',
         origin: 'mcp_routed',
-        payload: { mode, objective_origin: state.objective_origin },
+        payload: runBegunPayload,
         idempotencyKey: `begin:${runId}`
       });
       saveState(state);
@@ -393,17 +395,55 @@ export function beginRun(capability, { mode, objective = '' }) {
   });
 }
 
+const INVOCATION_BOUNDARY_BEFORE = /[\s([{"'`]/;
+const INVOCATION_STRUCTURED = /^\[@lyhna[^\]]*\]\(plugin:\/\/lyhna-codex-adapter[^)]*\)/i;
+const INVOCATION_LITERAL_LONG = /^@lyhna-codex-adapter(?=$|[\s,:;.!?)])/i;
+const INVOCATION_LITERAL_SHORT = /^@lyhna(?=$|[\s,:;.!?)])/i;
+const INVOCATION_LITERAL_DOLLAR = /^\$lyhna(?=$|[\s,:;.!?)])/i;
+
+function detectInvocation(promptText) {
+  for (let index = 0; index < promptText.length; index += 1) {
+    const rest = promptText.slice(index);
+    if (INVOCATION_STRUCTURED.test(rest)) return { matched_form: 'structured', mention_offset: index };
+    if (index !== 0 && !INVOCATION_BOUNDARY_BEFORE.test(promptText[index - 1])) continue;
+    if (INVOCATION_LITERAL_LONG.test(rest)) return { matched_form: 'literal_long', mention_offset: index };
+    if (INVOCATION_LITERAL_SHORT.test(rest)) return { matched_form: 'literal_short', mention_offset: index };
+    if (INVOCATION_LITERAL_DOLLAR.test(rest)) return { matched_form: 'literal_dollar', mention_offset: index };
+  }
+  return null;
+}
+
+function recordInvocationMiss(promptText) {
+  if (!/lyhna/i.test(promptText)) return;
+  const digest = sha256(promptText);
+  const lower = promptText.toLowerCase();
+  atomicWriteJson(join(root(), 'pending-miss', `miss-${digest.slice(0, 16)}.json`), {
+    ref: digest,
+    prompt_bytes: Buffer.byteLength(promptText),
+    contains_at_sigil: lower.includes('@lyhna'),
+    contains_dollar_sigil: lower.includes('$lyhna'),
+    contains_plugin_uri: lower.includes('plugin://lyhna-codex-adapter')
+  });
+  if (process.env.LYHNA_DEBUG_INVOCATION === '1') {
+    atomicWriteText(join(root(), 'debug', `invocation-${digest.slice(0, 16)}.txt`), promptText);
+  }
+}
+
 export function rememberInvocation({ sessionId, prompt }) {
   const promptText = String(prompt || '');
-  const leadingText = promptText.trimStart();
-  const literalMention = /^(?:@lyhna|\$lyhna)(?=$|[\s,:;.!?])/i.test(leadingText);
-  const structuredPluginMention = /^\[@lyhna\]\(plugin:\/\/lyhna-codex-adapter@lyhna-ai\)(?=$|\s)/i.test(leadingText);
-  const explicitlyInvoked = literalMention || structuredPluginMention;
-  if (!sessionId || !explicitlyInvoked) return false;
+  const detected = detectInvocation(promptText);
+  if (!detected) {
+    recordInvocationMiss(promptText);
+    return false;
+  }
+  if (!sessionId) return false;
   const sessionHash = sha256(String(sessionId));
   atomicWriteJson(join(root(), 'pending', `${sessionHash}.json`), {
     summary: promptSynopsis(promptText),
-    ref: sha256(promptText)
+    ref: sha256(promptText),
+    matched_form: detected.matched_form,
+    mention_offset: detected.mention_offset,
+    prompt_bytes: Buffer.byteLength(promptText)
   });
   return true;
 }
