@@ -3,6 +3,7 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync
@@ -395,29 +396,51 @@ export function beginRun(capability, { mode, objective = '' }) {
   });
 }
 
-const INVOCATION_BOUNDARY_BEFORE = /[\s([{"'`]/;
-const INVOCATION_STRUCTURED = /^\[@lyhna[^\]]*\]\(plugin:\/\/lyhna-codex-adapter[^)]*\)/i;
-const INVOCATION_LITERAL_LONG = /^@lyhna-codex-adapter(?=$|[\s,:;.!?)])/i;
-const INVOCATION_LITERAL_SHORT = /^@lyhna(?=$|[\s,:;.!?)])/i;
-const INVOCATION_LITERAL_DOLLAR = /^\$lyhna(?=$|[\s,:;.!?)])/i;
+const INVOCATION_NON_BOUNDARY_BEFORE = /[a-z0-9@]/i;
+const INVOCATION_STRUCTURED = /^\[@?lyhna[^\]]*\]\(plugin:\/\/lyhna-codex-adapter[^)]*\)/i;
+const INVOCATION_PLUGIN_URI = 'plugin://lyhna-codex-adapter';
+const INVOCATION_LITERAL_LONG = /^@lyhna-codex-adapter(?:@[a-z0-9-]+)?(?=$|[^a-z0-9-])/i;
+const INVOCATION_LITERAL_SHORT = /^@lyhna(?=$|[^a-z0-9-])/i;
+const INVOCATION_LITERAL_DOLLAR = /^\$lyhna(?=$|[^a-z0-9-])/i;
 
 function detectInvocation(promptText) {
   for (let index = 0; index < promptText.length; index += 1) {
     const rest = promptText.slice(index);
     if (INVOCATION_STRUCTURED.test(rest)) return { matched_form: 'structured', mention_offset: index };
-    if (index !== 0 && !INVOCATION_BOUNDARY_BEFORE.test(promptText[index - 1])) continue;
+    if (index !== 0 && INVOCATION_NON_BOUNDARY_BEFORE.test(promptText[index - 1])) continue;
     if (INVOCATION_LITERAL_LONG.test(rest)) return { matched_form: 'literal_long', mention_offset: index };
     if (INVOCATION_LITERAL_SHORT.test(rest)) return { matched_form: 'literal_short', mention_offset: index };
     if (INVOCATION_LITERAL_DOLLAR.test(rest)) return { matched_form: 'literal_dollar', mention_offset: index };
   }
+  const uriIndex = promptText.toLowerCase().indexOf(INVOCATION_PLUGIN_URI);
+  if (uriIndex !== -1) return { matched_form: 'structured', mention_offset: uriIndex };
   return null;
 }
 
+function coercePromptText(prompt) {
+  if (typeof prompt === 'string') return prompt;
+  if (Array.isArray(prompt)) {
+    return prompt.map((part) => {
+      if (typeof part === 'string') return part;
+      if (part && typeof part.text === 'string') return part.text;
+      return part === null || part === undefined ? '' : canonicalJson(part);
+    }).join('\n');
+  }
+  if (prompt && typeof prompt === 'object') return canonicalJson(prompt);
+  return '';
+}
+
+const INVOCATION_MISS_LIMIT = 32;
+
 function recordInvocationMiss(promptText) {
   if (!/lyhna/i.test(promptText)) return;
+  const missDir = join(root(), 'pending-miss');
+  let existing = [];
+  try { existing = readdirSync(missDir); } catch { existing = []; }
   const digest = sha256(promptText);
+  if (existing.length >= INVOCATION_MISS_LIMIT && !existing.includes(`miss-${digest.slice(0, 16)}.json`)) return;
   const lower = promptText.toLowerCase();
-  atomicWriteJson(join(root(), 'pending-miss', `miss-${digest.slice(0, 16)}.json`), {
+  atomicWriteJson(join(missDir, `miss-${digest.slice(0, 16)}.json`), {
     ref: digest,
     prompt_bytes: Buffer.byteLength(promptText),
     contains_at_sigil: lower.includes('@lyhna'),
@@ -430,7 +453,7 @@ function recordInvocationMiss(promptText) {
 }
 
 export function rememberInvocation({ sessionId, prompt }) {
-  const promptText = String(prompt || '');
+  const promptText = coercePromptText(prompt);
   const detected = detectInvocation(promptText);
   if (!detected) {
     recordInvocationMiss(promptText);

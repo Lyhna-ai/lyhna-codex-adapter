@@ -294,11 +294,9 @@ test('invocation capture recognizes a boundary Lyhna mention anywhere in the pro
   isolatedData(t);
   for (const [index, prompt] of [
     'Email adam@lyhna.example about the report.',
-    '`@lyhna` is the documented syntax.',
     '@lyhnatic is a different token.',
     '@lyhna-reviewer is a different token.',
-    '$lyhna-other is a different token.',
-    '[@Lyhna](plugin://lyhna-reviewer@lyhna-ai) is a different plugin.'
+    '$lyhna-other is a different token.'
   ].entries()) {
     assert.equal(rememberInvocation({ sessionId: `negative-${index}`, prompt }), false);
     const parent = mintSession({ sessionId: `negative-${index}`, cwd: process.cwd() });
@@ -307,7 +305,15 @@ test('invocation capture recognizes a boundary Lyhna mention anywhere in the pro
   for (const [index, prompt] of [
     'Do not invoke @lyhna for this task.',
     'Quoted example: "@lyhna review this PR".',
-    '[@Lyhna](plugin://lyhna-codex-adapter@another-marketplace) is a different marketplace.'
+    '[@Lyhna](plugin://lyhna-codex-adapter@another-marketplace) is a different marketplace.',
+    '`@lyhna` is the documented syntax.',
+    '[@Lyhna](plugin://lyhna-reviewer@lyhna-ai) shows the @Lyhna display text.',
+    '@lyhna-codex-adapter@lyhna-ai please move this forward.',
+    'wrap check [@lyhna] please',
+    '**@lyhna** run this',
+    'resume—@lyhna continue the loop',
+    '[Lyhna Codex Adapter](plugin://lyhna-codex-adapter@lyhna-ai) go ahead.',
+    'invoke plugin://lyhna-codex-adapter@lyhna-ai now'
   ].entries()) {
     assert.equal(rememberInvocation({ sessionId: `boundary-positive-${index}`, prompt }), true);
     const parent = mintSession({ sessionId: `boundary-positive-${index}`, cwd: process.cwd() });
@@ -351,6 +357,43 @@ test('invocation capture records the matched form and structural offset', { conc
   const structuredRecord = pendingRecord(root, 'preamble-structured');
   assert.equal(structuredRecord.matched_form, 'structured');
   assert.equal(structuredRecord.mention_offset, structured.indexOf('[@Lyhna'));
+
+  const qualified = '@lyhna-codex-adapter@lyhna-ai please continue.';
+  assert.equal(rememberInvocation({ sessionId: 'qualified-long', prompt: qualified }), true);
+  assert.equal(pendingRecord(root, 'qualified-long').matched_form, 'literal_long');
+
+  const bareUri = 'invoke plugin://lyhna-codex-adapter@lyhna-ai now';
+  assert.equal(rememberInvocation({ sessionId: 'bare-uri', prompt: bareUri }), true);
+  const bareUriRecord = pendingRecord(root, 'bare-uri');
+  assert.equal(bareUriRecord.matched_form, 'structured');
+  assert.equal(bareUriRecord.mention_offset, bareUri.indexOf('plugin://'));
+
+  const parts = [
+    { type: 'text', text: 'Great job on the plan.' },
+    { type: 'mention', text: '@lyhna-codex-adapter' },
+    { type: 'text', text: 'please move forward.' }
+  ];
+  assert.equal(rememberInvocation({ sessionId: 'structured-parts', prompt: parts }), true);
+  assert.equal(pendingRecord(root, 'structured-parts').matched_form, 'literal_long');
+
+  const objectPayload = { content: [{ plugin: 'plugin://lyhna-codex-adapter@lyhna-ai' }] };
+  assert.equal(rememberInvocation({ sessionId: 'object-payload', prompt: objectPayload }), true);
+  assert.equal(pendingRecord(root, 'object-payload').matched_form, 'structured');
+
+  assert.equal(rememberInvocation({ sessionId: 'preamble-long-e2e', prompt: preambleLong }), true);
+  const e2eParent = mintSession({ sessionId: 'preamble-long-e2e', cwd: process.cwd() });
+  const e2eRun = beginRun(e2eParent, { mode: 'full', objective: 'Continue the reviewed loop.' });
+  assert.equal(e2eRun.objective_origin, 'runtime_hook');
+  assert.equal(runBegunEvent(e2eRun.id).payload.invocation.matched_form, 'literal_long');
+});
+
+test('miss markers stop accumulating at the deterministic limit', { concurrency: false }, (t) => {
+  const root = isolatedData(t);
+  for (let index = 0; index < 40; index += 1) {
+    assert.equal(rememberInvocation({ sessionId: `flood-${index}`, prompt: `lyhna filler number ${index}` }), false);
+  }
+  const markers = readdirSync(join(root, 'pending-miss'));
+  assert.equal(markers.length, 32);
 });
 
 test('unrecognized prompts leave a content-free miss marker', { concurrency: false }, (t) => {
