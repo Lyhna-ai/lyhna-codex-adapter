@@ -1,0 +1,60 @@
+# Build Plan — Slices A–H and the Cross-Platform Loop
+
+> **Provenance.** Written 2026-07-16 by the lead session (Claude, Fable) on Adam's direction to take the build lead. This operationalizes the customer-zero work order (`CUSTOMER-ZERO-REVIEW-2026-07-16.md`, Part C) and the reclamation ladder (`FULL-VISION-ROADMAP-2026-07-16.md`) into an execution plan.
+>
+> **The settled premise (Adam, 2026-07-16):** six months ago the receipt was for humans. That has changed entirely and the customer-zero evidence proved it — **the feed to both human and agent is the value.** Every slice below serves both readers.
+
+---
+
+## 1. The operating loop (every slice runs this way)
+
+1. **Spec** — the lead specs the slice from the work order and roadmap, with acceptance criteria written before code.
+2. **Build** — Opus builder subagents implement. Builders never review their own work.
+3. **Review, three ways** — an independent adversarial reviewer subagent attacks the diff; the lead reviews everything; the push to the PR triggers hosted **Codex review** on GitHub — the cross-platform brain check (two different model families reading the same diff).
+4. **Field test** — Adam runs the installed plugin on real builds in his other projects (the Rooms pattern). The receipts and host-surface evidence come back to this session for evaluation. **The plugin in the field is the delivery vehicle and the test harness at once.**
+5. **Gate** — a slice is done when its field gate passes, not when CI is green. This rule exists because of finding F2: the project has already been burned once by green checks that proved nothing about the runtime.
+
+Roles, standing: *The builders produce (Opus subagents here; Codex in the field). The evaluators examine (adversarial subagents, hosted Codex review, blind readers). Lyhna witnesses (the plugin on Adam's real builds). Adam decides.*
+
+## 2. The slices
+
+### Slice A — The Front Door *(today)*
+CZ-1 + CZ-2. Permissive invocation matcher (mention anywhere; long-form `@lyhna-codex-adapter`; structured serialization; structural miss-markers for unknown host forms; opt-in raw diagnostic), invocation evidence threaded into the run record, and the full-vs-pr_only selection rule in the skill and tool descriptions.
+**Field gate:** Adam's next real invocation shows `objective_origin: runtime_hook` from message one, `full` mode, and the matched form on the receipt.
+
+### Slice B — The Receipt Proves Itself
+CZ-3, CZ-4, CZ-8, CZ-9, CZ-10. Enforced post-evaluation refresh or a `NOT_REFRESHED` stamp; per-PR head chains (`CURRENT`/`SUPERSEDED`/`STALE`); seal result, parent receipt ID, and per-child retrieval status inside the exported packet, chronologically ordered; the explicit semantic ladder (workflow-check ≠ no-blocking-finding ≠ fixed ≠ accepted); sanitized objective synopsis and per-evaluation triggers.
+**Field gate:** a blind reader with no Lyhna knowledge credits sealing and reconstructs the head chain from the packet alone.
+
+### Slice C — Full Vision (stop discarding the fuel)
+Roadmap Step 1 + CZ-5 + CZ-6. Rich Tier-0 local capture (payloads, claims, evaluator findings — readable), hash-bound to the sealed receipt; tiered projection at every export boundary (structural spine + argument commitments + sidecar by explicit choice, validator-enforced); structural-identity fields on every consequential event; the value-free sensitive-output observation.
+**Field gate:** a receipt reads end-to-end for human and agent; structural fields on 100% of consequential events; zero raw content in boundary exports.
+
+### Slice D — The Dual Axis + The Cockpit
+Roadmap Step 3 (observational vocabulary only: `PROCEEDED`/`HELD`/`TURNED_BACK`/`GATE_STOPPED`/`REDONE`, every label traced to a witnessed external event) + CZ-7 (Sources-pane run cards, opaque checkout handles, receipt link at closeout).
+**Field gate:** a blind reader reconstructs what the environment did without prose — and cannot mistake any of it for something Lyhna decided.
+
+### Slice E — The Corpus
+Roadmap Step 4. Cross-run receipt inbox/index; deterministic grouping by structural identity ("every deploy-shaped decision across 30 runs").
+**Field gate:** Adam or Adam's agents actually query it weekly.
+
+### Slice F — The Reducer (read-only, forever)
+Roadmap Step 5. Consistency, determinism, escalation stability, drift, per-domain health grade — deterministic, offline, no model calls. **Kill-guard: the moment any score blocks execution, that change is reverted — measurement never gates.**
+**Field gate:** a metric changes a real decision (a domain automated or de-automated because of the read).
+
+### Slice G — Two Readers, Productized
+Roadmap Step 6. Agent-reader: loading the prior receipt through the witnessed read tool becomes the first act of every run. Human-reader: decomposed, weighted, "what's-driving-it" reports on the human surfaces.
+**Field gate:** a receipt or health-read voluntarily shown to someone else; measurably better next-run behavior.
+
+### Slice H — The Outward Product
+Roadmap Step 7. Agent-Readiness Map, per-domain judgment-health trending, portable signed health nodes, Tier 1 countersigning the day anything faces a third party.
+**Field gate:** G4 — someone who isn't Adam pays.
+
+## 3. Standing rules
+
+- One live edge at a time; a slice ships only when the one below passed its field gate.
+- The honesty ceiling is constitutional in every slice; the permission vocabulary is banned from schemas and surfaces.
+- Blind at the boundary, never at the eyes: disclosure is tiered at export; capture is never impoverished to make export easier.
+- Every slice's evidence (field receipts, blind reads, Codex reviews) is appended to the review record so no future session has to re-derive this.
+
+*The builder produces. The evaluator examines. Lyhna witnesses. The corpus grades. Adam decides.*
