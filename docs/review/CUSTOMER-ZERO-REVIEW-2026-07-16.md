@@ -147,4 +147,28 @@ After this review was drafted, Adam asked the Codex builder agent (in the Rooms 
 
 ---
 
+## PART G — THE BLIND-READER TEST (2026-07-16)
+
+Adam handed the exported run material to two third-party agents with **no knowledge of the Lyhna adapter or witness** and asked them to audit it cold. This is the witness THESIS moat line — *"the demo survives 'have your own AI audit this receipt'"* — run as a live experiment, twice.
+
+### G-1. Result: legibility debt, not honesty debt
+
+Both blind readers landed independently on exactly the product's claimed boundary: the material proves PR snapshots and clean, detached, exact-head evaluator checkouts — not build completion, finding substance, review-comment resolution, merge, deployment, or acceptance. Neither reader over-credited anything; neither dismissed the material as noise — both extracted real value (exact heads per PR, checkout integrity before/after, then-current check states, run and lifecycle counts, `agent_reported` origins correctly discounted). Every correction they proposed is a legibility or packaging fix; no honesty violation was found. Also notable: all readers of these receipts to date — evaluator, builder, two blind auditors, and this reviewer — are AIs, reinforcing Part F's reader-hierarchy observation.
+
+### G-2. New findings from the blind read
+
+**CZ-8 — P1 — The exported packet does not prove its own seal.** Both readers independently refused to credit sealing: close requests are visible, but no seal result, parent sealed-receipt ID, or verifier-checkable anchor appears in the packet. (The runs did seal and pass the integrity verifier — this is packaging, not integrity — but for a portable proof object the packet *is* the product, and a proof object that cannot demonstrate its own seal fails for a cold reader.) One reader also caught an internal inconsistency: grouped child lists marked `retrieved: false` alongside six receipt-read events, making closeout order unreconstructable. **Fix:** the exported packet is self-contained — seal status and anchor, parent receipt ID, per-child retrieval status at closeout, chronological ordering. This joins the credibility-bearing tier alongside CZ-1/CZ-3.
+
+**CZ-9 — P2 — The semantic ladder is implicit where it must be explicit.** "Workflow check succeeded" ≠ "evaluator found no blocking issue" ≠ "findings were fixed" ≠ "accepted." The packet currently supports only the first at selected heads, and says nothing to stop a hurried reader from climbing the ladder unaided (e.g., a check-run *named* "Claude Code Review: SUCCESS" is not "approved" or "comments resolved"). **Fix:** the receipt renders these as distinct labeled statements and asserts only the rungs it supports — the gauntlet lesson ("honesty bugs live in verdict semantics"), restated verbatim by a stranger.
+
+**CZ-10 — P2 — Runs and evaluations don't explain themselves.** The objective text is entirely absent from the packet (a stranger cannot tell what the run was for), and PR #120 was evaluated twice at the identical head with no scope distinction. **Fix:** include the sanitized objective synopsis in the packet, and record each evaluation's trigger/scope (initial, post-fix re-evaluation, separate-run gate audit) so duplicate exact-head evaluations are self-explaining.
+
+### G-3. Convergence across all reader classes
+
+The readable evaluator verdict (CZ-5) is now independently demanded by every class of reader: the builder, both blind auditors, and this review. It is the single most-requested fix in the record. The blind readers also re-surfaced, without prompting: the `agent_reported` origin on both runs (CZ-1 visible to a stranger), the evaluator-children-only coverage question (CZ-4), and superseded-head ambiguity (CZ-3).
+
+**Amendment to Part C:** the work order's credibility-bearing tier is now items 1–2 **plus CZ-8** (packet self-containment); CZ-9 and CZ-10 fold into step 2's seal/receipt-semantics work.
+
+---
+
 *The builder produces. The evaluator examines. Lyhna witnesses. Adam decides.*
