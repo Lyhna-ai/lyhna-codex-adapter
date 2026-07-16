@@ -136,4 +136,15 @@ Small, additive; adoption is Adam's decision along with Thesis v2 itself:
 
 ---
 
+## PART F — POST-SCRIPT: THE BUILDER READS ITS OWN RECEIPT (2026-07-16)
+
+After this review was drafted, Adam asked the Codex builder agent (in the Rooms thread) to read the sealed Lyhna receipts from its own Sources pane and reflect on its build. The result is the strongest single piece of product evidence in the record:
+
+1. **The consumption loop closed.** The sealed receipt was read back by the agent that produced the work, and it changed that agent's plan for the next build (start witnessing before the first consequential edit; manage PR heads as a structural head/review matrix; keep evidence classes distinct; stop once at a proven authority gate). This is the *agent-readable verified continuation* — Thesis v2's recorded Plan B — functioning in the wild before it was built as a product. Taken with CZ-5, the reader hierarchy in the field evidence is: **agent first, human as auditor of exceptions.** This does not trigger the pivot criterion (the gates are unmeasured), but Plan B should be treated as a live co-primary hypothesis, not a fallback.
+2. **Independent convergence.** Reading only the receipts — not this review — the builder arrived at the same leading findings (witnessing began too late = CZ-1; head-chain bookkeeping should be structural = CZ-3; the gate loop was honest but noisy). The outside witness and the builder's self-reflection reconciled from opposite sides of the same record.
+3. **The honesty ceiling held its shape in miniature.** The builder's "yes, I can read it" is itself an unwitnessed agent-reported claim — and one of its two quoted receipt links carried a transposed run id. Sincere self-reports remain unreliable in the details; that is the product's founding premise restating itself. The adapter already contains the remedy: receipt reads through `read_sealed_receipt` are witnessed, so *loading the prior receipt through the tool as the first act of a new run* makes continuation itself part of the witnessed record. Recommended as a skill-level instruction in the next slice.
+4. **Two builder-side norms worth preserving (outside Lyhna's scope):** pre-declared diagnostic field whitelists — never inspecting complete environments — as the builder-side complement to CZ-6; and a single crisp `NEEDS_DECISION` stop at a proven authority gate instead of repeated re-audits — which the adapter could support by allowing a run to cite the prior sealed gate observation rather than re-proving it.
+
+---
+
 *The builder produces. The evaluator examines. Lyhna witnesses. Adam decides.*
