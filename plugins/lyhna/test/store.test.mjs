@@ -296,7 +296,9 @@ test('invocation capture recognizes a boundary Lyhna mention anywhere in the pro
     'Email adam@lyhna.example about the report.',
     '@lyhnatic is a different token.',
     '@lyhna-reviewer is a different token.',
-    '$lyhna-other is a different token.'
+    '$lyhna-other is a different token.',
+    'see plugin://lyhna-codex-adapter-test docs',
+    '[fork docs](plugin://lyhna-codex-adapter-test) for the fork'
   ].entries()) {
     assert.equal(rememberInvocation({ sessionId: `negative-${index}`, prompt }), false);
     const parent = mintSession({ sessionId: `negative-${index}`, cwd: process.cwd() });
@@ -415,6 +417,13 @@ test('unrecognized prompts leave a content-free miss marker', { concurrency: fal
   assert.equal(bareMarker.contains_at_sigil, false);
   assert.equal(bareMarker.contains_dollar_sigil, false);
   assert.equal(bareMarker.contains_plugin_uri, false);
+  assert.deepEqual(bareMarker.mention_contexts, ['aaa aaaaa aaaaaaa aa aaaa']);
+
+  const unknownShape = '[@lyhna-widget](plugin://other-widget) run it';
+  assert.equal(rememberInvocation({ sessionId: 'miss-shape', prompt: unknownShape }), false);
+  const shapeMarker = JSON.parse(readFileSync(missMarkerPath(root, unknownShape), 'utf8'));
+  assert.match(shapeMarker.mention_contexts[0], /\[@aaaaa-aaaaaa\]\(aaaaaa:/);
+  assert(!JSON.stringify(shapeMarker).includes('widget'));
 
   assert.equal(rememberInvocation({ sessionId: 'miss-foo', prompt: '@lyhnafoo hello' }), false);
   assert(existsSync(missMarkerPath(root, '@lyhnafoo hello')));

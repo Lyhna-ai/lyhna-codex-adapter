@@ -397,8 +397,8 @@ export function beginRun(capability, { mode, objective = '' }) {
 }
 
 const INVOCATION_NON_BOUNDARY_BEFORE = /[a-z0-9@]/i;
-const INVOCATION_STRUCTURED = /^\[@?lyhna[^\]]*\]\(plugin:\/\/lyhna-codex-adapter[^)]*\)/i;
-const INVOCATION_PLUGIN_URI = 'plugin://lyhna-codex-adapter';
+const INVOCATION_STRUCTURED = /^\[@?lyhna[^\]]*\]\(plugin:\/\/lyhna-codex-adapter(?=[^a-z0-9-])[^)]*\)/i;
+const INVOCATION_URI = /plugin:\/\/lyhna-codex-adapter(?=$|[^a-z0-9-])/i;
 const INVOCATION_LITERAL_LONG = /^@lyhna-codex-adapter(?:@[a-z0-9-]+)?(?=$|[^a-z0-9-])/i;
 const INVOCATION_LITERAL_SHORT = /^@lyhna(?=$|[^a-z0-9-])/i;
 const INVOCATION_LITERAL_DOLLAR = /^\$lyhna(?=$|[^a-z0-9-])/i;
@@ -412,9 +412,21 @@ function detectInvocation(promptText) {
     if (INVOCATION_LITERAL_SHORT.test(rest)) return { matched_form: 'literal_short', mention_offset: index };
     if (INVOCATION_LITERAL_DOLLAR.test(rest)) return { matched_form: 'literal_dollar', mention_offset: index };
   }
-  const uriIndex = promptText.toLowerCase().indexOf(INVOCATION_PLUGIN_URI);
-  if (uriIndex !== -1) return { matched_form: 'structured', mention_offset: uriIndex };
+  const uriMatch = INVOCATION_URI.exec(promptText);
+  if (uriMatch) return { matched_form: 'structured', mention_offset: uriMatch.index };
   return null;
+}
+
+function maskedMentionContexts(promptText) {
+  const contexts = [];
+  const pattern = /lyhna/gi;
+  let match;
+  while ((match = pattern.exec(promptText)) && contexts.length < 8) {
+    const start = Math.max(0, match.index - 16);
+    const end = Math.min(promptText.length, match.index + match[0].length + 16);
+    contexts.push(promptText.slice(start, end).replace(/[a-z0-9]/gi, (ch) => (/[0-9]/.test(ch) ? '9' : ch === ch.toUpperCase() ? 'A' : 'a')));
+  }
+  return contexts;
 }
 
 function coercePromptText(prompt) {
@@ -445,11 +457,9 @@ function recordInvocationMiss(promptText) {
     prompt_bytes: Buffer.byteLength(promptText),
     contains_at_sigil: lower.includes('@lyhna'),
     contains_dollar_sigil: lower.includes('$lyhna'),
-    contains_plugin_uri: lower.includes('plugin://lyhna-codex-adapter')
+    contains_plugin_uri: lower.includes('plugin://lyhna-codex-adapter'),
+    mention_contexts: maskedMentionContexts(promptText)
   });
-  if (process.env.LYHNA_DEBUG_INVOCATION === '1') {
-    atomicWriteText(join(root(), 'debug', `invocation-${digest.slice(0, 16)}.txt`), promptText);
-  }
 }
 
 export function rememberInvocation({ sessionId, prompt }) {
