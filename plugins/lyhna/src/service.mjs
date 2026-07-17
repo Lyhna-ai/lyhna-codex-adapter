@@ -13,7 +13,8 @@ import {
   recordClaim,
   recordEvaluation as recordEvaluationStore,
   recordRejectedClaim,
-  requestClose
+  requestClose,
+  TERMINAL_EVALUATION_STATUSES
 } from './store.mjs';
 
 function requireSnapshot(state, snapshotId) {
@@ -90,8 +91,11 @@ export function createService({ githubRunner } = {}) {
           const state = (await import('./store.mjs')).getRunForTesting(active).state;
           const snapshot = requireSnapshot(state, args.pr_snapshot_id);
           const evaluationPath = join(dataRoot(), 'evaluations', `${active}-${args.pr_snapshot_id}`, 'worktree');
-          const existing = Object.values(state.evaluations).find((item) => item.snapshot_id === args.pr_snapshot_id && !['STALE', 'INVALID'].includes(item.status));
-          if (existing) return { ...existing, checkout_path: evaluationPath };
+          // Retry idempotency mirrors the store: only a still non-terminal evaluation short-circuits
+          // here. Once every prior evaluation for this snapshot is terminal, a fresh begin_evaluation
+          // is a distinct re-examination — fall through to prepare its checkout and record a new one.
+          const activeEvaluation = Object.values(state.evaluations).find((item) => item.snapshot_id === args.pr_snapshot_id && !TERMINAL_EVALUATION_STATUSES.has(item.status));
+          if (activeEvaluation) return { ...activeEvaluation, checkout_path: evaluationPath };
           let checkout = {};
           if (snapshot?.status === 'CONSISTENT') {
             try {

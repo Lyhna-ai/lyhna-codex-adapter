@@ -17,6 +17,10 @@ import { ADAPTER_VERSION } from './version.mjs';
 const ZERO_HASH = '0'.repeat(64);
 const CONFIGURED_HOOKS = ['PermissionRequest', 'PostToolUse', 'PreToolUse', 'SessionStart', 'Stop', 'SubagentStart', 'SubagentStop', 'UserPromptSubmit'];
 const EVALUATION_TRIGGERS = new Set(['initial', 'post_fix_reeval', 'gate_audit', 're_examination']);
+// An evaluation is terminal once its outcome is fixed: recorded, checkout-integrity excepted,
+// or superseded by a moved head. Non-terminal (OPEN/CLAIMED) means a retry re-attaches; terminal
+// means a fresh begin_evaluation on the same snapshot is a distinct re-examination.
+export const TERMINAL_EVALUATION_STATUSES = new Set(['RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION', 'STALE', 'INVALID']);
 const CAPABILITY_SHAPE = /^lyhna_(session|child)_[a-f0-9]{32,}$/;
 
 function root() {
@@ -623,9 +627,18 @@ export function beginEvaluation(capability, snapshotId, checkout = {}, trigger =
     assert(snapshot, 'SNAPSHOT_NOT_FOUND');
     assert(snapshot.status === 'CONSISTENT', 'INCONSISTENT_SNAPSHOT');
     assert(checkout.path && checkout.head === snapshot.head_after && checkout.clean === true && checkout.detached === true, 'EVALUATOR_CHECKOUT_REQUIRED');
-    const existing = Object.values(current.evaluations).find((item) => item.snapshot_id === snapshotId && !['STALE', 'INVALID'].includes(item.status));
-    if (existing) return existing;
-    const id = `eval_${sha256(`${runId}:${snapshotId}`).slice(0, 24)}`;
+    const snapshotEvaluations = Object.values(current.evaluations).filter((item) => item.snapshot_id === snapshotId);
+    // Retry idempotency: while an evaluation for this snapshot is still non-terminal (OPEN/CLAIMED),
+    // begin_evaluation returns it unchanged so a repeated request keeps the first trigger and status.
+    const active = snapshotEvaluations.find((item) => !TERMINAL_EVALUATION_STATUSES.has(item.status));
+    if (active) return active;
+    // Every prior evaluation for this snapshot reached a terminal outcome. A fresh begin_evaluation
+    // — e.g. a re-examination of an unchanged head that snapshotted to the same deterministic id —
+    // creates a NEW evaluation with a deterministic occurrence-suffixed id (derived from the count of
+    // prior evaluations, no clock or randomness) so same-head evaluations stay distinct, each carrying
+    // its own trigger.
+    const base = `eval_${sha256(`${runId}:${snapshotId}`).slice(0, 24)}`;
+    const id = snapshotEvaluations.length === 0 ? base : `${base}-r${snapshotEvaluations.length + 1}`;
     appendEventUnlocked(runId, current, {
       type: 'evaluation_requested',
       origin: 'mcp_routed',
