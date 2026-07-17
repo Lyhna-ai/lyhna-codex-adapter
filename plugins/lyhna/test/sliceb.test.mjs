@@ -86,9 +86,15 @@ test('Rooms-run shape sealed with a refresh renders exactly one CURRENT head and
     assert(!/approv|accept|fixed/i.test(head.ladder.workflow_checks[0].statement));
     assert.match(head.ladder.acceptance, /acceptance is the operator's decision/);
   }
-  // The predecessor head chains to a later recorded evaluation, so rung 3 is established for it.
-  assert.match(chain.heads[0].ladder.findings_addressed, /later head .* independently re-evaluated/);
+  // Fix 1: rung 3 is constitutionally constant — never asserts findings addressed. The later head's
+  // evaluation surfaces only as a plain, strictly observational note.
+  assert.equal(chain.heads[0].ladder.findings_addressed, 'Not established by this record.');
   assert.equal(chain.heads[1].ladder.findings_addressed, 'Not established by this record.');
+  assert.equal(chain.heads[0].ladder.later_reevaluations.length, 1);
+  assert.equal(chain.heads[0].ladder.later_reevaluations[0].head, HEAD_B);
+  assert.match(chain.heads[0].ladder.later_reevaluations[0].statement, /a later evaluation at head .* was recorded/i);
+  assert(!/address|fixed|resolved/i.test(chain.heads[0].ladder.later_reevaluations[0].statement));
+  assert.equal(chain.heads[1].ladder.later_reevaluations.length, 0);
   assert.match(markdown, /Head `bbbbbbbb.*: \*\*CURRENT\*\*/);
   assert.match(markdown, /Head `aaaaaaaa.*: \*\*SUPERSEDED\*\*/);
 });
@@ -138,6 +144,11 @@ test('evaluations at the identical head are distinguishable by trigger', { concu
   const triggers = receipt.evaluations.map((evaluation) => evaluation.trigger).sort();
   assert.deepEqual(triggers, ['initial', 're_examination']);
   const chain = receipt.pr_head_chains[0];
+  // Fix 4: two snapshots at the identical head render ONE chain entry — no head progression occurred.
+  assert.equal(chain.heads.length, 1);
+  assert.equal(chain.heads[0].snapshot_ids.length, 2);
+  assert(!chain.heads.some((head) => head.chain_label === 'SUPERSEDED'));
+  // Both evaluations remain visible within the single entry, still distinguishable by trigger.
   const renderedTriggers = chain.heads.flatMap((head) => head.ladder.independent_evaluation.map((item) => item.trigger)).sort();
   assert.deepEqual(renderedTriggers, ['initial', 're_examination']);
 });
@@ -288,4 +299,46 @@ test('rejected-claim markers stop accumulating at the deterministic limit', { co
   }
   const markers = readdirSync(join(data, 'claim-rejected'));
   assert.equal(markers.length, 32);
+});
+
+// Fix 1: rung 3 stays constant even when a later evaluation records blocking-sounding finding text.
+test('rung 3 stays "Not established" even when a later head records a blocking-sounding finding', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'rung3-constant';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Two heads; later head records a blocker.' });
+  // First head: a benign evaluation.
+  evaluateSnapshot(sessionId, parent, { ...stableSnapshot, id: 'pr_head_a', head_before: HEAD_A, head_after: HEAD_A }, 'evaluator-a');
+  // Second head: an evaluation whose finding text sounds blocking; rung 3 must not be moved by it.
+  const snapshotB = { ...stableSnapshot, id: 'pr_head_b', head_before: HEAD_B, head_after: HEAD_B, trigger: 'post_fix_reeval' };
+  addPrSnapshot(parent, snapshotB);
+  const evaluationB = beginEvaluation(parent, snapshotB.id, { head: HEAD_B, clean: true, detached: true, path: 'fixture-b' }, snapshotB.trigger);
+  const childB = mintChild({ sessionId, agentId: 'evaluator-b' });
+  claimEvaluation(childB, evaluationB.id);
+  recordEvaluation(childB, evaluationB.id, 'BLOCKING: a critical defect must be fixed before merge.', [], {
+    head_before: HEAD_B, head_after: HEAD_B, clean_before: true, clean_after: true, detached_before: true, detached_after: true
+  });
+  const receiptB = sealChildByAgent({ sessionId, agentId: 'evaluator-b' });
+  readSealedReceipt(parent, receiptB.id);
+  markSnapshotRefreshed(parent, snapshotB.id, HEAD_B);
+  requestClose(parent, 'Close the run.');
+  assert.equal(checkpointOrSeal(parent).status, 'SEALED');
+
+  const { state, events } = getRunForTesting(run.id);
+  const receipt = buildReceipt(state, events);
+  const chain = receipt.pr_head_chains[0];
+  for (const head of chain.heads) {
+    assert.equal(head.ladder.findings_addressed, 'Not established by this record.');
+  }
+  // The blocking-sounding later evaluation surfaces only as a plain observation, never "addressed".
+  assert.equal(chain.heads[0].ladder.later_reevaluations.length, 1);
+  const note = chain.heads[0].ladder.later_reevaluations[0];
+  assert.equal(note.head, HEAD_B);
+  assert.equal(note.trigger, 'post_fix_reeval');
+  assert.match(note.statement, /a later evaluation at head .* was recorded/i);
+  assert(!/address|fixed|resolved/i.test(note.statement));
+  // The markdown rung-3 line is likewise constant; no "addressed/fixed/resolved" claim near the note.
+  const markdown = renderReceiptMarkdown(state, events);
+  assert.match(markdown, /Findings addressed: Not established by this record\./);
+  assert(!/Later re-evaluations:[^\n]*(address|fixed|resolved)/i.test(markdown));
 });

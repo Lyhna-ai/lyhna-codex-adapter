@@ -112,32 +112,50 @@ function buildHeadChains(state, events) {
   const chains = [];
   for (const [key, snapshots] of groups) {
     const [repository, prNumber] = key.split('\u0000');
-    const ordered = [...snapshots].sort((a, b) => (snapshotSeq[a.id] ?? 0) - (snapshotSeq[b.id] ?? 0) || a.id.localeCompare(b.id));
-    const heads = ordered.map((snapshot, index) => {
-      const isFinal = index === ordered.length - 1;
+    const ordered = [...snapshots].sort((a, b) => (snapshotSeq[a.id] ?? 0) - (snapshotSeq[b.id] ?? 0) || codepointCompare(a.id, b.id));
+
+    // B-2 / Fix 4: chain entries are keyed by head progression, not snapshot count.
+    // Consecutive snapshots at the identical head merge into ONE entry so we never assert
+    // a head progression that did not occur; "later"/"superseded" language may only appear
+    // when the head actually differs between entries.
+    const headEntries = [];
+    for (const snapshot of ordered) {
+      const head = snapshot.head_after || snapshot.head_before;
+      const last = headEntries.at(-1);
+      if (last && last.head === head) last.snapshots.push(snapshot);
+      else headEntries.push({ head, snapshots: [snapshot] });
+    }
+
+    const built = headEntries.map((entry, index) => {
+      const isFinal = index === headEntries.length - 1;
+      const statuses = entry.snapshots.map((snapshot) => snapshot.status);
       let chainLabel;
-      if (snapshot.status === 'STALE') chainLabel = 'STALE';
-      else if (snapshot.status === 'INCONSISTENT_SNAPSHOT') chainLabel = 'INCONSISTENT_SNAPSHOT';
+      if (statuses.includes('INCONSISTENT_SNAPSHOT')) chainLabel = 'INCONSISTENT_SNAPSHOT';
+      else if (statuses.includes('STALE')) chainLabel = 'STALE';
       else if (!isFinal) chainLabel = 'SUPERSEDED';
       else {
-        const lastEval = evalEventMaxSeq[snapshot.id] || 0;
-        const refreshed = (refreshBySnapshot[snapshot.id] || []).some((refresh) => refresh.seq > lastEval && refresh.status === 'CURRENT_AT_REFRESH');
+        const lastEval = Math.max(0, ...entry.snapshots.map((snapshot) => evalEventMaxSeq[snapshot.id] || 0));
+        const refreshed = entry.snapshots.some((snapshot) => (refreshBySnapshot[snapshot.id] || [])
+          .some((refresh) => refresh.seq > lastEval && refresh.status === 'CURRENT_AT_REFRESH'));
         chainLabel = refreshed ? 'CURRENT' : 'NOT_REFRESHED';
       }
 
-      const snapshotEvaluations = (evaluationsBySnapshot[snapshot.id] || [])
+      // Aggregate the merged entry's evaluations; each keeps its own B-5 trigger so
+      // same-head evaluations stay distinguishable within the single entry.
+      const entryEvaluations = entry.snapshots
+        .flatMap((snapshot) => evaluationsBySnapshot[snapshot.id] || [])
         .slice()
-        .sort((a, b) => a.id.localeCompare(b.id));
+        .sort((a, b) => codepointCompare(a.id, b.id));
 
       // B-3 rung 1: workflow checks, named strictly as check-runs.
-      const workflowChecks = (snapshot.checks || []).map((check) => ({
+      const workflowChecks = entry.snapshots.flatMap((snapshot) => (snapshot.checks || []).map((check) => ({
         check_run: check.name,
         state: check.state,
         statement: `check-run named "${check.name}": state ${check.state}`
-      }));
+      })));
 
       // B-3 rung 2: independent evaluation status and retrieval of the finding statement (by hash).
-      const independentEvaluation = snapshotEvaluations.map((evaluation) => {
+      const independentEvaluation = entryEvaluations.map((evaluation) => {
         const statementRefs = (evaluation.findings || [])
           .map((finding) => finding.statement_ref?.sha256)
           .filter(Boolean);
@@ -153,33 +171,52 @@ function buildHeadChains(state, events) {
         };
       });
 
-      // B-3 rung 3: findings addressed only when a later head chains to a later recorded evaluation.
-      const laterRecorded = ordered
-        .slice(index + 1)
-        .find((later) => (evaluationsBySnapshot[later.id] || []).some((evaluation) => evaluation.status === 'RECORDED'));
-      const findingsAddressed = laterRecorded
-        ? `A later head (${laterRecorded.head_after || laterRecorded.head_before}) was independently re-evaluated and its evaluator finding recorded.`
-        : 'Not established by this record.';
+      return {
+        snapshot_ids: entry.snapshots.map((snapshot) => snapshot.id).sort(codepointCompare),
+        head: entry.head,
+        seq: Math.min(...entry.snapshots.map((snapshot) => snapshotSeq[snapshot.id] ?? 0)),
+        capture_status: entry.snapshots.at(-1).status,
+        chain_label: chainLabel,
+        checks_observed: entry.snapshots.reduce((total, snapshot) => total + (snapshot.checks?.length ?? 0), 0),
+        reviews_observed: entry.snapshots.reduce((total, snapshot) => total + (snapshot.reviews?.length ?? 0), 0),
+        workflow_checks: workflowChecks,
+        independent_evaluation: independentEvaluation,
+        evaluations: entryEvaluations
+      };
+    });
+
+    const heads = built.map((entry, index) => {
+      // Fix 1 (B-3 rung 3): there is NO structural clean-evaluation signal in the schema — RECORDED
+      // attests checkout integrity only, not that a finding was addressed. This rung is therefore
+      // constitutionally constant ("Not established by this record.") until such a signal exists.
+      // Later evaluations at subsequent heads are surfaced separately as plain observations only.
+      const laterReevaluations = built.slice(index + 1).flatMap((later) => later.evaluations.map((evaluation) => ({
+        head: later.head,
+        evaluation_id: evaluation.id,
+        trigger: normalizeTrigger(evaluation.trigger),
+        statement: `A later evaluation at head ${later.head} was recorded (evaluation ${evaluation.id}, trigger: ${normalizeTrigger(evaluation.trigger)}).`
+      })));
 
       return {
-        snapshot_id: snapshot.id,
-        head: snapshot.head_after || snapshot.head_before,
-        seq: snapshotSeq[snapshot.id] ?? null,
-        capture_status: snapshot.status,
-        chain_label: chainLabel,
-        checks_observed: snapshot.checks?.length ?? 0,
-        reviews_observed: snapshot.reviews?.length ?? 0,
+        snapshot_ids: entry.snapshot_ids,
+        head: entry.head,
+        seq: entry.seq,
+        capture_status: entry.capture_status,
+        chain_label: entry.chain_label,
+        checks_observed: entry.checks_observed,
+        reviews_observed: entry.reviews_observed,
         ladder: {
-          workflow_checks: workflowChecks,
-          independent_evaluation: independentEvaluation,
-          findings_addressed: findingsAddressed,
+          workflow_checks: entry.workflow_checks,
+          independent_evaluation: entry.independent_evaluation,
+          later_reevaluations: laterReevaluations,
+          findings_addressed: 'Not established by this record.',
           acceptance: 'Not a rung this receipt can assert — acceptance is the operator\'s decision.'
         }
       };
     });
     chains.push({ repository, pr_number: Number(prNumber), heads });
   }
-  return chains.sort((a, b) => `${a.repository}#${a.pr_number}`.localeCompare(`${b.repository}#${b.pr_number}`));
+  return chains.sort((a, b) => codepointCompare(`${a.repository}#${a.pr_number}`, `${b.repository}#${b.pr_number}`));
 }
 
 export function buildReceipt(state, events) {
@@ -312,6 +349,9 @@ export function renderReceiptMarkdown(state, events) {
       lines.push(`- Head \`${head.head}\` (captured ${head.capture_status}): **${head.chain_label}**`);
       lines.push(`  - Workflow checks: ${head.ladder.workflow_checks.length ? head.ladder.workflow_checks.map((check) => check.statement).join('; ') : 'No workflow check-runs were observed at this head.'}`);
       lines.push(`  - Independent evaluation: ${head.ladder.independent_evaluation.length ? head.ladder.independent_evaluation.map((item) => item.statement).join('; ') : 'No independent evaluation was recorded at this head.'}`);
+      if (head.ladder.later_reevaluations.length) {
+        lines.push(`  - Later re-evaluations: ${head.ladder.later_reevaluations.map((item) => item.statement).join('; ')}`);
+      }
       lines.push(`  - Findings addressed: ${head.ladder.findings_addressed}`);
       lines.push(`  - Acceptance: ${head.ladder.acceptance}`);
     }
