@@ -583,13 +583,52 @@ export function recordHookForParent(capability, payload, idempotencyKey) {
   });
 }
 
+// Occurrence numbering for same-base snapshots. A force-push away from head H and back to H
+// produces the same deterministic base id; each distinct observation gets its own record so a
+// STALE observation is never overwritten (which would resurrect it as CONSISTENT and erase the
+// earlier receipt, violating SPEC exact-head staleness). Base is occurrence 1; re-observations
+// after divergence are <base>-o2, -o3, ... mirroring beginEvaluation's occurrence suffix.
+function snapshotOccurrenceIndex(base, id) {
+  if (id === base) return 1;
+  const match = /^-o(\d+)$/.exec(id.slice(base.length));
+  return match ? Number(match[1]) : 1;
+}
+
 export function addPrSnapshot(capability, snapshot) {
   const { runId } = requireParent(capability);
-  const id = snapshot.id || `pr_${sha256(canonicalJson({ runId, snapshot })).slice(0, 24)}`;
-  const normalized = { ...snapshot, id };
+  const base = snapshot.id || `pr_${sha256(canonicalJson({ runId, snapshot })).slice(0, 24)}`;
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
     assert(!state.sealed && state.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
+    // Prior observations recorded under this deterministic base id (the same id recurs when the head
+    // is force-pushed away and back). The latest one is the observation a re-snapshot is compared to.
+    const priorOccurrences = Object.values(state.pr_snapshots)
+      .filter((item) => item.id === base || item.id.startsWith(`${base}-o`));
+    const latest = priorOccurrences.length
+      ? priorOccurrences.reduce((a, b) => (snapshotOccurrenceIndex(base, b.id) > snapshotOccurrenceIndex(base, a.id) ? b : a))
+      : null;
+    // Divergence signal: the latest observation at this id went STALE, or an intervening pr_refreshed
+    // observed a head different from that observation's head after its own snapshot event. Either way
+    // the head has since moved, so a re-snapshot is a NEW observation, not an overwrite of the old one.
+    let diverged = false;
+    if (latest) {
+      if (latest.status === 'STALE') {
+        diverged = true;
+      } else {
+        const { events } = parseLedger(runId);
+        const latestSnapshotSeq = events.find((event) => event.type === 'pr_snapshot' && event.payload.id === latest.id)?.seq ?? 0;
+        diverged = events.some((event) => event.type === 'pr_refreshed'
+          && event.payload.snapshot_id === latest.id
+          && event.seq > latestSnapshotSeq
+          && event.payload.observed_head !== latest.head_after);
+      }
+    }
+    // No prior observation: the base id. Diverged: a fresh occurrence-suffixed id and its own ledger
+    // event (the id in the idempotency key carries the occurrence, so it never dedupes against the
+    // first observation). Plain retry (prior observation, no divergence): the same id — an idempotent
+    // re-read that dedupes its event and must NOT resurrect the existing record's status or drop fields.
+    const id = !latest ? base : diverged ? `${base}-o${priorOccurrences.length + 1}` : latest.id;
+    const normalized = { ...snapshot, id };
     appendEventUnlocked(runId, state, {
       type: 'pr_snapshot',
       origin: 'github_observed',
@@ -611,9 +650,12 @@ export function addPrSnapshot(capability, snapshot) {
       },
       idempotencyKey: `snapshot:${id}`
     });
-    state.pr_snapshots[id] = normalized;
+    // Plain retry keeps the existing record untouched (no status resurrection, no lost refresh state);
+    // a new (base or occurrence) observation is stored as itself.
+    if (latest && !diverged) state.pr_snapshots[id] ||= normalized;
+    else state.pr_snapshots[id] = normalized;
     saveState(state);
-    return normalized;
+    return state.pr_snapshots[id];
   });
 }
 

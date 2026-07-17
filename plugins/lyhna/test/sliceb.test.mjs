@@ -562,3 +562,136 @@ test('anchor renderer-field deletion cannot downgrade verification of a current-
   writeFileSync(anchorFile, `${JSON.stringify(anchor, null, 2)}\n`);
   assert.throws(() => verifySealedRun(run.id), /LOCAL_CHAIN_BROKEN/);
 });
+
+// Fix (Codex review round 3): the REAL snapshot_pr path. A force-push away from head H and back to H
+// with unchanged sanitized metadata produces the SAME deterministic snapshot id. The pre-existing
+// addPrSnapshot overwrote state.pr_snapshots[id] on re-add, resurrecting the STALE record back to
+// CONSISTENT and collapsing the away-and-back into a single entry that renders one CURRENT — erasing
+// the earlier STALE observation and its evaluation. The store now forks an occurrence-suffixed record
+// on divergence (base -o2), so the round-2 chain split sees two records: STALE then CURRENT.
+function mutableGithubRunner(headRef) {
+  return (command, args) => {
+    if (command === 'gh') {
+      if (args[0] === 'pr' && args[1] === 'view') {
+        return JSON.stringify({
+          number: 7,
+          url: 'https://github.com/Lyhna-ai/example/pull/7',
+          title: 'Example PR',
+          state: 'OPEN',
+          isDraft: false,
+          baseRefOid: 'b'.repeat(40),
+          headRefOid: headRef.head,
+          files: [{ path: 'src/example.mjs', additions: 2, deletions: 1, status: 'modified' }],
+          statusCheckRollup: [{ name: 'test', state: 'SUCCESS', workflowName: 'CI' }],
+          reviews: []
+        });
+      }
+      if (args[0] === 'api') return JSON.stringify([]);
+    }
+    if (command === 'git') {
+      if (args[0] === 'remote') return 'https://github.com/Lyhna-ai/example.git';
+      if (args[0] === 'status') return '';
+      if (args[0] === 'rev-parse' && args.includes('--abbrev-ref')) return 'HEAD';
+      if (args[0] === 'rev-parse') return headRef.head;
+      return '';
+    }
+    return '';
+  };
+}
+
+async function evaluateThroughService(service, { sessionId, parent, snapshotId, agentId, trigger, data }) {
+  const evaluation = await service.call('begin_evaluation', { session_capability: parent, pr_snapshot_id: snapshotId, source_cwd: data, trigger });
+  const child = mintChild({ sessionId, agentId });
+  await service.call('claim_evaluation', { child_capability: child, evaluation_request_id: evaluation.id });
+  await service.call('record_evaluation', { child_capability: child, evaluation_request_id: evaluation.id, finding: `Finding for ${snapshotId}.`, checkout_head_before: HEAD_A, checkout_clean_before: true, checkout_detached_before: true });
+  const receipt = sealChildByAgent({ sessionId, agentId });
+  await service.call('read_sealed_receipt', { session_capability: parent, receipt_id: receipt.id });
+  return evaluation;
+}
+
+test('a force-push away-and-back through the real snapshot path forks a STALE-then-CURRENT occurrence', { concurrency: false }, async (t) => {
+  const data = isolatedData(t);
+  const headRef = { head: HEAD_A };
+  const service = createService({ githubRunner: mutableGithubRunner(headRef) });
+  const sessionId = 'round3-forcepush-return';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = await service.call('begin_run', { session_capability: parent, mode: 'full', objective: 'Force-push away and back to H.' });
+
+  // Observe at H, evaluate at H, then a refresh observes H' — the observation goes STALE.
+  const snap1 = await service.call('snapshot_pr', { session_capability: parent, repository: 'Lyhna-ai/example', pr_number: 7 });
+  const eval1 = await evaluateThroughService(service, { sessionId, parent, snapshotId: snap1.id, agentId: 'evaluator-1', trigger: 'initial', data });
+  headRef.head = HEAD_B;
+  const refresh1 = await service.call('refresh_pr', { session_capability: parent, pr_snapshot_id: snap1.id });
+  assert.equal(refresh1.stale, true);
+
+  // Force-pushed back to H: snapshot again with IDENTICAL metadata — the deterministic id collides.
+  headRef.head = HEAD_A;
+  const snap2 = await service.call('snapshot_pr', { session_capability: parent, repository: 'Lyhna-ai/example', pr_number: 7 });
+  // A NEW occurrence record exists; the original STALE record and its evaluation are preserved untouched.
+  assert.equal(snap2.id, `${snap1.id}-o2`);
+  assert.notEqual(snap2.id, snap1.id);
+  const afterFork = getRunForTesting(run.run_id).state;
+  assert.equal(afterFork.pr_snapshots[snap1.id].status, 'STALE', 'the earlier observation stays STALE');
+  assert.equal(afterFork.pr_snapshots[snap2.id].status, 'CONSISTENT', 'the returned observation is a fresh CONSISTENT record');
+  assert.equal(Object.values(afterFork.evaluations).filter((item) => item.snapshot_id === snap1.id && item.id === eval1.id).length, 1);
+  assert.equal(afterFork.evaluations[eval1.id].status, 'STALE', "the earlier evaluation is preserved and STALE");
+  // Two distinct pr_snapshot ledger events (occurrence key did not dedupe against the first).
+  const snapshotEvents = getRunForTesting(run.run_id).events.filter((event) => event.type === 'pr_snapshot');
+  assert.deepEqual(snapshotEvents.map((event) => event.payload.id).sort(), [snap1.id, snap2.id].sort());
+
+  // Evaluate the returned observation, then a post-evaluation refresh confirms it CURRENT at H.
+  await evaluateThroughService(service, { sessionId, parent, snapshotId: snap2.id, agentId: 'evaluator-2', trigger: 're_examination', data });
+  const refresh2 = await service.call('refresh_pr', { session_capability: parent, pr_snapshot_id: snap2.id });
+  assert.equal(refresh2.stale, false);
+
+  requestClose(parent, 'Close the force-push-return run.');
+  assert.equal(checkpointOrSeal(parent).status, 'SEALED');
+
+  const { state, events, directory } = getRunForTesting(run.run_id);
+  const receipt = buildReceipt(state, events);
+  assert.equal(receipt.pr_head_chains.length, 1);
+  const chain = receipt.pr_head_chains[0];
+  // Two entries for the SAME SHA — STALE predecessor then CURRENT return, exactly one CURRENT.
+  assert.equal(chain.heads.length, 2);
+  assert.equal(chain.heads[0].head, HEAD_A);
+  assert.equal(chain.heads[1].head, HEAD_A);
+  const labels = chain.heads.map((head) => head.chain_label);
+  assert.deepEqual(labels, ['STALE', 'CURRENT']);
+  assert.equal(labels.filter((label) => label === 'CURRENT').length, 1);
+  // The earlier evaluation is still attached to the STALE entry.
+  assert.deepEqual(chain.heads[0].ladder.independent_evaluation.map((item) => item.evaluation_id), [eval1.id]);
+  assert.equal(chain.heads[0].ladder.independent_evaluation[0].status, 'STALE');
+  // The same-SHA later entry is described observationally, never as "a later head".
+  assert.equal(chain.heads[0].ladder.later_reevaluations.length, 1);
+  assert.match(chain.heads[0].ladder.later_reevaluations[0].statement, /a later observation of head/i);
+  const markdown = readFileSync(join(directory, 'RECEIPT.md'), 'utf8');
+  assert.match(markdown, /Head `aaaaaaaa.*: \*\*STALE\*\*/);
+  assert.match(markdown, /Head `aaaaaaaa.*: \*\*CURRENT\*\*/);
+});
+
+// Fix (Codex review round 3): a plain retry — re-snapshot with NO divergence in between — stays
+// idempotent: the same base id, no duplicate ledger event, and no status/field resurrection.
+test('a plain re-snapshot with no divergence neither duplicates events nor resurrects state', { concurrency: false }, async (t) => {
+  isolatedData(t);
+  const headRef = { head: HEAD_A };
+  const service = createService({ githubRunner: mutableGithubRunner(headRef) });
+  const sessionId = 'round3-plain-retry';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = await service.call('begin_run', { session_capability: parent, mode: 'full', objective: 'Plain re-snapshot.' });
+
+  const snap1 = await service.call('snapshot_pr', { session_capability: parent, repository: 'Lyhna-ai/example', pr_number: 7 });
+  // A same-head refresh keeps the observation CURRENT and records current_head; not a divergence.
+  const refresh = await service.call('refresh_pr', { session_capability: parent, pr_snapshot_id: snap1.id });
+  assert.equal(refresh.stale, false);
+  // Re-snapshot with identical metadata and no divergence: same id, an idempotent re-read.
+  const snap2 = await service.call('snapshot_pr', { session_capability: parent, repository: 'Lyhna-ai/example', pr_number: 7 });
+  assert.equal(snap2.id, snap1.id);
+
+  const { state, events } = getRunForTesting(run.run_id);
+  // Exactly one pr_snapshot event — the retry deduped rather than appending a second observation.
+  assert.equal(events.filter((event) => event.type === 'pr_snapshot').length, 1);
+  assert.equal(Object.keys(state.pr_snapshots).length, 1);
+  // No resurrection or field loss: the record stays CONSISTENT and keeps its refresh-observed head.
+  assert.equal(state.pr_snapshots[snap1.id].status, 'CONSISTENT');
+  assert.equal(state.pr_snapshots[snap1.id].current_head, HEAD_A);
+});
