@@ -52,7 +52,7 @@ function buildCoverage(state, events) {
   const openPredecessors = state.open_predecessors || [];
   const witnessingBoundary = (openPredecessors.length > 0 || state.objective_origin !== 'runtime_hook')
     ? "Witnessing began at this run's first event; earlier session activity was not observed."
-    : 'Witnessing began at the hook-observed invocation in this run.';
+    : 'Witnessing began at the hook-observed invocation in this run; any session activity before that invocation was not observed.';
   return {
     configured_hooks: state.configured_hooks,
     caveat: 'Absence means not observed within configured coverage; it does not prove an action did not occur elsewhere.',

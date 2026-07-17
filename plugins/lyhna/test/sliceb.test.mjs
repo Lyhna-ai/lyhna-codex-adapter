@@ -203,6 +203,9 @@ test('coverage boundary states invocation, delegated-child, and witnessing evide
   assert.match(hookRun.coverage.invocation, /matched form "literal_short" at prompt offset 7/);
   assert.match(hookRun.coverage.child_lifecycle, /Delegated-child lifecycle events were observed/);
   assert.match(hookRun.coverage.witnessing_boundary, /Witnessing began at the hook-observed invocation/);
+  // Fix 3: the hook branch carries the earlier-activity caveat on its face, like the non-hook branch.
+  assert.match(hookRun.coverage.witnessing_boundary, /any session activity before that invocation was not observed/);
+  assert.match(agentReported.coverage.witnessing_boundary, /was not observed/);
 });
 
 // CZ-12: a new run's record shows an OPEN predecessor without any intent judgment.
