@@ -188,6 +188,35 @@ test('a retry in the recording-to-retrieval gap re-attaches instead of forking',
   assert.equal(second.trigger, 're_examination');
 });
 
+// A failed (inconsistent) capture at head B must not poison the next clean capture of the same B:
+// the failed attempt splits into its own entry and the clean one earns its own label.
+test('a clean re-snapshot after an inconsistent capture renders CURRENT, not INCONSISTENT_SNAPSHOT', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'drift-recapture';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Drift-recapture run.' });
+  // Head moved from A to B during the first capture: inconsistent observation at head_after B.
+  addPrSnapshot(parent, {
+    ...stableSnapshot,
+    id: 'pr_drift_attempt',
+    head_before: HEAD_A,
+    head_after: HEAD_B,
+    status: 'INCONSISTENT_SNAPSHOT'
+  });
+  // The next capture consistently observes the same new head B; evaluate and refresh it.
+  const clean = { ...stableSnapshot, id: 'pr_drift_clean', head_before: HEAD_B, head_after: HEAD_B };
+  addPrSnapshot(parent, clean);
+  evaluateExistingSnapshot(sessionId, parent, clean, 'drift-evaluator');
+  markSnapshotRefreshed(parent, clean.id, HEAD_B);
+  requestClose(parent, 'Close the drift-recapture run.');
+  assert.equal(checkpointOrSeal(parent).status, 'SEALED');
+  const { state, events } = getRunForTesting(run.id);
+  const receipt = buildReceipt(state, events);
+  const labels = receipt.pr_head_chains[0].heads.map((head) => head.chain_label);
+  assert.deepEqual(labels, ['INCONSISTENT_SNAPSHOT', 'CURRENT']);
+  assert.equal(labels.filter((label) => label === 'CURRENT').length, 1);
+});
+
 // A pre-evaluation refresh at head H must not swallow the post-evaluation refresh at the same H:
 // each is a distinct observation, and the final head renders CURRENT, not NOT_REFRESHED.
 test('an early same-head refresh does not swallow the post-evaluation refresh', { concurrency: false }, (t) => {

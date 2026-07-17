@@ -125,9 +125,10 @@ function buildHeadChains(state, events) {
     // a head progression that did not occur; "later"/"superseded" language may only appear
     // when the head actually differs between entries.
     // Fix B: merge same-SHA snapshots ONLY when nothing recorded shows the head left and returned —
-    // split when an earlier same-SHA snapshot went STALE, or when an intervening refresh observed a
-    // different head between the two snapshots' seqs. Otherwise a force-push away-and-back would fold
-    // the STALE observation into the current entry and erase the one CURRENT head.
+    // split when an earlier same-SHA snapshot went STALE or was an inconsistent capture (the head
+    // moved during it), or when an intervening refresh observed a different head between the two
+    // snapshots' seqs. Otherwise a failed or superseded observation would fold into the current
+    // entry, erasing the one CURRENT head or poisoning a clean later capture with its label.
     const headEntries = [];
     for (const snapshot of ordered) {
       const head = snapshot.head_after || snapshot.head_before;
@@ -135,7 +136,7 @@ function buildHeadChains(state, events) {
       const lastSeq = last ? Math.max(...last.snapshots.map((prior) => snapshotSeq[prior.id] ?? 0)) : 0;
       const currentSeq = snapshotSeq[snapshot.id] ?? 0;
       const headDiverged = Boolean(last) && (
-        last.snapshots.some((prior) => prior.status === 'STALE')
+        last.snapshots.some((prior) => prior.status === 'STALE' || prior.status === 'INCONSISTENT_SNAPSHOT')
         || groupRefreshes.some((refresh) => refresh.seq > lastSeq && refresh.seq < currentSeq && refresh.observed_head !== head)
       );
       if (last && last.head === head && !headDiverged) last.snapshots.push(snapshot);
