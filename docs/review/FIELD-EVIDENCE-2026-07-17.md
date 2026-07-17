@@ -68,7 +68,11 @@ The same run previews Slice B's value live: by the arc's second stopping point, 
 
 Gate sequencing consequence: this run seals at 0.1.25 and is NOT Slice B gate material; the gate packet comes from the first run sealed after the 0.1.26 install. The renderer-version gate (Codex round 1) keeps this run's sealed receipt readable after the upgrade.
 
-## 8. Slice B scope decision
+## 8. Field finding: a run cannot narrate its own seal (evening close of run_de214e61)
+
+Asked to close the run and print the sealed record in the same turn, the agent retrieved all six evaluator receipts, called `request_close` (accepted), and then correctly reported the request impossible: the seal fires on the real `Stop` hook, which runs after the agent's final message, so the receipt files did not yet exist while it could still speak. It declined to fabricate a Stop or force the seal. Two consequences worth keeping: (a) the seal-at-Stop design was verified in the field, with the agent's honesty holding at the smallest scale (it reported the boundary rather than papering over it); (b) structurally, the sealed record's first possible reader is the next turn or session — independent confirmation of the Part F / roadmap Step 6 agent-reader pattern (loading the prior sealed receipt is the natural first act of a continuation, because it is the first moment the sealed record exists to be read).
+
+## 9. Slice B scope decision
 
 CZ-11 (rejected-claim traces) and CZ-12 (open-run visibility, vocabulary as amended in §2) fold into Slice B. Recommended by the lead on 2026-07-17, offered to Adam with no objection; build proceeds on the existing `SLICE-B-SPEC-2026-07-16.md` plus these two items.
 
