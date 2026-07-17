@@ -48,7 +48,19 @@ Boundary decisions (lead, consistent with the constitution):
 
 Disposition: feeds Slice B (head chains, receipt-truth), Slice C (rich capture / readable sidecar — the "enough content" half), and Slice G (agent-reader productization). Strengthens Fork D (adapter as the coding-agents capture vertical). **No sequencing change.**
 
-## 5. Slice B scope decision
+## 5. Field observation (evening run): the witness must never become the story — candidate CZ-13
+
+In the evening's witnessed B09 session (the gate-passing thread, continued), the operator observed the agent's narration disproportionately centered on the witness/review apparatus (Lyhna evaluations, cross-platform review checkpoints) rather than the build itself, and corrected it mid-thread: *"the Room is the build; Fable reviews PR checkpoints; Lyhna only observes and records."* The agent realigned immediately.
+
+Reading: (a) leading the task message with the plugin mention makes witnessing procedurally prominent, so the agent treats it as a primary directive; (b) the skill instructs the witnessed loop but sets no narration budget, so every witnessed step gets narrated as performed accountability; (c) instructional correction fixed it instantly, so the remedy is skill text, not architecture.
+
+Candidate correction (no schema change; skill/docs surface only, foldable into the next skill touch): witness narration is confined to run open, run close, and `NEEDS_DECISION` moments; witness tool calls are otherwise silent; witnessing never appears in a plan as a work item beyond begin/read/close. The witness observes the work — it is not the work.
+
+## 6. Loop mechanics directive (operator, 2026-07-17)
+
+For this build, the operator directed: push to the working PR at each appropriate step and request the cross-platform review promptly at each checkpoint, re-requesting/reminding if a requested review goes unanswered. Adopted into the Slice B loop: adversarial pass → lead fix round → push + `@codex review` → thread-by-thread resolution with a fix commit per round → re-request until clean; reviews re-pinged on silence rather than waited on indefinitely.
+
+## 7. Slice B scope decision
 
 CZ-11 (rejected-claim traces) and CZ-12 (open-run visibility, vocabulary as amended in §2) fold into Slice B. Recommended by the lead on 2026-07-17, offered to Adam with no objection; build proceeds on the existing `SLICE-B-SPEC-2026-07-16.md` plus these two items.
 
