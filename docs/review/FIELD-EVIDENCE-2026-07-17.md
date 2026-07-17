@@ -60,7 +60,15 @@ Candidate correction (no schema change; skill/docs surface only, foldable into t
 
 For this build, the operator directed: push to the working PR at each appropriate step and request the cross-platform review promptly at each checkpoint, re-requesting/reminding if a requested review goes unanswered. Adopted into the Slice B loop: adversarial pass → lead fix round → push + `@codex review` → thread-by-thread resolution with a fix commit per round → re-request until clean; reviews re-pinged on silence rather than waited on indefinitely.
 
-## 7. Slice B scope decision
+## 7. Second field confirmation of Slice A (afternoon run, 0.1.25)
+
+A second fresh Codex task (the "zero relitigation audit" arc) produced `run_de214e61-e7fe-4756-ba0d-7d0ab6213787`, `mode: full`, `objective_origin: runtime_hook` — with the mention **mid-message** after preamble text ("execute plan. `@lyhna-codex-adapter` , loop until complete…"), the exact CZ-1 mechanism-1 shape that defeated the v0 matcher. Two real runs, two invocation positions, both `runtime_hook`.
+
+The same run previews Slice B's value live: PR homesteadai-io/The-Keep#73 was evaluated at four successive heads (`78f9f71` → `86cf4af` → `e18fd6b` → `7d03805`), which a 0.1.25 receipt renders as undifferentiated CONSISTENT snapshots (the CZ-3/CZ-8 ambiguity verbatim); the operator's dump also reproduced the closeout-order irreconcilability (child-receipt `retrieved` flags drifting across successive listings). Additional notes: the run's fresh-agent isolation leg ran under a bare `CODEX_HOME` with no plugins — structurally unwitnessable, a live example of the coverage boundary B-4 must state; a `303 See Other` contract stop was observed and respected (dual-axis material, roadmap Step 3); raw `checkout_path` in tool output re-observed (CZ-7, Slice D).
+
+Gate sequencing consequence: this run seals at 0.1.25 and is NOT Slice B gate material; the gate packet comes from the first run sealed after the 0.1.26 install. The renderer-version gate (Codex round 1) keeps this run's sealed receipt readable after the upgrade.
+
+## 8. Slice B scope decision
 
 CZ-11 (rejected-claim traces) and CZ-12 (open-run visibility, vocabulary as amended in §2) fold into Slice B. Recommended by the lead on 2026-07-17, offered to Adam with no objection; build proceeds on the existing `SLICE-B-SPEC-2026-07-16.md` plus these two items.
 
