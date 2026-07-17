@@ -114,15 +114,31 @@ function buildHeadChains(state, events) {
     const [repository, prNumber] = key.split('\u0000');
     const ordered = [...snapshots].sort((a, b) => (snapshotSeq[a.id] ?? 0) - (snapshotSeq[b.id] ?? 0) || codepointCompare(a.id, b.id));
 
+    // Refreshes recorded for any snapshot in this PR group, in ledger-seq order, so we can tell
+    // whether the head diverged and returned between two same-SHA snapshots (a force-push away and back).
+    const groupRefreshes = snapshots
+      .flatMap((snapshot) => refreshBySnapshot[snapshot.id] || [])
+      .sort((a, b) => a.seq - b.seq);
+
     // B-2 / Fix 4: chain entries are keyed by head progression, not snapshot count.
     // Consecutive snapshots at the identical head merge into ONE entry so we never assert
     // a head progression that did not occur; "later"/"superseded" language may only appear
     // when the head actually differs between entries.
+    // Fix B: merge same-SHA snapshots ONLY when nothing recorded shows the head left and returned —
+    // split when an earlier same-SHA snapshot went STALE, or when an intervening refresh observed a
+    // different head between the two snapshots' seqs. Otherwise a force-push away-and-back would fold
+    // the STALE observation into the current entry and erase the one CURRENT head.
     const headEntries = [];
     for (const snapshot of ordered) {
       const head = snapshot.head_after || snapshot.head_before;
       const last = headEntries.at(-1);
-      if (last && last.head === head) last.snapshots.push(snapshot);
+      const lastSeq = last ? Math.max(...last.snapshots.map((prior) => snapshotSeq[prior.id] ?? 0)) : 0;
+      const currentSeq = snapshotSeq[snapshot.id] ?? 0;
+      const headDiverged = Boolean(last) && (
+        last.snapshots.some((prior) => prior.status === 'STALE')
+        || groupRefreshes.some((refresh) => refresh.seq > lastSeq && refresh.seq < currentSeq && refresh.observed_head !== head)
+      );
+      if (last && last.head === head && !headDiverged) last.snapshots.push(snapshot);
       else headEntries.push({ head, snapshots: [snapshot] });
     }
 
@@ -194,7 +210,11 @@ function buildHeadChains(state, events) {
         head: later.head,
         evaluation_id: evaluation.id,
         trigger: normalizeTrigger(evaluation.trigger),
-        statement: `A later evaluation at head ${later.head} was recorded (evaluation ${evaluation.id}, trigger: ${normalizeTrigger(evaluation.trigger)}).`
+        // A same-SHA later entry (the head left and returned to this exact head) is not "a later head";
+        // describe it as a later observation of the same head, keeping the strictly observational voice.
+        statement: later.head === entry.head
+          ? `A later observation of head ${later.head} recorded an independent evaluation (evaluation ${evaluation.id}, trigger: ${normalizeTrigger(evaluation.trigger)}).`
+          : `A later evaluation at head ${later.head} was recorded (evaluation ${evaluation.id}, trigger: ${normalizeTrigger(evaluation.trigger)}).`
       })));
 
       return {

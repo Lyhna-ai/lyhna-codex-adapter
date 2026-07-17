@@ -347,6 +347,144 @@ test('rung 3 stays "Not established" even when a later head records a blocking-s
   assert(!/Later re-evaluations:[^\n]*(address|fixed|resolved)/i.test(markdown));
 });
 
+// Fix A (Codex review round 2): a re-examination of an unchanged PR head reaches begin_evaluation
+// through the REAL tool path. snapshot_pr produces the same deterministic snapshot id both times, so
+// the earlier snapshot-only de-dupe returned the first (terminal) evaluation and lost the second
+// trigger. Now a fresh begin_evaluation on a terminal snapshot creates a distinct evaluation; a retry
+// while one is still open re-attaches to it.
+function fakeGithubRunner(head) {
+  return (command, args) => {
+    if (command === 'gh') {
+      if (args[0] === 'pr' && args[1] === 'view') {
+        return JSON.stringify({
+          number: 7,
+          url: 'https://github.com/Lyhna-ai/example/pull/7',
+          title: 'Example PR',
+          state: 'OPEN',
+          isDraft: false,
+          baseRefOid: 'b'.repeat(40),
+          headRefOid: head,
+          files: [{ path: 'src/example.mjs', additions: 2, deletions: 1, status: 'modified' }],
+          statusCheckRollup: [{ name: 'test', state: 'SUCCESS', workflowName: 'CI' }],
+          reviews: []
+        });
+      }
+      if (args[0] === 'api') return JSON.stringify([]);
+    }
+    if (command === 'git') {
+      if (args[0] === 'remote') return 'https://github.com/Lyhna-ai/example.git';
+      if (args[0] === 'status') return '';
+      if (args[0] === 'rev-parse' && args.includes('--abbrev-ref')) return 'HEAD';
+      if (args[0] === 'rev-parse') return head;
+      return '';
+    }
+    return '';
+  };
+}
+
+test('a re-examination at an unchanged head creates a distinct evaluation through the real tool path', { concurrency: false }, async (t) => {
+  const data = isolatedData(t);
+  const service = createService({ githubRunner: fakeGithubRunner(HEAD_A) });
+  const sessionId = 'same-head-reeval';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = await service.call('begin_run', { session_capability: parent, mode: 'full', objective: 'Re-examine the same head.' });
+
+  const snap1 = await service.call('snapshot_pr', { session_capability: parent, repository: 'Lyhna-ai/example', pr_number: 7 });
+  const eval1 = await service.call('begin_evaluation', { session_capability: parent, pr_snapshot_id: snap1.id, source_cwd: data, trigger: 'initial' });
+  // Retry idempotency: repeating begin_evaluation while eval1 is still open returns the SAME
+  // evaluation and keeps the first trigger — no duplicate, the later trigger is not adopted.
+  const retry = await service.call('begin_evaluation', { session_capability: parent, pr_snapshot_id: snap1.id, source_cwd: data, trigger: 're_examination' });
+  assert.equal(retry.id, eval1.id);
+  assert.equal(retry.trigger, 'initial');
+
+  // Complete eval1 (terminal RECORDED) via the real record path.
+  const child1 = mintChild({ sessionId, agentId: 'evaluator-1' });
+  await service.call('claim_evaluation', { child_capability: child1, evaluation_request_id: eval1.id });
+  await service.call('record_evaluation', { child_capability: child1, evaluation_request_id: eval1.id, finding: 'First-pass finding.', checkout_head_before: HEAD_A, checkout_clean_before: true, checkout_detached_before: true });
+  const receipt1 = sealChildByAgent({ sessionId, agentId: 'evaluator-1' });
+  await service.call('read_sealed_receipt', { session_capability: parent, receipt_id: receipt1.id });
+
+  // Snapshot the SAME head again: the deterministic id collides, exactly as the finding describes.
+  const snap2 = await service.call('snapshot_pr', { session_capability: parent, repository: 'Lyhna-ai/example', pr_number: 7 });
+  assert.equal(snap2.id, snap1.id);
+  const eval2 = await service.call('begin_evaluation', { session_capability: parent, pr_snapshot_id: snap2.id, source_cwd: data, trigger: 're_examination' });
+  // A distinct evaluation with its OWN trigger — the two same-head evaluations are now separable.
+  assert.notEqual(eval2.id, eval1.id);
+  assert.equal(eval2.trigger, 're_examination');
+
+  const child2 = mintChild({ sessionId, agentId: 'evaluator-2' });
+  await service.call('claim_evaluation', { child_capability: child2, evaluation_request_id: eval2.id });
+  await service.call('record_evaluation', { child_capability: child2, evaluation_request_id: eval2.id, finding: 'Second-look finding.', checkout_head_before: HEAD_A, checkout_clean_before: true, checkout_detached_before: true });
+  const receipt2 = sealChildByAgent({ sessionId, agentId: 'evaluator-2' });
+
+  // The new evaluation blocks close until its own child receipt is retrieved.
+  requestClose(parent, 'Close after re-examination.');
+  const deferred = checkpointOrSeal(parent);
+  assert.equal(deferred.status, 'CLOSE_DEFERRED');
+  assert(deferred.blockers.includes(`CHILD_RECEIPT_${eval2.id}_NOT_RETRIEVED`));
+
+  await service.call('read_sealed_receipt', { session_capability: parent, receipt_id: receipt2.id });
+  assert.equal(checkpointOrSeal(parent).status, 'SEALED');
+
+  const { state, events } = getRunForTesting(run.run_id);
+  const receipt = buildReceipt(state, events);
+  // Both evaluations exist with their own triggers and both render on the receipt face.
+  const triggers = receipt.evaluations.map((evaluation) => evaluation.trigger).sort();
+  assert.deepEqual(triggers, ['initial', 're_examination']);
+  const chain = receipt.pr_head_chains[0];
+  assert.equal(chain.heads.length, 1);
+  const renderedTriggers = chain.heads[0].ladder.independent_evaluation.map((item) => item.trigger).sort();
+  assert.deepEqual(renderedTriggers, ['initial', 're_examination']);
+  const markdown = renderReceiptMarkdown(state, events);
+  assert.match(markdown, /trigger: `initial`/);
+  assert.match(markdown, /trigger: `re_examination`/);
+});
+
+// Fix B (Codex review round 2): a snapshot at head H that went STALE (head moved away) and a later
+// snapshot force-pushed BACK to H must render as two chain entries — the STALE predecessor and the
+// CURRENT return — never merged into a single STALE entry that erases the one-CURRENT invariant.
+test('a force-push return to the same SHA splits into a STALE predecessor and a CURRENT return', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'force-push-return';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Head left H and was force-pushed back to H.' });
+
+  // Snapshot at H, then a refresh observes a different head H' — the snapshot goes STALE.
+  const first = { ...stableSnapshot, id: 'pr_return_a', head_before: HEAD_A, head_after: HEAD_A };
+  addPrSnapshot(parent, first);
+  markSnapshotRefreshed(parent, first.id, HEAD_B);
+
+  // Force-pushed back to H: a fresh snapshot at H, evaluated, then a post-evaluation refresh at H.
+  const second = { ...stableSnapshot, id: 'pr_return_b', head_before: HEAD_A, head_after: HEAD_A };
+  evaluateSnapshot(sessionId, parent, second, 'evaluator-return');
+  markSnapshotRefreshed(parent, second.id, HEAD_A);
+
+  requestClose(parent, 'Close the force-push-return run.');
+  assert.equal(checkpointOrSeal(parent).status, 'SEALED');
+
+  const { state, events, directory } = getRunForTesting(run.id);
+  const receipt = buildReceipt(state, events);
+  assert.equal(receipt.pr_head_chains.length, 1);
+  const chain = receipt.pr_head_chains[0];
+  // Two entries for the SAME SHA — the head left and returned, so they must not merge.
+  assert.equal(chain.heads.length, 2);
+  assert.equal(chain.heads[0].head, HEAD_A);
+  assert.equal(chain.heads[1].head, HEAD_A);
+  const labels = chain.heads.map((head) => head.chain_label);
+  assert.deepEqual(labels, ['STALE', 'CURRENT']);
+  assert.equal(labels.filter((label) => label === 'CURRENT').length, 1);
+  // The same-SHA later entry is described observationally, never as "a later head".
+  assert.equal(chain.heads[0].ladder.later_reevaluations.length, 1);
+  const note = chain.heads[0].ladder.later_reevaluations[0];
+  assert.equal(note.head, HEAD_A);
+  assert.match(note.statement, /a later observation of head/i);
+  assert(!/a later head/i.test(note.statement));
+  assert(!/address|fixed|resolved/i.test(note.statement));
+  const markdown = readFileSync(join(directory, 'RECEIPT.md'), 'utf8');
+  assert.match(markdown, /Head `aaaaaaaa.*: \*\*STALE\*\*/);
+  assert.match(markdown, /Head `aaaaaaaa.*: \*\*CURRENT\*\*/);
+});
+
 // Fix 2: a run whose receipt files + anchor were produced by a DIFFERENT renderer reads and verifies
 // cleanly (tamper evidence preserved via the stored hashes), rather than throwing LOCAL_CHAIN_BROKEN.
 // A genuine pre-0.1.26 run has a run_sealed ledger event with no receipt_renderer in its payload,
