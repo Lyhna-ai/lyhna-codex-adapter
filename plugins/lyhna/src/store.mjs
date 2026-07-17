@@ -378,7 +378,7 @@ export function beginRun(capability, { mode, objective = '' }) {
         openPredecessors.push({ run_id: priorId, last_event_seq: priorState.ledger_count });
       }
     }
-    openPredecessors.sort((a, b) => a.run_id.localeCompare(b.run_id));
+    openPredecessors.sort((a, b) => (a.run_id < b.run_id ? -1 : a.run_id > b.run_id ? 1 : 0));
     const runId = `run_${randomUUID()}`;
     const state = {
       schema: 'lyhna.codex.run.v0',
@@ -1006,11 +1006,19 @@ export function recordRejectedClaim(capability) {
   }
 }
 
+const REJECTED_CLAIM_LIMIT = 32;
+
 function writeRejectedClaimMarker(capabilityRef, kind) {
+  const markerDir = join(root(), 'claim-rejected');
+  const fileName = `claim-${capabilityRef.slice(0, 16)}.json`;
+  let existing = [];
+  try { existing = readdirSync(markerDir); } catch { existing = []; }
+  if (existing.length >= REJECTED_CLAIM_LIMIT && !existing.includes(fileName)) return null;
+  // CZ-11: the marker carries error code + capability kind only. The ref lives in the filename,
+  // not the content, so a reader cannot correlate the marker back to a capability value.
   atomicWriteJson(claimRejectedMarkerPath(capabilityRef), {
     code: 'UNKNOWN_CAPABILITY',
-    capability_kind: kind,
-    ref: capabilityRef
+    capability_kind: kind
   });
   return { recorded: 'marker', ref: capabilityRef };
 }

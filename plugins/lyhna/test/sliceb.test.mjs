@@ -245,7 +245,10 @@ test('an unmappable rejected capability leaves a content-free claim-rejected mar
       const marker = JSON.parse(readFileSync(join(data, 'claim-rejected', markers[0]), 'utf8'));
       assert.equal(marker.code, 'UNKNOWN_CAPABILITY');
       assert.equal(marker.capability_kind, 'session');
-      assert.equal(marker.ref, sha256(fabricated));
+      // Fix 5c: the marker carries error code + capability kind only — no ref inside the content.
+      assert.equal(marker.ref, undefined);
+      // The ref survives only as the filename prefix, never as correlatable content.
+      assert.equal(markers[0], `claim-${sha256(fabricated).slice(0, 16)}.json`);
       // Content-free: the statement text never persists.
       assert(!JSON.stringify(marker).includes('I hold this capability'));
     }
@@ -275,4 +278,14 @@ test('a non-capability token records no rejected-claim trace', { concurrency: fa
   const data = isolatedData(t);
   assert.equal(recordRejectedClaim('not-a-capability-token'), null);
   assert(!existsSync(join(data, 'claim-rejected')));
+});
+
+// Fix 5a: rejected-claim marker files stop accumulating at the deterministic limit (mirrors the miss cap).
+test('rejected-claim markers stop accumulating at the deterministic limit', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  for (let index = 0; index < 40; index += 1) {
+    recordRejectedClaim(`lyhna_session_${sha256(String(index))}`);
+  }
+  const markers = readdirSync(join(data, 'claim-rejected'));
+  assert.equal(markers.length, 32);
 });

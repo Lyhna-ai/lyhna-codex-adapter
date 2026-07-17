@@ -2,6 +2,12 @@ import { canonicalJson, sha256 } from './util.mjs';
 
 const EVALUATION_TRIGGERS = new Set(['initial', 'post_fix_reeval', 'gate_audit', 're_examination']);
 
+// Deterministic codepoint ordering for every sort that feeds a hashed render.
+// Locale-aware collation is environment-dependent and must never influence a hash.
+function codepointCompare(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 function eventLabel(event) {
   if (event.payload?.support) return event.payload.support;
   if (event.type === 'builder_claim') return 'builder assertion';
@@ -18,7 +24,7 @@ function buildSeal(state, events) {
   const sealed = Boolean(state.sealed);
   const childRetrieval = Object.values(state.child_receipts || {})
     .map((child) => ({ id: child.id, role: child.role, status: child.status, retrieved: Boolean(child.retrieved) }))
-    .sort((a, b) => a.id.localeCompare(b.id));
+    .sort((a, b) => codepointCompare(a.id, b.id));
   return {
     status: sealed ? 'SEALED' : 'OPEN',
     seal_anchor_hash: sealed ? `sha256:${sha256(canonicalJson(state))}` : null,
@@ -64,7 +70,7 @@ function buildOpenPredecessors(state) {
       last_event_seq: predecessor.last_event_seq,
       statement: `A prior run in this session was OPEN with no close request when this run began (run ${predecessor.run_id}, last event seq ${predecessor.last_event_seq}).`
     }))
-    .sort((a, b) => a.run_id.localeCompare(b.run_id));
+    .sort((a, b) => codepointCompare(a.run_id, b.run_id));
 }
 
 // B-2 + B-3: per-PR head chains with a semantic ladder rendered at each head.
@@ -191,7 +197,7 @@ export function buildReceipt(state, events) {
     review_comments_observed: snapshot.review_comments?.length ?? 0,
     issue_comments_observed: snapshot.issue_comments?.length ?? 0,
     failures: snapshot.failures || []
-  })).sort((a, b) => a.id.localeCompare(b.id));
+  })).sort((a, b) => codepointCompare(a.id, b.id));
 
   const evaluations = Object.values(state.evaluations || {}).map((evaluation) => ({
     id: evaluation.id,
@@ -207,7 +213,7 @@ export function buildReceipt(state, events) {
     checkout_detached_after: evaluation.checkout_detached_after ?? null,
     child_receipt_id: evaluation.child_receipt_id || null,
     child_receipt_retrieved: Boolean(evaluation.child_receipt_retrieved)
-  })).sort((a, b) => a.id.localeCompare(b.id));
+  })).sort((a, b) => codepointCompare(a.id, b.id));
 
   const receipt = {
     schema: 'lyhna.codex.adapter-receipt.v0',
@@ -236,7 +242,7 @@ export function buildReceipt(state, events) {
       role: item.role,
       status: item.status,
       retrieved: Boolean(item.retrieved)
-    })).sort((a, b) => a.id.localeCompare(b.id)),
+    })).sort((a, b) => codepointCompare(a.id, b.id)),
     limitations: [
       'This receipt records supported observations and attributed reports; it is not an approval or correctness judgment.',
       ...(state.mode === 'pr_only' ? ['No witnessed build record was available for this retrospective PR examination.'] : [])
