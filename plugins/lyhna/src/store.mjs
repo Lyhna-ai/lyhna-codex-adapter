@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { atomicWriteJson, atomicWriteText, assert, canonicalJson, dataRoot, ORIGINS, readJson, sha256, withLock } from './util.mjs';
 import { boundedText, promptSynopsis, reference, sanitizeClaim, structuralSummary } from './redact.mjs';
 import { renderReceiptJson, renderReceiptMarkdown } from './receipt.mjs';
+import { ADAPTER_VERSION } from './version.mjs';
 
 const ZERO_HASH = '0'.repeat(64);
 const CONFIGURED_HOOKS = ['PermissionRequest', 'PostToolUse', 'PreToolUse', 'SessionStart', 'Stop', 'SubagentStart', 'SubagentStop', 'UserPromptSubmit'];
@@ -267,26 +268,59 @@ function repairSeal(runId) {
   const { events, tip } = parseLedger(runId);
   assert(events.length === state.ledger_count && tip === state.ledger_tip, 'LOCAL_CHAIN_BROKEN');
   verifyChildReceipts(state);
+  const stateHash = sha256(canonicalJson(state));
+  const jsonPath = join(runDir(runId), 'receipt.json');
+  const markdownPath = join(runDir(runId), 'RECEIPT.md');
+  const anchor = readJson(anchorPath(runId), null);
+
+  if (anchor) {
+    // Ledger and state hash checks always apply — tamper evidence, renderer-independent.
+    assert(
+      anchor.run_id === runId
+      && anchor.final_seq === events.length
+      && anchor.final_hash === tip
+      && anchor.state_hash === stateHash,
+      'LOCAL_CHAIN_BROKEN'
+    );
+    if (anchor.receipt_renderer === ADAPTER_VERSION) {
+      // Current renderer: the on-disk receipt must reproduce exactly what we render now.
+      const receiptJson = renderReceiptJson(state, events);
+      const receiptMarkdown = renderReceiptMarkdown(state, events);
+      assert(anchor.receipt_json_hash === sha256(receiptJson), 'LOCAL_CHAIN_BROKEN');
+      assert(anchor.receipt_markdown_hash === sha256(receiptMarkdown), 'LOCAL_CHAIN_BROKEN');
+      if (existsSync(jsonPath)) assert(sha256(readFileSync(jsonPath, 'utf8')) === anchor.receipt_json_hash, 'LOCAL_CHAIN_BROKEN');
+      else atomicWriteText(jsonPath, receiptJson);
+      if (existsSync(markdownPath)) assert(sha256(readFileSync(markdownPath, 'utf8')) === anchor.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
+      else atomicWriteText(markdownPath, receiptMarkdown);
+    } else {
+      // Backward read-compat: an absent or differing receipt_renderer means this run was sealed
+      // by another renderer. We cannot reproduce its bytes, so we do NOT re-render or rewrite the
+      // receipt files; we verify the on-disk files still hash to the anchor (tamper evidence
+      // preserved) and trust the anchor the seal committed to.
+      assert(existsSync(jsonPath) && sha256(readFileSync(jsonPath, 'utf8')) === anchor.receipt_json_hash, 'LOCAL_CHAIN_BROKEN');
+      assert(existsSync(markdownPath) && sha256(readFileSync(markdownPath, 'utf8')) === anchor.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
+    }
+    return { status: 'ALREADY_SEALED', run_id: runId, receipt_path: markdownPath };
+  }
+
+  // No anchor on disk (interrupted seal): re-render with the current renderer and write the anchor.
   const receiptJson = renderReceiptJson(state, events);
   const receiptMarkdown = renderReceiptMarkdown(state, events);
   const expected = {
     run_id: runId,
     final_seq: events.length,
     final_hash: tip,
-    state_hash: sha256(canonicalJson(state)),
+    state_hash: stateHash,
     receipt_json_hash: sha256(receiptJson),
-    receipt_markdown_hash: sha256(receiptMarkdown)
+    receipt_markdown_hash: sha256(receiptMarkdown),
+    receipt_renderer: ADAPTER_VERSION
   };
-  const anchor = readJson(anchorPath(runId), null);
-  if (anchor) assert(canonicalJson(anchor) === canonicalJson(expected), 'LOCAL_CHAIN_BROKEN');
-  const jsonPath = join(runDir(runId), 'receipt.json');
-  const markdownPath = join(runDir(runId), 'RECEIPT.md');
   if (existsSync(jsonPath)) assert(sha256(readFileSync(jsonPath, 'utf8')) === expected.receipt_json_hash, 'LOCAL_CHAIN_BROKEN');
   else atomicWriteText(jsonPath, receiptJson);
   if (existsSync(markdownPath)) assert(sha256(readFileSync(markdownPath, 'utf8')) === expected.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
   else atomicWriteText(markdownPath, receiptMarkdown);
-  if (!anchor) atomicWriteJson(anchorPath(runId), expected);
-  return { status: 'ALREADY_SEALED', run_id: runId, receipt_path: join(runDir(runId), 'RECEIPT.md') };
+  atomicWriteJson(anchorPath(runId), expected);
+  return { status: 'ALREADY_SEALED', run_id: runId, receipt_path: markdownPath };
 }
 
 function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyKey }) {
@@ -964,7 +998,8 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       final_hash: current.ledger_tip,
       state_hash: sha256(canonicalJson(current)),
       receipt_json_hash: sha256(receiptJson),
-      receipt_markdown_hash: sha256(receiptMarkdown)
+      receipt_markdown_hash: sha256(receiptMarkdown),
+      receipt_renderer: ADAPTER_VERSION
     });
     return { status: 'SEALED', run_id: runId, receipt_path: join(runDir(runId), 'RECEIPT.md') };
   });

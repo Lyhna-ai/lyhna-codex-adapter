@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
@@ -16,7 +16,8 @@ import {
   recordEvaluation,
   recordRejectedClaim,
   requestClose,
-  sealChildByAgent
+  sealChildByAgent,
+  verifySealedRun
 } from '../src/store.mjs';
 import { createService } from '../src/service.mjs';
 import { buildReceipt, renderReceiptMarkdown } from '../src/receipt.mjs';
@@ -344,4 +345,43 @@ test('rung 3 stays "Not established" even when a later head records a blocking-s
   const markdown = renderReceiptMarkdown(state, events);
   assert.match(markdown, /Findings addressed: Not established by this record\./);
   assert(!/Later re-evaluations:[^\n]*(address|fixed|resolved)/i.test(markdown));
+});
+
+// Fix 2: a run whose receipt files + anchor were produced by a DIFFERENT renderer reads and verifies
+// cleanly (tamper evidence preserved via the stored hashes), rather than throwing LOCAL_CHAIN_BROKEN.
+function simulateOldRendererRun(sessionId) {
+  const snapshots = [{ ...stableSnapshot, id: 'pr_old', head_before: HEAD_A, head_after: HEAD_A }];
+  const { parent, run } = sealMultiHeadRun({ sessionId, snapshots, refreshFinal: true });
+  const directory = getRunForTesting(run.id).directory;
+  const anchorFile = join(directory, 'seal-anchor.json');
+  const jsonFile = join(directory, 'receipt.json');
+  const markdownFile = join(directory, 'RECEIPT.md');
+  // Bytes an older renderer would have produced — different from the current renderer's output,
+  // but the anchor commits to their hashes and the ledger/state are untouched.
+  const legacyJson = `${readFileSync(jsonFile, 'utf8')}\n{"legacy_renderer":true}\n`;
+  const legacyMarkdown = `${readFileSync(markdownFile, 'utf8')}\nRendered by an older receipt renderer.\n`;
+  writeFileSync(jsonFile, legacyJson);
+  writeFileSync(markdownFile, legacyMarkdown);
+  const anchor = JSON.parse(readFileSync(anchorFile, 'utf8'));
+  delete anchor.receipt_renderer;
+  anchor.receipt_json_hash = sha256(legacyJson);
+  anchor.receipt_markdown_hash = sha256(legacyMarkdown);
+  writeFileSync(anchorFile, `${JSON.stringify(anchor, null, 2)}\n`);
+  return { parent, run, directory, markdownFile, legacyMarkdown };
+}
+
+test('a run sealed by an older renderer reads and verifies without re-render equality', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const { parent, run } = simulateOldRendererRun('old-renderer-clean');
+  // Verification does not re-render; it must NOT throw despite the current renderer diverging.
+  assert.equal(verifySealedRun(run.id).status, 'ALREADY_SEALED');
+  const childId = Object.keys(getRunForTesting(run.id).state.child_receipts)[0];
+  assert.equal(readSealedReceipt(parent, childId).id, childId);
+});
+
+test('an older-renderer run whose receipt file was edited afterward still fails tamper detection', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const { run, markdownFile, legacyMarkdown } = simulateOldRendererRun('old-renderer-tamper');
+  writeFileSync(markdownFile, `${legacyMarkdown}local tampering\n`);
+  assert.throws(() => verifySealedRun(run.id), /LOCAL_CHAIN_BROKEN/);
 });
