@@ -78,7 +78,15 @@ The operator supplied the run's live `state.json` plus four abandoned `state.jso
 
 Also recurring: four abandoned atomic-write temp files beside the run state — the PR #1 "known limitation," now at a volume that graduates cleanup from footnote to a small future work item. (Incidentally useful: the temps are point-in-time state snapshots that let the lead watch the run evolve — ledger 205 → 266 → 269 → 285 → 1151.)
 
-## 10. Slice B scope decision
+## 10. The sealed 0.1.25 baseline packet — banked, verified, and the P1 fix proven on real data
+
+After the `refresh_pr` unstick (which observed a **seventh** PR #73 head, `6b34e4e…`, mid-closeout), `run_de214e61` sealed at **1,161 events**. The operator supplied the full data root; the lead:
+
+- **Verified the seal with the 0.1.26 verifier**: `ALREADY_SEALED`, clean — a genuine pre-0.1.26 anchor (no `receipt_renderer` field) read by the new code through the legacy path. This is the Codex round-1 backward-compat fix proven on real field data; without it, this run would have been unreadable after the upgrade. The tamper side also held: one appended byte in RECEIPT.md → `LOCAL_CHAIN_BROKEN`.
+- **Analyzed all four pending-miss markers**: every one is a correct rejection — prompts containing the word "lyhna" with no sigil at all (one a pasted `https://` GitHub link to the repo, correctly not armed as a `plugin://` invocation). Combined with two `runtime_hook` confirmations, the front door's complete field record stands at zero false negatives and zero false positives.
+- **Banked the packet** at `field-packets/2026-07-17-run_de214e61-v0.1.25/` (receipt.json, RECEIPT.md, seal-anchor.json — structural-only). It is the "before" exhibit for the Slice B blind-reader gate: the receipt presents six CONSISTENT snapshots of PR #73 across five heads with one STALE, no head chain, no seal block on its face, and closeout order reconstructable only from raw seq numbers. The sealed state also demonstrates CZ-3 live: the final `f7324ba` snapshot sealed as CONSISTENT while the PR had actually moved to `6b34e4e`.
+
+## 11. Slice B scope decision
 
 CZ-11 (rejected-claim traces) and CZ-12 (open-run visibility, vocabulary as amended in §2) fold into Slice B. Recommended by the lead on 2026-07-17, offered to Adam with no objection; build proceeds on the existing `SLICE-B-SPEC-2026-07-16.md` plus these two items.
 
