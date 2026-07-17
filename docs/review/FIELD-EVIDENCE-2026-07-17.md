@@ -86,7 +86,15 @@ After the `refresh_pr` unstick (which observed a **seventh** PR #73 head, `6b34e
 - **Analyzed all four pending-miss markers**: every one is a correct rejection — prompts containing the word "lyhna" with no sigil at all (one a pasted `https://` GitHub link to the repo, correctly not armed as a `plugin://` invocation). Combined with two `runtime_hook` confirmations, the front door's complete field record stands at zero false negatives and zero false positives.
 - **Banked the packet** at `field-packets/2026-07-17-run_de214e61-v0.1.25/` (receipt.json, RECEIPT.md, seal-anchor.json — structural-only). It is the "before" exhibit for the Slice B blind-reader gate: the receipt presents six CONSISTENT snapshots of PR #73 across five heads with one STALE, no head chain, no seal block on its face, and closeout order reconstructable only from raw seq numbers. The sealed state also demonstrates CZ-3 live: the final `f7324ba` snapshot sealed as CONSISTENT while the PR had actually moved to `6b34e4e`.
 
-## 11. Slice B scope decision
+## 11. CZ-13 escalation: the lead made the witness the assignment — and the packet must be one gesture away
+
+The operator observed a Codex handoff for the *next Homestead build window* dominated by Lyhna artifact-printing instructions. Asked why, the agent answered precisely: it overfit the handoff to the last unfinished action — the Lyhna printing the lead had requested — instead of the Homestead arc. Root cause is the lead's own practice, not the agent: routing witness-data extraction (print receipts, paste JSON, report seal state) through the operator's working agents injected witness work into the builder's task stream, and the handoff faithfully reflected what its context was full of. CZ-13 said the witness must not become the story; this adds: **the lead must not make it the assignment.**
+
+Standing rule adopted: witness-data extraction never routes through working agents. The only witness ask of a working agent is `request_close` at the end of real work; the operator moves data by zipping the local data root (proven tonight: faster and cleaner than every agent-courier round trip).
+
+Work item recorded (Slice C scope — legibility; also the early shadow of Thesis v2's G1 stranger path): the sealed packet must be one gesture away for the human and for outside agents — a human-first entry point named on its face (RECEIPT.md as the front page, and something that says so), and a one-step export/share path for a run's packet. A witness whose record takes an evening of agent errands to extract is not yet legible, whatever its receipts prove.
+
+## 12. Slice B scope decision
 
 CZ-11 (rejected-claim traces) and CZ-12 (open-run visibility, vocabulary as amended in §2) fold into Slice B. Recommended by the lead on 2026-07-17, offered to Adam with no objection; build proceeds on the existing `SLICE-B-SPEC-2026-07-16.md` plus these two items.
 
