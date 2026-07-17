@@ -72,7 +72,13 @@ Gate sequencing consequence: this run seals at 0.1.25 and is NOT Slice B gate ma
 
 Asked to close the run and print the sealed record in the same turn, the agent retrieved all six evaluator receipts, called `request_close` (accepted), and then correctly reported the request impossible: the seal fires on the real `Stop` hook, which runs after the agent's final message, so the receipt files did not yet exist while it could still speak. It declined to fabricate a Stop or force the seal. Two consequences worth keeping: (a) the seal-at-Stop design was verified in the field, with the agent's honesty holding at the smallest scale (it reported the boundary rather than papering over it); (b) structurally, the sealed record's first possible reader is the next turn or session — independent confirmation of the Part F / roadmap Step 6 agent-reader pattern (loading the prior sealed receipt is the natural first act of a continuation, because it is the first moment the sealed record exists to be read).
 
-## 9. Slice B scope decision
+## 9. Field finding: fail-closed close held — and the unstick path is a refresh
+
+The operator supplied the run's live `state.json` plus four abandoned `state.json.*.tmp` files. The live state showed `close_requested` set, all six evaluator receipts retrieved, all children `STOP_OBSERVED` — and `sealed: false`: the seal was correctly deferred because `eval_9fb182…`, claimed at head `5d5f9e5…` before the PR advanced past it, remained `CLAIMED` with no recorded finding. A 1,151-event run refused to present itself as complete while one evaluation dangled — the fail-closed close enforced by mechanism under real conditions. The honest unstick is `refresh_pr` on the superseded snapshot (observes the moved head; snapshot and stuck evaluation go `STALE`; next Stop seals). Candidate skill-text line for a future slice: before requesting close, refresh any snapshot whose head has moved so superseded evaluations resolve to `STALE` rather than blocking.
+
+Also recurring: four abandoned atomic-write temp files beside the run state — the PR #1 "known limitation," now at a volume that graduates cleanup from footnote to a small future work item. (Incidentally useful: the temps are point-in-time state snapshots that let the lead watch the run evolve — ledger 205 → 266 → 269 → 285 → 1151.)
+
+## 10. Slice B scope decision
 
 CZ-11 (rejected-claim traces) and CZ-12 (open-run visibility, vocabulary as amended in §2) fold into Slice B. Recommended by the lead on 2026-07-17, offered to Adam with no objection; build proceeds on the existing `SLICE-B-SPEC-2026-07-16.md` plus these two items.
 
