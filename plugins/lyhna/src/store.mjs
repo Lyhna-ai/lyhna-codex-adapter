@@ -15,6 +15,8 @@ import { renderReceiptJson, renderReceiptMarkdown } from './receipt.mjs';
 
 const ZERO_HASH = '0'.repeat(64);
 const CONFIGURED_HOOKS = ['PermissionRequest', 'PostToolUse', 'PreToolUse', 'SessionStart', 'Stop', 'SubagentStart', 'SubagentStop', 'UserPromptSubmit'];
+const EVALUATION_TRIGGERS = new Set(['initial', 'post_fix_reeval', 'gate_audit', 're_examination']);
+const CAPABILITY_SHAPE = /^lyhna_(session|child)_[a-f0-9]{32,}$/;
 
 function root() {
   const value = dataRoot();
@@ -80,6 +82,14 @@ function receiptIndexPath(receiptId) {
 
 function sessionLockPath(capability) {
   return join(root(), 'session-locks', `${sha256(capability)}.lock`);
+}
+
+function sessionRunsPath(sessionHash) {
+  return join(root(), 'session-runs', `${sessionHash}.json`);
+}
+
+function claimRejectedMarkerPath(capabilityRef) {
+  return join(root(), 'claim-rejected', `claim-${capabilityRef.slice(0, 16)}.json`);
 }
 
 function verifyChildReceipts(state) {
@@ -359,6 +369,16 @@ export function beginRun(capability, { mode, objective = '' }) {
       }
       if (!existsSync(anchorPath(current))) repairSeal(current);
     }
+    // CZ-12: observe (never judge) any prior run in this session left OPEN with no close request.
+    const sessionIndex = readJson(sessionRunsPath(parent.session_hash), { run_ids: [] });
+    const openPredecessors = [];
+    for (const priorId of sessionIndex.run_ids || []) {
+      const priorState = readJson(statePath(priorId), null);
+      if (priorState && !priorState.sealed && !priorState.close_requested) {
+        openPredecessors.push({ run_id: priorId, last_event_seq: priorState.ledger_count });
+      }
+    }
+    openPredecessors.sort((a, b) => a.run_id.localeCompare(b.run_id));
     const runId = `run_${randomUUID()}`;
     const state = {
       schema: 'lyhna.codex.run.v0',
@@ -373,6 +393,7 @@ export function beginRun(capability, { mode, objective = '' }) {
       ledger_count: 0,
       ledger_tip: ZERO_HASH,
       close_requested: null,
+      open_predecessors: openPredecessors,
       pr_snapshots: {},
       evaluations: {},
       children: {},
@@ -381,6 +402,7 @@ export function beginRun(capability, { mode, objective = '' }) {
     mkdirSync(runDir(runId), { recursive: true });
     const runBegunPayload = { mode, objective_origin: state.objective_origin };
     if (pending) runBegunPayload.invocation = { matched_form: pending.matched_form, mention_offset: pending.mention_offset };
+    if (openPredecessors.length) runBegunPayload.open_predecessors = openPredecessors;
     withLock(lockPath(runId), () => {
       appendEventUnlocked(runId, state, {
         type: 'run_begun',
@@ -391,6 +413,9 @@ export function beginRun(capability, { mode, objective = '' }) {
       saveState(state);
     });
     atomicWriteJson(activePath(capability), { run_id: runId });
+    const nextRunIds = [...(sessionIndex.run_ids || [])];
+    if (!nextRunIds.includes(runId)) nextRunIds.push(runId);
+    atomicWriteJson(sessionRunsPath(parent.session_hash), { run_ids: nextRunIds });
     if (pending) rmSync(pendingPath, { force: true });
     return state;
   });
@@ -549,8 +574,9 @@ export function addPrSnapshot(capability, snapshot) {
   });
 }
 
-export function beginEvaluation(capability, snapshotId, checkout = {}) {
+export function beginEvaluation(capability, snapshotId, checkout = {}, trigger = 'unspecified') {
   const { runId } = requireParent(capability);
+  const normalizedTrigger = EVALUATION_TRIGGERS.has(trigger) ? trigger : 'unspecified';
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
     assert(!current.sealed && current.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
@@ -564,7 +590,7 @@ export function beginEvaluation(capability, snapshotId, checkout = {}) {
     appendEventUnlocked(runId, current, {
       type: 'evaluation_requested',
       origin: 'mcp_routed',
-      payload: { evaluation_request_id: id, snapshot_id: snapshotId, expected_head: snapshot.head_after },
+      payload: { evaluation_request_id: id, snapshot_id: snapshotId, expected_head: snapshot.head_after, trigger: normalizedTrigger },
       idempotencyKey: `evaluation-request:${id}`
     });
     current.evaluations[id] = {
@@ -572,6 +598,7 @@ export function beginEvaluation(capability, snapshotId, checkout = {}) {
       snapshot_id: snapshotId,
       expected_head: snapshot.head_after,
       status: 'OPEN',
+      trigger: normalizedTrigger,
       child_capability_hash: null,
       child_agent_hash: null,
       checkout_path_ref: reference(checkout.path),
@@ -945,6 +972,47 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
 
 export function verifySealedRun(runId) {
   return withLock(lockPath(runId), () => repairSeal(runId));
+}
+
+// CZ-11: a syntactically plausible but unknown capability is a rejected claim, not silence.
+// Record a value-free trace (error code only) so a reader can distinguish "never claimed"
+// from "claimed and the recording failed". No statement text, no content.
+export function recordRejectedClaim(capability) {
+  try {
+    const match = typeof capability === 'string' ? capability.match(CAPABILITY_SHAPE) : null;
+    if (!match) return null;
+    const kind = match[1];
+    const capabilityRef = sha256(capability);
+    const active = readJson(activePath(capability), null);
+    const runId = active?.run_id || null;
+    const mapped = runId ? readJson(statePath(runId), null) : null;
+    if (runId && mapped && !mapped.sealed) {
+      return withLock(lockPath(runId), () => {
+        const current = loadState(runId);
+        if (current.sealed) return writeRejectedClaimMarker(capabilityRef, kind);
+        appendEventUnlocked(runId, current, {
+          type: 'claim_rejected',
+          origin: 'mcp_routed',
+          payload: { code: 'UNKNOWN_CAPABILITY', capability_kind: kind },
+          idempotencyKey: `claim-rejected:${capabilityRef}`
+        });
+        saveState(current);
+        return { recorded: 'run', run_id: runId };
+      });
+    }
+    return writeRejectedClaimMarker(capabilityRef, kind);
+  } catch {
+    return null;
+  }
+}
+
+function writeRejectedClaimMarker(capabilityRef, kind) {
+  atomicWriteJson(claimRejectedMarkerPath(capabilityRef), {
+    code: 'UNKNOWN_CAPABILITY',
+    capability_kind: kind,
+    ref: capabilityRef
+  });
+  return { recorded: 'marker', ref: capabilityRef };
 }
 
 export function getRunForTesting(runId) {
