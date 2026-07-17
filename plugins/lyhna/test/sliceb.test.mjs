@@ -21,7 +21,7 @@ import {
 } from '../src/store.mjs';
 import { createService } from '../src/service.mjs';
 import { buildReceipt, renderReceiptMarkdown } from '../src/receipt.mjs';
-import { sha256 } from '../src/util.mjs';
+import { canonicalJson, sha256 } from '../src/util.mjs';
 import { isolatedData, stableSnapshot } from './helpers.mjs';
 
 const HEAD_A = 'a'.repeat(40);
@@ -349,21 +349,41 @@ test('rung 3 stays "Not established" even when a later head records a blocking-s
 
 // Fix 2: a run whose receipt files + anchor were produced by a DIFFERENT renderer reads and verifies
 // cleanly (tamper evidence preserved via the stored hashes), rather than throwing LOCAL_CHAIN_BROKEN.
+// A genuine pre-0.1.26 run has a run_sealed ledger event with no receipt_renderer in its payload,
+// so the simulation rewrites the ledger tail with a valid chain — not just the anchor.
 function simulateOldRendererRun(sessionId) {
   const snapshots = [{ ...stableSnapshot, id: 'pr_old', head_before: HEAD_A, head_after: HEAD_A }];
   const { parent, run } = sealMultiHeadRun({ sessionId, snapshots, refreshFinal: true });
   const directory = getRunForTesting(run.id).directory;
   const anchorFile = join(directory, 'seal-anchor.json');
+  const stateFile = join(directory, 'state.json');
+  const ledgerFile = join(directory, 'events.jsonl');
   const jsonFile = join(directory, 'receipt.json');
   const markdownFile = join(directory, 'RECEIPT.md');
+  // Rewrite the final (run_sealed) ledger event to the pre-0.1.26 payload shape, recomputing
+  // its hashes so the chain stays valid — this is what an old run's ledger actually contains.
+  const lines = readFileSync(ledgerFile, 'utf8').split(/\r?\n/).filter(Boolean);
+  const sealEvent = JSON.parse(lines.at(-1));
+  assert.equal(sealEvent.type, 'run_sealed');
+  sealEvent.payload = { status: 'SEALED' };
+  sealEvent.content_hash = sha256(canonicalJson({ origin: sealEvent.origin, payload: sealEvent.payload, type: sealEvent.type }));
+  delete sealEvent.event_hash;
+  sealEvent.event_hash = sha256(canonicalJson(sealEvent));
+  lines[lines.length - 1] = canonicalJson(sealEvent);
+  writeFileSync(ledgerFile, `${lines.join('\n')}\n`);
+  const state = JSON.parse(readFileSync(stateFile, 'utf8'));
+  state.ledger_tip = sealEvent.event_hash;
+  writeFileSync(stateFile, `${canonicalJson(state, true)}\n`);
   // Bytes an older renderer would have produced — different from the current renderer's output,
-  // but the anchor commits to their hashes and the ledger/state are untouched.
+  // but the anchor commits to their hashes.
   const legacyJson = `${readFileSync(jsonFile, 'utf8')}\n{"legacy_renderer":true}\n`;
   const legacyMarkdown = `${readFileSync(markdownFile, 'utf8')}\nRendered by an older receipt renderer.\n`;
   writeFileSync(jsonFile, legacyJson);
   writeFileSync(markdownFile, legacyMarkdown);
   const anchor = JSON.parse(readFileSync(anchorFile, 'utf8'));
   delete anchor.receipt_renderer;
+  anchor.final_hash = sealEvent.event_hash;
+  anchor.state_hash = sha256(canonicalJson(state));
   anchor.receipt_json_hash = sha256(legacyJson);
   anchor.receipt_markdown_hash = sha256(legacyMarkdown);
   writeFileSync(anchorFile, `${JSON.stringify(anchor, null, 2)}\n`);
@@ -383,5 +403,24 @@ test('an older-renderer run whose receipt file was edited afterward still fails 
   isolatedData(t);
   const { run, markdownFile, legacyMarkdown } = simulateOldRendererRun('old-renderer-tamper');
   writeFileSync(markdownFile, `${legacyMarkdown}local tampering\n`);
+  assert.throws(() => verifySealedRun(run.id), /LOCAL_CHAIN_BROKEN/);
+});
+
+// Deleting the anchor's informational receipt_renderer field must not downgrade a
+// current-version run onto the weaker legacy path: the gate reads the hash-chained
+// run_sealed event, so an anchor-plus-receipt edit is still detected.
+test('anchor renderer-field deletion cannot downgrade verification of a current-version seal', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const snapshots = [{ ...stableSnapshot, id: 'pr_downgrade', head_before: HEAD_A, head_after: HEAD_A }];
+  const { run } = sealMultiHeadRun({ sessionId: 'downgrade-attack', snapshots, refreshFinal: true });
+  const directory = getRunForTesting(run.id).directory;
+  const anchorFile = join(directory, 'seal-anchor.json');
+  const markdownFile = join(directory, 'RECEIPT.md');
+  const edited = `${readFileSync(markdownFile, 'utf8')}\nedited after seal\n`;
+  writeFileSync(markdownFile, edited);
+  const anchor = JSON.parse(readFileSync(anchorFile, 'utf8'));
+  delete anchor.receipt_renderer;
+  anchor.receipt_markdown_hash = sha256(edited);
+  writeFileSync(anchorFile, `${JSON.stringify(anchor, null, 2)}\n`);
   assert.throws(() => verifySealedRun(run.id), /LOCAL_CHAIN_BROKEN/);
 });

@@ -273,6 +273,11 @@ function repairSeal(runId) {
   const markdownPath = join(runDir(runId), 'RECEIPT.md');
   const anchor = readJson(anchorPath(runId), null);
 
+  // The renderer gate reads the hash-chained run_sealed event, never the mutable anchor:
+  // deleting or editing the anchor's informational receipt_renderer field must not be able
+  // to select the weaker legacy path for a run the current renderer sealed.
+  const sealedRenderer = events.find((event) => event.type === 'run_sealed')?.payload?.receipt_renderer ?? null;
+
   if (anchor) {
     // Ledger and state hash checks always apply — tamper evidence, renderer-independent.
     assert(
@@ -282,7 +287,7 @@ function repairSeal(runId) {
       && anchor.state_hash === stateHash,
       'LOCAL_CHAIN_BROKEN'
     );
-    if (anchor.receipt_renderer === ADAPTER_VERSION) {
+    if (sealedRenderer === ADAPTER_VERSION) {
       // Current renderer: the on-disk receipt must reproduce exactly what we render now.
       const receiptJson = renderReceiptJson(state, events);
       const receiptMarkdown = renderReceiptMarkdown(state, events);
@@ -293,10 +298,10 @@ function repairSeal(runId) {
       if (existsSync(markdownPath)) assert(sha256(readFileSync(markdownPath, 'utf8')) === anchor.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
       else atomicWriteText(markdownPath, receiptMarkdown);
     } else {
-      // Backward read-compat: an absent or differing receipt_renderer means this run was sealed
-      // by another renderer. We cannot reproduce its bytes, so we do NOT re-render or rewrite the
-      // receipt files; we verify the on-disk files still hash to the anchor (tamper evidence
-      // preserved) and trust the anchor the seal committed to.
+      // Backward read-compat: the ledger's run_sealed event names no current-version renderer,
+      // so this run was sealed by another renderer whose bytes we cannot reproduce. We do NOT
+      // re-render or rewrite the receipt files; we verify the on-disk files still hash to the
+      // anchor (tamper evidence preserved) and trust the anchor the seal committed to.
       assert(existsSync(jsonPath) && sha256(readFileSync(jsonPath, 'utf8')) === anchor.receipt_json_hash, 'LOCAL_CHAIN_BROKEN');
       assert(existsSync(markdownPath) && sha256(readFileSync(markdownPath, 'utf8')) === anchor.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
     }
@@ -979,7 +984,9 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     appendEventUnlocked(runId, current, {
       type: 'run_sealed',
       origin: 'runtime_hook',
-      payload: { status: 'SEALED' },
+      // The renderer version lives in the hash-chained ledger, not only in the mutable
+      // anchor file, so verification's renderer gate cannot be downgraded by editing the anchor.
+      payload: { status: 'SEALED', receipt_renderer: ADAPTER_VERSION },
       idempotencyKey: `seal:${runId}`
     });
     const { events, tip } = parseLedger(runId);
