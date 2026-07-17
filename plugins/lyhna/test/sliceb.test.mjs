@@ -188,6 +188,54 @@ test('a retry in the recording-to-retrieval gap re-attaches instead of forking',
   assert.equal(second.trigger, 're_examination');
 });
 
+// A pre-evaluation refresh at head H must not swallow the post-evaluation refresh at the same H:
+// each is a distinct observation, and the final head renders CURRENT, not NOT_REFRESHED.
+test('an early same-head refresh does not swallow the post-evaluation refresh', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'early-refresh';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Early-refresh run.' });
+  const snapshot = { ...stableSnapshot, id: 'pr_early', head_before: HEAD_A, head_after: HEAD_A };
+  evaluateSnapshotWithEarlyRefresh(sessionId, parent, snapshot);
+  requestClose(parent, 'Close the early-refresh run.');
+  assert.equal(checkpointOrSeal(parent).status, 'SEALED');
+  const { state, events } = getRunForTesting(run.id);
+  const refreshes = events.filter((event) => event.type === 'pr_refreshed');
+  assert.equal(refreshes.length, 2);
+  const receipt = buildReceipt(state, events);
+  assert.deepEqual(receipt.pr_head_chains[0].heads.map((head) => head.chain_label), ['CURRENT']);
+});
+
+function evaluateSnapshotWithEarlyRefresh(sessionId, parent, snapshot) {
+  addPrSnapshot(parent, snapshot);
+  markSnapshotRefreshed(parent, snapshot.id, snapshot.head_after);
+  evaluateExistingSnapshot(sessionId, parent, snapshot, 'early-refresh-evaluator');
+  // Post-evaluation refresh at the identical head; a retry with no new evaluation still dedupes.
+  markSnapshotRefreshed(parent, snapshot.id, snapshot.head_after);
+  markSnapshotRefreshed(parent, snapshot.id, snapshot.head_after);
+}
+
+function evaluateExistingSnapshot(sessionId, parent, snapshot, agentId) {
+  const evaluation = beginEvaluation(
+    parent,
+    snapshot.id,
+    { head: snapshot.head_after, clean: true, detached: true, path: `fixture-${snapshot.id}` },
+    'initial'
+  );
+  const child = mintChild({ sessionId, agentId });
+  claimEvaluation(child, evaluation.id);
+  recordEvaluation(child, evaluation.id, `Finding for ${snapshot.id}.`, [], {
+    head_before: snapshot.head_after,
+    head_after: snapshot.head_after,
+    clean_before: true,
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
+  });
+  const receipt = sealChildByAgent({ sessionId, agentId });
+  readSealedReceipt(parent, receipt.id);
+}
+
 test('absent evaluation trigger is recorded as unspecified', { concurrency: false }, (t) => {
   isolatedData(t);
   const snapshots = [{ ...stableSnapshot, id: 'pr_default_trigger', head_before: HEAD_A, head_after: HEAD_A }];

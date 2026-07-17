@@ -802,11 +802,16 @@ export function markSnapshotRefreshed(capability, snapshotId, currentHead) {
     const snapshot = current.pr_snapshots[snapshotId];
     assert(snapshot, 'SNAPSHOT_NOT_FOUND');
     const stale = currentHead !== snapshot.head_after;
+    // A refresh after a new evaluation is a distinct observation — the CURRENT label depends on a
+    // pr_refreshed event later in the ledger than the final evaluation, so the idempotency key
+    // carries the evaluation count at refresh time. Plain retries (no intervening evaluation)
+    // still dedupe to one recorded observation.
+    const evaluationCount = Object.values(current.evaluations).filter((item) => item.snapshot_id === snapshotId).length;
     appendEventUnlocked(runId, current, {
       type: 'pr_refreshed',
       origin: 'github_observed',
       payload: { snapshot_id: snapshotId, observed_head: currentHead, status: stale ? 'STALE' : 'CURRENT_AT_REFRESH' },
-      idempotencyKey: `refresh:${snapshotId}:${currentHead}`
+      idempotencyKey: `refresh:${snapshotId}:${currentHead}:e${evaluationCount}`
     });
     current.pr_snapshots[snapshotId].current_head = currentHead;
     current.pr_snapshots[snapshotId].status = stale ? 'STALE' : current.pr_snapshots[snapshotId].status;
