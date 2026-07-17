@@ -24,11 +24,12 @@ Use `mode: "full"` whenever the request asks to build, change, fix, continue, or
 3. Use `record_claim` for consequential completion statements, citing event or artifact references when available.
 4. Build normally. Lyhna hooks record only their supported lifecycle coverage.
 5. When a PR exists, call `snapshot_pr` for the repository and PR number.
-6. Call `begin_evaluation` with the current trusted repository working directory as `source_cwd`, then delegate that request to a fresh child evaluator. The path is used operationally to prepare the checkout but is not retained in the durable run record. Do not give the evaluator builder narration as primary evidence.
+6. Call `begin_evaluation` with the current trusted repository working directory as `source_cwd`, then delegate that request to a fresh child evaluator. The path is used operationally to prepare the checkout but is not retained in the durable run record. Do not give the evaluator builder narration as primary evidence. Optionally pass `trigger` (`initial`, `post_fix_reeval`, `gate_audit`, or `re_examination`) to record why this evaluation runs; omit it when unknown — Lyhna records `unspecified` and never infers a reason.
 7. The evaluator uses its hook-issued `LYHNA_CHILD_CAPABILITY`, calls `claim_evaluation`, independently records the checkout SHA, tracked cleanliness, and detached-HEAD state before its checks, runs its own checks without fixing code, and calls `record_evaluation` with those before observations. Lyhna re-inspects the managed checkout for the after observations.
 8. After delegated children stop, call `list_child_receipts`. Call `read_sealed_receipt` for every evaluator receipt before relying on its report; ordinary child receipts prove only lifecycle coverage and are already surfaced in the parent receipt.
-9. Address findings in the builder lane. A changed PR head requires a new snapshot and evaluator pass.
-10. Call `request_close`. The next Stop hook seals only if every ordinary child has stopped with a sealed lifecycle receipt and required evaluator receipt retrieval is complete.
+9. Address findings in the builder lane. A changed PR head requires a new snapshot and evaluator pass. Each earlier head then renders `SUPERSEDED` and only the final head can render `CURRENT`.
+10. After the final evaluation, call `refresh_pr` on the final head before closing. A refresh observed after the last evaluation with an unchanged head lets that head render `CURRENT`; without it the receipt honestly stamps the head `NOT_REFRESHED`. Closing still proceeds either way — Lyhna never claims a head is current that it did not observe refreshed.
+11. Call `request_close`. The next Stop hook seals only if every ordinary child has stopped with a sealed lifecycle receipt and required evaluator receipt retrieval is complete.
 
 ## Examine an existing PR
 
