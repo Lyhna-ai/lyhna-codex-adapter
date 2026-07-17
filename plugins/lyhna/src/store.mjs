@@ -21,6 +21,16 @@ const EVALUATION_TRIGGERS = new Set(['initial', 'post_fix_reeval', 'gate_audit',
 // or superseded by a moved head. Non-terminal (OPEN/CLAIMED) means a retry re-attaches; terminal
 // means a fresh begin_evaluation on the same snapshot is a distinct re-examination.
 export const TERMINAL_EVALUATION_STATUSES = new Set(['RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION', 'STALE', 'INVALID']);
+
+// An evaluation blocks a fresh same-snapshot begin_evaluation until it is FINISHED: dead-ended
+// (STALE/INVALID), or recorded AND its evaluator child receipt sealed and retrieved — the same
+// completion request_close requires. A retry arriving in the recording-to-retrieval gap therefore
+// re-attaches to the unfinished evaluation instead of forking a second evaluator pass.
+export function isEvaluationFinished(evaluation) {
+  if (evaluation.status === 'STALE' || evaluation.status === 'INVALID') return true;
+  if (!TERMINAL_EVALUATION_STATUSES.has(evaluation.status)) return false;
+  return Boolean(evaluation.child_receipt_id && evaluation.child_receipt_retrieved);
+}
 const CAPABILITY_SHAPE = /^lyhna_(session|child)_[a-f0-9]{32,}$/;
 
 function root() {
@@ -670,11 +680,12 @@ export function beginEvaluation(capability, snapshotId, checkout = {}, trigger =
     assert(snapshot.status === 'CONSISTENT', 'INCONSISTENT_SNAPSHOT');
     assert(checkout.path && checkout.head === snapshot.head_after && checkout.clean === true && checkout.detached === true, 'EVALUATOR_CHECKOUT_REQUIRED');
     const snapshotEvaluations = Object.values(current.evaluations).filter((item) => item.snapshot_id === snapshotId);
-    // Retry idempotency: while an evaluation for this snapshot is still non-terminal (OPEN/CLAIMED),
+    // Retry idempotency: while an evaluation for this snapshot is unfinished — non-terminal
+    // (OPEN/CLAIMED), or recorded but its child receipt not yet sealed and retrieved —
     // begin_evaluation returns it unchanged so a repeated request keeps the first trigger and status.
-    const active = snapshotEvaluations.find((item) => !TERMINAL_EVALUATION_STATUSES.has(item.status));
+    const active = snapshotEvaluations.find((item) => !isEvaluationFinished(item));
     if (active) return active;
-    // Every prior evaluation for this snapshot reached a terminal outcome. A fresh begin_evaluation
+    // Every prior evaluation for this snapshot finished. A fresh begin_evaluation
     // — e.g. a re-examination of an unchanged head that snapshotted to the same deterministic id —
     // creates a NEW evaluation with a deterministic occurrence-suffixed id (derived from the count of
     // prior evaluations, no clock or randomness) so same-head evaluations stay distinct, each carrying

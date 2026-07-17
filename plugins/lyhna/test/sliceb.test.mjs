@@ -155,6 +155,39 @@ test('evaluations at the identical head are distinguishable by trigger', { concu
 });
 
 // B-5: an absent trigger is recorded as unspecified and never inferred.
+// A retry arriving after record_evaluation but BEFORE the child receipt is sealed and retrieved
+// must re-attach to the unfinished evaluation, not fork a second evaluator pass with new blockers.
+test('a retry in the recording-to-retrieval gap re-attaches instead of forking', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'retry-gap';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  beginRun(parent, { mode: 'full', objective: 'Retry-gap run.' });
+  const snapshot = { ...stableSnapshot, id: 'pr_gap', head_before: HEAD_A, head_after: HEAD_A };
+  addPrSnapshot(parent, snapshot);
+  const checkout = { head: HEAD_A, clean: true, detached: true, path: 'fixture-gap' };
+  const first = beginEvaluation(parent, snapshot.id, checkout, 'initial');
+  const child = mintChild({ sessionId, agentId: 'gap-evaluator' });
+  claimEvaluation(child, first.id);
+  recordEvaluation(child, first.id, 'Finding for the gap run.', [], {
+    head_before: HEAD_A,
+    head_after: HEAD_A,
+    clean_before: true,
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
+  });
+  // RECORDED, receipt not yet sealed/read: begin_evaluation re-attaches, keeping the first trigger.
+  const retry = beginEvaluation(parent, snapshot.id, checkout, 're_examination');
+  assert.equal(retry.id, first.id);
+  assert.equal(retry.trigger, 'initial');
+  const receipt = sealChildByAgent({ sessionId, agentId: 'gap-evaluator' });
+  readSealedReceipt(parent, receipt.id);
+  // Sealed and retrieved: the evaluation is finished, so a fresh begin is a distinct re-examination.
+  const second = beginEvaluation(parent, snapshot.id, checkout, 're_examination');
+  assert.notEqual(second.id, first.id);
+  assert.equal(second.trigger, 're_examination');
+});
+
 test('absent evaluation trigger is recorded as unspecified', { concurrency: false }, (t) => {
   isolatedData(t);
   const snapshots = [{ ...stableSnapshot, id: 'pr_default_trigger', head_before: HEAD_A, head_after: HEAD_A }];
