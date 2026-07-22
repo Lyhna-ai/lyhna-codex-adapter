@@ -1206,9 +1206,10 @@ function checkpointReceiptFilesMatch(runId, payload) {
 // appended, crash before its file writes) reports structurally at the earlier intact packet, never as
 // tamper, and absent receipt files (a torn/incomplete write, including the first checkpoint) report a
 // structural CHECKPOINT_INCOMPLETE with whether the bytes remain reconstructable from the ledger;
-// agreement of the anchor file with the matched anchor event when the file is present; and, when the
-// ledger has not advanced past the anchor event and the ledger pins the current renderer, that
-// re-rendering reproduces the anchored bytes and state hash exactly.
+// agreement of the convenience anchor file, when present, with the committed anchor event it names
+// (tolerating a one-write lag, since that file is a cache, not a trust root); and, when the ledger
+// has not advanced past the anchor event and the ledger pins the current renderer, that re-rendering
+// reproduces the anchored bytes and state hash exactly.
 function verifyOpenPacket(runId) {
   const state = loadState(runId);
   assert(!state.sealed, 'RUN_SEALED');
@@ -1287,16 +1288,25 @@ function verifyOpenPacket(runId) {
       content_reproducible_from_ledger: reproducible
     };
   }
+  // The checkpoint-anchor.json file is a convenience MIRROR of a checkpoint_anchor event, never a
+  // trust root — every hash above is read from the ledger, never from this file. It may legitimately
+  // lag one write behind: writeCheckpointArtifacts renames both receipt files before rewriting this
+  // file, so a crash in that window leaves the receipt files matching the LATEST anchor while this
+  // file still names the PRIOR one. Validate it against the anchor EVENT it names (stale-but-valid is
+  // fine), never against the receipt-file-matched anchor; a file naming no committed anchor, or
+  // disagreeing with the one it names, is an incoherent on-disk cache and fails closed.
   const anchorFile = readJson(checkpointAnchorPath(runId), null);
   if (anchorFile) {
+    const named = anchorEvents.find((event) => event.seq === anchorFile.anchor_event_seq);
+    assert(named, 'LOCAL_CHAIN_BROKEN');
+    const namedPayload = verifiedPayload(named);
     assert(
       anchorFile.run_id === runId
-      && anchorFile.anchor_event_seq === matched.seq
-      && anchorFile.as_of_seq === matchedPayload.covers_seq
-      && anchorFile.tip_hash === matchedPayload.tip_hash
-      && anchorFile.state_hash === matchedPayload.state_hash
-      && anchorFile.receipt_json_hash === matchedPayload.receipt_json_hash
-      && anchorFile.receipt_markdown_hash === matchedPayload.receipt_markdown_hash,
+      && anchorFile.as_of_seq === namedPayload.covers_seq
+      && anchorFile.tip_hash === namedPayload.tip_hash
+      && anchorFile.state_hash === namedPayload.state_hash
+      && anchorFile.receipt_json_hash === namedPayload.receipt_json_hash
+      && anchorFile.receipt_markdown_hash === namedPayload.receipt_markdown_hash,
       'LOCAL_CHAIN_BROKEN'
     );
   }

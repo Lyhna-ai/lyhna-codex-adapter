@@ -470,6 +470,33 @@ test('a mixed torn write (one file new, one old) reports structurally, not tampe
   assert.throws(() => verifyRun(run.id), /LOCAL_CHAIN_BROKEN/);
 });
 
+// 11d (Codex round-3). A Stop crash after both receipt files are renamed but before
+// checkpoint-anchor.json is rewritten leaves the receipt files matching the LATEST anchor while the
+// convenience file still names the PRIOR one. The file is a cache, not a trust root: a stale-but-valid
+// lag verifies as the latest checkpoint, never tamper.
+test('a stale checkpoint-anchor file after fresh receipt writes still verifies at the latest anchor', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-stale-anchor-file';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Stale anchor-file crash window.' });
+  checkpointOrSeal(parent, 'stop-1');
+  const { directory } = getRunForTesting(run.id);
+  const firstAnchorFile = readFileSync(join(directory, 'checkpoint-anchor.json'), 'utf8');
+  recordClaim(parent, 'A claim between checkpoints.', []);
+  checkpointOrSeal(parent, 'stop-2');
+  // Both receipt files are the second checkpoint's; the anchor file lagged and still names the first.
+  writeFileSync(join(directory, 'checkpoint-anchor.json'), firstAnchorFile);
+  const result = verifyRun(run.id);
+  assert.equal(result.status, 'CHECKPOINT_VERIFIED');
+  assert.equal(result.files_match_latest_anchor, true);
+
+  // An anchor file naming no committed anchor at all is an incoherent cache and fails closed.
+  const forged = JSON.parse(firstAnchorFile);
+  forged.anchor_event_seq = 999;
+  writeFileSync(join(directory, 'checkpoint-anchor.json'), `${JSON.stringify(forged, null, 2)}\n`);
+  assert.throws(() => verifyRun(run.id), /LOCAL_CHAIN_BROKEN/);
+});
+
 // 12 (review F5). A blocker set that changes and then recurs (S1 -> S2 -> S1) appends a fresh
 // close_deferred each time it changes, so the lifecycle face never lists stale blockers.
 test('a recurring blocker set appends a fresh observation and the face lists current blockers', { concurrency: false }, (t) => {
