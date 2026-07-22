@@ -420,6 +420,56 @@ test('a torn checkpoint write verifies structurally at the prior anchor and heal
   assert.equal(healed.files_match_latest_anchor, true);
 });
 
+// 11b (Codex round-2). A torn write on the FIRST checkpoint (anchor event committed, crash before the
+// receipt files were written) has no earlier packet to fall back to. Absent files are a benign
+// incomplete write, not tamper: verifyRun reports CHECKPOINT_INCOMPLETE and confirms the content is
+// reconstructable from the ledger — it never throws LOCAL_CHAIN_BROKEN.
+test('a first-checkpoint torn write reports structurally incomplete, not tampered', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-first-torn';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'First checkpoint torn write.' });
+  checkpointOrSeal(parent, 'stop-1');
+  const { directory } = getRunForTesting(run.id);
+  // Emulate the crash window: the checkpoint_anchor event is in the ledger, but neither receipt file
+  // (nor the convenience anchor file) was written.
+  rmSync(join(directory, 'receipt.json'));
+  rmSync(join(directory, 'RECEIPT.md'));
+  rmSync(join(directory, 'checkpoint-anchor.json'), { force: true });
+  const result = verifyRun(run.id);
+  assert.equal(result.status, 'CHECKPOINT_INCOMPLETE');
+  assert.equal(result.content_reproducible_from_ledger, true);
+
+  // Present-but-wrong files with no matching anchor are still tamper, even at the first checkpoint.
+  writeFileSync(join(directory, 'receipt.json'), '{"FORGED":true}\n');
+  writeFileSync(join(directory, 'RECEIPT.md'), 'forged\n');
+  assert.throws(() => verifyRun(run.id), /LOCAL_CHAIN_BROKEN/);
+});
+
+// 11c (Codex round-2). A MIXED torn write — crash between the two atomic receipt-file renames, so one
+// file is the new checkpoint's bytes and the other is the prior checkpoint's — matches no single
+// anchor fully, but each present file is still vouched for by some committed anchor. Benign: reported
+// structurally, not tamper. A present file matching no committed anchor stays tamper.
+test('a mixed torn write (one file new, one old) reports structurally, not tampered', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-mixed-torn';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Mixed torn write.' });
+  checkpointOrSeal(parent, 'stop-1');
+  const { directory } = getRunForTesting(run.id);
+  const firstMarkdown = readFileSync(join(directory, 'RECEIPT.md'), 'utf8');
+  recordClaim(parent, 'A claim between checkpoints.', []);
+  checkpointOrSeal(parent, 'stop-2');
+  // Crash between the two renames: receipt.json is the second checkpoint's, RECEIPT.md is the first's.
+  writeFileSync(join(directory, 'RECEIPT.md'), firstMarkdown);
+  const result = verifyRun(run.id);
+  assert.equal(result.status, 'CHECKPOINT_INCOMPLETE');
+
+  // Replace the markdown with content no committed anchor vouches for → tamper.
+  writeFileSync(join(directory, 'RECEIPT.md'), `${firstMarkdown}\nforged\n`);
+  assert.throws(() => verifyRun(run.id), /LOCAL_CHAIN_BROKEN/);
+});
+
 // 12 (review F5). A blocker set that changes and then recurs (S1 -> S2 -> S1) appends a fresh
 // close_deferred each time it changes, so the lifecycle face never lists stale blockers.
 test('a recurring blocker set appends a fresh observation and the face lists current blockers', { concurrency: false }, (t) => {

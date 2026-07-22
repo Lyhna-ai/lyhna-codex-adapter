@@ -1201,12 +1201,14 @@ function checkpointReceiptFilesMatch(runId, payload) {
 // its last checkpoint. The trust root is the hash-chained ledger: receipt hashes are read from the
 // latest checkpoint_anchor EVENT, so editing the mutable checkpoint-anchor.json or the receipt files
 // can never select a weaker path, and deleting the anchor file hides nothing. Verifies: the whole
-// chain; state-cache/ledger consistency; that the on-disk receipt files are the exact bytes the
-// latest anchor event committed to — falling back to the immediately prior anchor event for the
-// torn-write crash window (anchor event appended, crash before its file writes), reported
-// structurally, never as tamper; agreement of the anchor file with the matched anchor event when the
-// file is present; and, when the ledger has not advanced past the anchor event and the ledger pins
-// the current renderer, that re-rendering reproduces the anchored bytes and state hash exactly.
+// chain; state-cache/ledger consistency; that the on-disk receipt files are the exact bytes some
+// committed anchor event covers — scanning newest-first so a torn write on a later checkpoint (anchor
+// appended, crash before its file writes) reports structurally at the earlier intact packet, never as
+// tamper, and absent receipt files (a torn/incomplete write, including the first checkpoint) report a
+// structural CHECKPOINT_INCOMPLETE with whether the bytes remain reconstructable from the ledger;
+// agreement of the anchor file with the matched anchor event when the file is present; and, when the
+// ledger has not advanced past the anchor event and the ledger pins the current renderer, that
+// re-rendering reproduces the anchored bytes and state hash exactly.
 function verifyOpenPacket(runId) {
   const state = loadState(runId);
   assert(!state.sealed, 'RUN_SEALED');
@@ -1240,14 +1242,50 @@ function verifyOpenPacket(runId) {
   };
   const latest = anchorEvents.at(-1);
   const latestPayload = verifiedPayload(latest);
-  let matched = latest;
-  let matchedPayload = latestPayload;
-  if (!checkpointReceiptFilesMatch(runId, latestPayload)) {
-    const previous = anchorEvents.at(-2);
-    assert(previous, 'LOCAL_CHAIN_BROKEN');
-    matchedPayload = verifiedPayload(previous);
-    assert(checkpointReceiptFilesMatch(runId, matchedPayload), 'LOCAL_CHAIN_BROKEN');
-    matched = previous;
+  // Which ledger-committed anchor do BOTH on-disk receipt files reproduce? Normally the latest. A
+  // torn write on a LATER checkpoint (anchor event appended, crash before its file writes) leaves the
+  // files holding an earlier anchor's packet — scan newest-first and report at that one; the next
+  // Stop heals the split.
+  const allPayloads = anchorEvents.map((event) => verifiedPayload(event));
+  let matched = null;
+  let matchedPayload = null;
+  for (let index = anchorEvents.length - 1; index >= 0; index -= 1) {
+    if (checkpointReceiptFilesMatch(runId, allPayloads[index])) {
+      matched = anchorEvents[index];
+      matchedPayload = allPayloads[index];
+      break;
+    }
+  }
+  if (!matched) {
+    // No single committed anchor is reproduced by both files. This is a torn/incomplete write —
+    // benign — UNLESS a present file's content is vouched for by no committed anchor at all, which is
+    // tamper. A file is checked per-slot against every committed anchor's hash: absent slots are an
+    // unwritten/torn write (the first checkpoint has no earlier packet to fall back to), a mixed
+    // pair is a crash between the two atomic renames, and either way the ledger-pinned anchor plus
+    // the current deterministic renderer can reconstruct the bytes. Torn writes report a structural
+    // CHECKPOINT_INCOMPLETE, never tamper and never a raw filesystem error.
+    const jsonHashes = new Set(allPayloads.map((payload) => payload.receipt_json_hash));
+    const markdownHashes = new Set(allPayloads.map((payload) => payload.receipt_markdown_hash));
+    const jsonPath = join(runDir(runId), 'receipt.json');
+    const markdownPath = join(runDir(runId), 'RECEIPT.md');
+    if (existsSync(jsonPath)) assert(jsonHashes.has(sha256(readFileSync(jsonPath, 'utf8'))), 'LOCAL_CHAIN_BROKEN');
+    if (existsSync(markdownPath)) assert(markdownHashes.has(sha256(readFileSync(markdownPath, 'utf8'))), 'LOCAL_CHAIN_BROKEN');
+    let reproducible = false;
+    if (events.length === latest.seq && latestPayload.receipt_renderer === ADAPTER_VERSION) {
+      const stateAtAnchor = { ...state, ledger_count: latestPayload.covers_seq, ledger_tip: latestPayload.tip_hash };
+      assert(sha256(canonicalJson(stateAtAnchor)) === latestPayload.state_hash, 'LOCAL_CHAIN_BROKEN');
+      const covered = events.slice(0, latestPayload.covers_seq);
+      assert(sha256(renderReceiptJson(stateAtAnchor, covered)) === latestPayload.receipt_json_hash, 'LOCAL_CHAIN_BROKEN');
+      assert(sha256(renderReceiptMarkdown(stateAtAnchor, covered)) === latestPayload.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
+      reproducible = true;
+    }
+    return {
+      status: 'CHECKPOINT_INCOMPLETE',
+      run_id: runId,
+      as_of_seq: latestPayload.covers_seq,
+      anchor_event_seq: latest.seq,
+      content_reproducible_from_ledger: reproducible
+    };
   }
   const anchorFile = readJson(checkpointAnchorPath(runId), null);
   if (anchorFile) {
