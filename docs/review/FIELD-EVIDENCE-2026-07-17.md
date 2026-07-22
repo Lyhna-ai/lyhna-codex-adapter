@@ -101,3 +101,13 @@ CZ-11 (rejected-claim traces) and CZ-12 (open-run visibility, vocabulary as amen
 ---
 
 *The builder produces. The evaluator examines. Lyhna witnesses. The corpus grades. Adam decides.*
+
+---
+
+# Addendum — 2026-07-22: first 0.1.26 field run (B11)
+
+The first fresh-task run after the 0.1.26 install (`run_2a2bd199-cb0f-492d-b683-ba99d3c40855`, B11 "Keep Read Integrity and Relevance" on homesteadai-io/homestead-private-os-infra PR #130) confirms the new surface in the field: `begin_run` returned `objective_origin: runtime_hook` with the CZ-12 `open_predecessors` field on its face, and `begin_evaluation` responses carried B-5 `trigger` values (`initial`, `post_fix_reeval`) — third consecutive front-door confirmation, first with Slice B fields live.
+
+The run also produced the witness's first two credited *code* catches in the field: the Lyhna evaluator found a tokenless-corpus divide-by-zero the project's own suite missed, and a ledger contradiction ("the ten numbered gates are closed" surviving after B11 opened). Both were fixed in-flight by the builder. Narration balance held after the CZ-13 correction: the operator armed the witness with one line in the task protocol, and the build stayed the story.
+
+PR #130 was evaluated across six successive heads with per-fix re-evaluation triggers — when this run closes and seals, its packet is the intended Slice B blind-reader gate input.
