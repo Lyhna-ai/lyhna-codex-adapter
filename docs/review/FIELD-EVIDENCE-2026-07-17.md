@@ -111,3 +111,15 @@ The first fresh-task run after the 0.1.26 install (`run_2a2bd199-cb0f-492d-b683-
 The run also produced the witness's first two credited *code* catches in the field: the Lyhna evaluator found a tokenless-corpus divide-by-zero the project's own suite missed, and a ledger contradiction ("the ten numbered gates are closed" surviving after B11 opened). Both were fixed in-flight by the builder. Narration balance held after the CZ-13 correction: the operator armed the witness with one line in the task protocol, and the build stayed the story.
 
 PR #130 was evaluated across six successive heads with per-fix re-evaluation triggers — when this run closes and seals, its packet is the intended Slice B blind-reader gate input.
+
+---
+
+# Addendum — 2026-07-22: the back door has the front door's disease (CZ-14 candidate)
+
+The operator asked the load-bearing question: why does sealing require anyone to ask? Today's answer: a run seals only when the agent explicitly requests close and the turn ends — a merged PR does not trigger it, a turn does not (checkpoints only), phases are invisible. Closure is the narrator's voluntary act, because "the work is done" is a judgment the witness refuses to infer and the host emits no work-ended event (threads trail off and can be resumed days later).
+
+The field record proves the voluntary design insufficient: three of the seven runs in the operator's data root never sealed — the narrator never asked, or asked with a stale token. Slice A fixed the front door because invocation depended on the spec instead of the user; the back door fails the same way — the record's completeness depends on the diligence of exactly the unreliable narrator the product exists to check.
+
+Proposed correction, judgment-free (scope decision is the operator's):
+1. **Operator close** — a local command (the master key re-derives any session capability) that closes and seals any open run from the operator's shell: no agent, no reopened thread, one gesture. "The operator closed the record" is an observation. Small; recommended as the next code item.
+2. **Seal-as-you-go checkpoint anchors** — the ledger is already hash-chained per event; anchoring a rendered checkpoint at every Stop makes a verifiable packet exist at every turn boundary, honestly stamped OPEN as of event N. An abandoned run becomes an unclosed record, never an unverifiable one. Slice C material.
