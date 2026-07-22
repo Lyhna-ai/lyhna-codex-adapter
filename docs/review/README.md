@@ -5,7 +5,7 @@
 
 Independent third-party evaluation record for the Lyhna Codex Adapter and the Lyhna product direction. Assembled by the evaluator session at Adam's direction; nothing here approves, certifies, or merges anything — canonical/adoption status of every document is Adam's decision.
 
-**Taking over from a prior session? Read [HANDOFF-2026-07-16.md](HANDOFF-2026-07-16.md) first** — it carries the role, the exact current state, the operating loop, and the continuation prompt.
+**Taking over from a prior session? Read [HANDOFF-2026-07-22.md](HANDOFF-2026-07-22.md) first** — it carries the current state and the next build (CZ-14). Then [HANDOFF-2026-07-16.md](HANDOFF-2026-07-16.md) for the role, the constitution, and the operating loop.
 
 Read in this order:
 
