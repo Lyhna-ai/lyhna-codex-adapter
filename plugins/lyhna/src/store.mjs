@@ -286,10 +286,6 @@ function repairSeal(runId) {
   const { events, tip } = parseLedger(runId);
   assert(events.length === state.ledger_count && tip === state.ledger_tip, 'LOCAL_CHAIN_BROKEN');
   verifyChildReceipts(state);
-  // CZ-14: a sealed packet carries exactly one anchor — the seal anchor. If a pre-seal Stop left a
-  // checkpoint anchor behind (an interrupted seal that had not yet cleared it), drop it here. Absence
-  // is the normal case; presence is tolerated and cleaned up so the sealed run is unambiguous.
-  if (existsSync(checkpointAnchorPath(runId))) rmSync(checkpointAnchorPath(runId), { force: true });
   const stateHash = sha256(canonicalJson(state));
   const jsonPath = join(runDir(runId), 'receipt.json');
   const markdownPath = join(runDir(runId), 'RECEIPT.md');
@@ -327,6 +323,7 @@ function repairSeal(runId) {
       assert(existsSync(jsonPath) && sha256(readFileSync(jsonPath, 'utf8')) === anchor.receipt_json_hash, 'LOCAL_CHAIN_BROKEN');
       assert(existsSync(markdownPath) && sha256(readFileSync(markdownPath, 'utf8')) === anchor.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
     }
+    dropCheckpointAnchor(runId);
     return { status: 'ALREADY_SEALED', run_id: runId, receipt_path: markdownPath };
   }
 
@@ -342,12 +339,36 @@ function repairSeal(runId) {
     receipt_markdown_hash: sha256(receiptMarkdown),
     receipt_renderer: ADAPTER_VERSION
   };
-  if (existsSync(jsonPath)) assert(sha256(readFileSync(jsonPath, 'utf8')) === expected.receipt_json_hash, 'LOCAL_CHAIN_BROKEN');
-  else atomicWriteText(jsonPath, receiptJson);
-  if (existsSync(markdownPath)) assert(sha256(readFileSync(markdownPath, 'utf8')) === expected.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
-  else atomicWriteText(markdownPath, receiptMarkdown);
+  // CZ-14: pre-seal Stops leave checkpoint receipt files on disk, so an interrupted seal (crash
+  // after the sealed state was saved, before the sealed receipt files were written) presents here
+  // with receipt bytes that mismatch the sealed render. Those bytes are recognized by the
+  // hash-chained checkpoint_anchor event that committed them and overwritten with the sealed
+  // render — an interrupted seal recovers; it is not tamper. Bytes matching neither the sealed
+  // render nor the latest ledger-committed checkpoint fail closed.
+  const lastCheckpointAnchor = events.filter((event) => event.type === 'checkpoint_anchor').at(-1);
+  const staleCheckpointFile = (path, sealedHash, checkpointHashKey) => {
+    if (!existsSync(path)) return true;
+    const hash = sha256(readFileSync(path, 'utf8'));
+    if (hash === sealedHash) return false;
+    assert(hash === lastCheckpointAnchor?.payload?.[checkpointHashKey], 'LOCAL_CHAIN_BROKEN');
+    return true;
+  };
+  if (staleCheckpointFile(jsonPath, expected.receipt_json_hash, 'receipt_json_hash')) atomicWriteText(jsonPath, receiptJson);
+  if (staleCheckpointFile(markdownPath, expected.receipt_markdown_hash, 'receipt_markdown_hash')) atomicWriteText(markdownPath, receiptMarkdown);
   atomicWriteJson(anchorPath(runId), expected);
+  dropCheckpointAnchor(runId);
   return { status: 'ALREADY_SEALED', run_id: runId, receipt_path: markdownPath };
+}
+
+// A sealed packet carries exactly one anchor — the seal anchor. Cleanup of a leftover checkpoint
+// anchor is best-effort: a copied packet may sit on read-only media, and cleanup must never turn
+// verification into a raw filesystem error; a tolerated leftover is ignored by the sealed path.
+function dropCheckpointAnchor(runId) {
+  try {
+    rmSync(checkpointAnchorPath(runId), { force: true });
+  } catch {
+    /* tolerated */
+  }
 }
 
 function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyKey }) {
@@ -1026,8 +1047,9 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       appendEventUnlocked(runId, current, {
         type: 'turn_checkpoint',
         origin: 'runtime_hook',
-        // The renderer version is pinned in the hash-chained event (mirroring run_sealed), so the
-        // open-packet verification gate reads the ledger, never the mutable checkpoint anchor.
+        // The renderer version also rides in this event for observability; the verification gate
+        // reads the checkpoint_anchor event that writeCheckpointArtifacts appends (never the
+        // mutable anchor file), mirroring how run_sealed pins the seal renderer.
         payload: { status: 'OPEN', receipt_renderer: ADAPTER_VERSION },
         idempotencyKey: `checkpoint:${deliveryKey || current.ledger_count + 1}`
       });
@@ -1060,14 +1082,22 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     }
     if (blockers.length) {
       blockers.sort();
-      appendEventUnlocked(runId, current, {
-        type: 'close_deferred',
-        origin: 'runtime_hook',
-        // Renderer pinned in the hash-chained event; the idempotency key still keys on blockers only,
-        // so a re-observed identical blocker set dedupes and re-writes an identical checkpoint anchor.
-        payload: { blockers, receipt_renderer: ADAPTER_VERSION },
-        idempotencyKey: `close-deferred:${sha256(canonicalJson(blockers))}`
-      });
+      // A blocker set identical to the LATEST close_deferred observation is a retry and appends no
+      // new event; any changed set — including one that recurs after an intervening different set
+      // (the prior-occurrence count keys it) — is a semantically distinct observation and appends
+      // its own event, so the lifecycle face's latest close_deferred is always the latest
+      // observation, never a stale one.
+      const { events: parsedEvents } = parseLedger(runId);
+      const priorDeferred = parsedEvents.filter((event) => event.type === 'close_deferred');
+      const latestDeferred = priorDeferred.at(-1);
+      if (!latestDeferred || canonicalJson(latestDeferred.payload.blockers) !== canonicalJson(blockers)) {
+        appendEventUnlocked(runId, current, {
+          type: 'close_deferred',
+          origin: 'runtime_hook',
+          payload: { blockers, receipt_renderer: ADAPTER_VERSION },
+          idempotencyKey: `close-deferred:o${priorDeferred.length}:${sha256(canonicalJson(blockers))}`
+        });
+      }
       saveState(current);
       // CZ-14 seal-as-you-go: the deferred close is itself a checkpoint — write its receipt + anchor.
       writeCheckpointArtifacts(runId, current);
@@ -1100,31 +1130,56 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       receipt_markdown_hash: sha256(receiptMarkdown),
       receipt_renderer: ADAPTER_VERSION
     });
-    // CZ-14 decision: a sealed packet carries exactly one anchor. Remove any checkpoint anchor
-    // written by earlier Stops so the sealed run has a single, unambiguous seal anchor. repairSeal
-    // tolerates both presence (interrupted seal) and absence of this file.
-    rmSync(checkpointAnchorPath(runId), { force: true });
+    // CZ-14 decision: a sealed packet carries exactly one anchor — remove the checkpoint anchor
+    // written by earlier Stops. repairSeal tolerates both presence (interrupted seal) and absence.
+    dropCheckpointAnchor(runId);
     return { status: 'SEALED', run_id: runId, receipt_path: join(runDir(runId), 'RECEIPT.md') };
   });
 }
 
-// CZ-14 seal-as-you-go: render the current (unsealed) receipt and write the checkpoint anchor with
-// the same discipline as the seal anchor. The latest checkpoint overwrites the prior one; history
-// lives in the ledger. Called only after the checkpoint/close_deferred event is appended and state
-// saved, so the parsed ledger and the passed state agree.
+// CZ-14 seal-as-you-go. The ledger is the trust root for open packets: after the Stop's
+// checkpoint/close_deferred event is appended, the rendered receipt's hashes are committed to a
+// hash-chained checkpoint_anchor EVENT, and only then are the receipt files and the convenience
+// checkpoint-anchor.json written. Editing the mutable anchor file or the receipt files can
+// therefore never select a weaker verification path — verification reads the anchor event. The
+// receipt covers events 1..covers_seq (everything before its own anchor event); the latest anchor
+// overwrites the file, history lives in the ledger. Called only after the checkpoint/close_deferred
+// event is appended and state saved, so the parsed ledger and the passed state agree.
 function writeCheckpointArtifacts(runId, state) {
   const { events, tip } = parseLedger(runId);
+  // Nothing happened since the previous anchor (e.g. a redelivered Stop deduped its checkpoint
+  // event): the ledger tip IS the anchor; re-anchoring would anchor the anchor. Idempotent no-op.
+  if (events.at(-1)?.type === 'checkpoint_anchor') return;
+  const coversSeq = events.length;
   const receiptJson = renderReceiptJson(state, events);
   const receiptMarkdown = renderReceiptMarkdown(state, events);
+  const stateHash = sha256(canonicalJson(state));
+  const receiptJsonHash = sha256(receiptJson);
+  const receiptMarkdownHash = sha256(receiptMarkdown);
+  const anchorEvent = appendEventUnlocked(runId, state, {
+    type: 'checkpoint_anchor',
+    origin: 'runtime_hook',
+    payload: {
+      covers_seq: coversSeq,
+      tip_hash: tip,
+      state_hash: stateHash,
+      receipt_json_hash: receiptJsonHash,
+      receipt_markdown_hash: receiptMarkdownHash,
+      receipt_renderer: ADAPTER_VERSION
+    },
+    idempotencyKey: `checkpoint-anchor:${coversSeq}`
+  });
+  saveState(state);
   atomicWriteText(join(runDir(runId), 'receipt.json'), receiptJson);
   atomicWriteText(join(runDir(runId), 'RECEIPT.md'), receiptMarkdown);
   atomicWriteJson(checkpointAnchorPath(runId), {
     run_id: runId,
-    as_of_seq: events.length,
+    as_of_seq: coversSeq,
+    anchor_event_seq: anchorEvent.seq,
     tip_hash: tip,
-    state_hash: sha256(canonicalJson(state)),
-    receipt_json_hash: sha256(receiptJson),
-    receipt_markdown_hash: sha256(receiptMarkdown),
+    state_hash: stateHash,
+    receipt_json_hash: receiptJsonHash,
+    receipt_markdown_hash: receiptMarkdownHash,
     receipt_renderer: ADAPTER_VERSION
   });
 }
@@ -1133,54 +1188,100 @@ export function verifySealedRun(runId) {
   return withLock(lockPath(runId), () => repairSeal(runId));
 }
 
-function assertCheckpointReceiptFiles(runId, anchor) {
+function checkpointReceiptFilesMatch(runId, payload) {
   const jsonPath = join(runDir(runId), 'receipt.json');
   const markdownPath = join(runDir(runId), 'RECEIPT.md');
-  assert(existsSync(jsonPath) && sha256(readFileSync(jsonPath, 'utf8')) === anchor.receipt_json_hash, 'LOCAL_CHAIN_BROKEN');
-  assert(existsSync(markdownPath) && sha256(readFileSync(markdownPath, 'utf8')) === anchor.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
+  return existsSync(jsonPath)
+    && sha256(readFileSync(jsonPath, 'utf8')) === payload.receipt_json_hash
+    && existsSync(markdownPath)
+    && sha256(readFileSync(markdownPath, 'utf8')) === payload.receipt_markdown_hash;
 }
 
-// CZ-14 open-packet verification. An unsealed run with a checkpoint anchor is a verifiable packet at
-// its last checkpoint. Verifies (a) the hash chain through as_of_seq and that the event hash there is
-// the anchor tip; (b) the on-disk receipt files hash-match the anchor; (c) renderer gating exactly
-// like seals — the gate value is read from the hash-chained checkpoint/close_deferred event, never
-// the anchor. When the ledger has not advanced past as_of_seq and the ledger pins the current
-// renderer, re-rendering must reproduce the anchored hashes. When the ledger HAS advanced (events
-// appended since the last Stop — legitimate on a live run), chain + file-hash checks still apply, but
-// state-hash equality and re-render reproduction do not, because the state cache has moved on.
+// CZ-14 open-packet verification. An unsealed run with checkpoint anchors is a verifiable packet at
+// its last checkpoint. The trust root is the hash-chained ledger: receipt hashes are read from the
+// latest checkpoint_anchor EVENT, so editing the mutable checkpoint-anchor.json or the receipt files
+// can never select a weaker path, and deleting the anchor file hides nothing. Verifies: the whole
+// chain; state-cache/ledger consistency; that the on-disk receipt files are the exact bytes the
+// latest anchor event committed to — falling back to the immediately prior anchor event for the
+// torn-write crash window (anchor event appended, crash before its file writes), reported
+// structurally, never as tamper; agreement of the anchor file with the matched anchor event when the
+// file is present; and, when the ledger has not advanced past the anchor event and the ledger pins
+// the current renderer, that re-rendering reproduces the anchored bytes and state hash exactly.
 function verifyOpenPacket(runId) {
   const state = loadState(runId);
   assert(!state.sealed, 'RUN_SEALED');
   const { events } = parseLedger(runId);
-  const anchor = readJson(checkpointAnchorPath(runId), null);
-  if (!anchor) {
-    // Legacy / pre-CZ-14 open shape: no checkpoint anchor. A structural result, never a raw throw.
-    return { status: 'OPEN_NO_CHECKPOINT', run_id: runId, event_count: events.length };
-  }
+  // The state cache must be a consistent prefix view of the ledger — it may lag after a crash
+  // (readLedger recovers that), but it must never contradict the chain.
   assert(
-    anchor.run_id === runId
-    && Number.isInteger(anchor.as_of_seq)
-    && anchor.as_of_seq >= 0
-    && anchor.as_of_seq <= events.length
-    && typeof anchor.tip_hash === 'string'
-    && typeof anchor.state_hash === 'string'
-    && typeof anchor.receipt_json_hash === 'string'
-    && typeof anchor.receipt_markdown_hash === 'string',
+    Number.isInteger(state.ledger_count) && state.ledger_count >= 0 && state.ledger_count <= events.length,
     'LOCAL_CHAIN_BROKEN'
   );
-  const tipAtSeq = anchor.as_of_seq === 0 ? ZERO_HASH : events[anchor.as_of_seq - 1].event_hash;
-  assert(tipAtSeq === anchor.tip_hash, 'LOCAL_CHAIN_BROKEN');
-  assertCheckpointReceiptFiles(runId, anchor);
-  const anchoredRenderer = events[anchor.as_of_seq - 1]?.payload?.receipt_renderer ?? null;
-  const ledgerAtAnchor = events.length === anchor.as_of_seq;
-  if (ledgerAtAnchor) {
-    assert(sha256(canonicalJson(state)) === anchor.state_hash, 'LOCAL_CHAIN_BROKEN');
-    if (anchoredRenderer === ADAPTER_VERSION) {
-      assert(sha256(renderReceiptJson(state, events)) === anchor.receipt_json_hash, 'LOCAL_CHAIN_BROKEN');
-      assert(sha256(renderReceiptMarkdown(state, events)) === anchor.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
+  const cacheTip = state.ledger_count === 0 ? ZERO_HASH : events[state.ledger_count - 1].event_hash;
+  assert(cacheTip === state.ledger_tip, 'LOCAL_CHAIN_BROKEN');
+  const anchorEvents = events.filter((event) => event.type === 'checkpoint_anchor');
+  if (!anchorEvents.length) {
+    // Legacy / pre-CZ-14 open shape (or a run that never reached a Stop): structural, never a throw.
+    return { status: 'OPEN_NO_CHECKPOINT', run_id: runId, event_count: events.length };
+  }
+  const verifiedPayload = (anchorEvent) => {
+    const payload = anchorEvent.payload || {};
+    assert(
+      Number.isInteger(payload.covers_seq)
+      && payload.covers_seq === anchorEvent.seq - 1
+      && payload.covers_seq >= 1
+      && events[payload.covers_seq - 1].event_hash === payload.tip_hash
+      && typeof payload.state_hash === 'string'
+      && typeof payload.receipt_json_hash === 'string'
+      && typeof payload.receipt_markdown_hash === 'string',
+      'LOCAL_CHAIN_BROKEN'
+    );
+    return payload;
+  };
+  const latest = anchorEvents.at(-1);
+  const latestPayload = verifiedPayload(latest);
+  let matched = latest;
+  let matchedPayload = latestPayload;
+  if (!checkpointReceiptFilesMatch(runId, latestPayload)) {
+    const previous = anchorEvents.at(-2);
+    assert(previous, 'LOCAL_CHAIN_BROKEN');
+    matchedPayload = verifiedPayload(previous);
+    assert(checkpointReceiptFilesMatch(runId, matchedPayload), 'LOCAL_CHAIN_BROKEN');
+    matched = previous;
+  }
+  const anchorFile = readJson(checkpointAnchorPath(runId), null);
+  if (anchorFile) {
+    assert(
+      anchorFile.run_id === runId
+      && anchorFile.anchor_event_seq === matched.seq
+      && anchorFile.as_of_seq === matchedPayload.covers_seq
+      && anchorFile.tip_hash === matchedPayload.tip_hash
+      && anchorFile.state_hash === matchedPayload.state_hash
+      && anchorFile.receipt_json_hash === matchedPayload.receipt_json_hash
+      && anchorFile.receipt_markdown_hash === matchedPayload.receipt_markdown_hash,
+      'LOCAL_CHAIN_BROKEN'
+    );
+  }
+  if (events.length === matched.seq) {
+    // Ledger exactly at the anchor: the current state minus the anchor event itself must reproduce
+    // the committed state hash, and the current renderer must reproduce the committed bytes.
+    const stateAtAnchor = { ...state, ledger_count: matchedPayload.covers_seq, ledger_tip: matchedPayload.tip_hash };
+    assert(sha256(canonicalJson(stateAtAnchor)) === matchedPayload.state_hash, 'LOCAL_CHAIN_BROKEN');
+    if (matchedPayload.receipt_renderer === ADAPTER_VERSION) {
+      const covered = events.slice(0, matchedPayload.covers_seq);
+      assert(sha256(renderReceiptJson(stateAtAnchor, covered)) === matchedPayload.receipt_json_hash, 'LOCAL_CHAIN_BROKEN');
+      assert(sha256(renderReceiptMarkdown(stateAtAnchor, covered)) === matchedPayload.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
     }
   }
-  return { status: 'CHECKPOINT_VERIFIED', run_id: runId, as_of_seq: anchor.as_of_seq, ledger_advanced: !ledgerAtAnchor };
+  return {
+    status: 'CHECKPOINT_VERIFIED',
+    run_id: runId,
+    as_of_seq: matchedPayload.covers_seq,
+    anchor_event_seq: matched.seq,
+    latest_anchor_event_seq: latest.seq,
+    files_match_latest_anchor: matched === latest,
+    ledger_advanced: events.length > latest.seq
+  };
 }
 
 // Dispatching verify: sealed runs keep verifySealedRun semantics unchanged; unsealed runs verify their
