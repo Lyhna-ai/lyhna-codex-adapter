@@ -87,7 +87,13 @@ export function createService({ githubRunner } = {}) {
           return addPrSnapshot(args.session_capability, snapshot);
         }
         case 'begin_evaluation': {
+          // Validate the token before any path is built from its run: a stale or garbled
+          // capability must surface as the structural UNKNOWN_CAPABILITY (with its CZ-11
+          // trace), and a valid token with no open run as NO_ACTIVE_RUN — never as a raw
+          // Node path error.
+          getCapability(args.session_capability);
           const active = (await import('./store.mjs')).activeRunFor(args.session_capability);
+          if (!active) throw Object.assign(new Error('NO_ACTIVE_RUN'), { code: 'NO_ACTIVE_RUN' });
           const state = (await import('./store.mjs')).getRunForTesting(active).state;
           const snapshot = requireSnapshot(state, args.pr_snapshot_id);
           const evaluationPath = join(dataRoot(), 'evaluations', `${active}-${args.pr_snapshot_id}`, 'worktree');
@@ -139,7 +145,9 @@ export function createService({ githubRunner } = {}) {
           return recordEvaluationStore(args.child_capability, args.evaluation_request_id, args.finding, args.evidence_refs || [], observed);
         }
         case 'refresh_pr': {
+          getCapability(args.session_capability);
           const active = (await import('./store.mjs')).activeRunFor(args.session_capability);
+          if (!active) throw Object.assign(new Error('NO_ACTIVE_RUN'), { code: 'NO_ACTIVE_RUN' });
           const state = (await import('./store.mjs')).getRunForTesting(active).state;
           const snapshot = requireSnapshot(state, args.pr_snapshot_id);
           const head = refreshPrHead({ repository: snapshot.repository, prNumber: snapshot.pr_number, runner: githubRunner });
