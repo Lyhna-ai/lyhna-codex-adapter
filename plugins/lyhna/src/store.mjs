@@ -802,16 +802,20 @@ export function markSnapshotRefreshed(capability, snapshotId, currentHead) {
     const snapshot = current.pr_snapshots[snapshotId];
     assert(snapshot, 'SNAPSHOT_NOT_FOUND');
     const stale = currentHead !== snapshot.head_after;
-    // A refresh after a new evaluation is a distinct observation — the CURRENT label depends on a
-    // pr_refreshed event later in the ledger than the final evaluation, so the idempotency key
-    // carries the evaluation count at refresh time. Plain retries (no intervening evaluation)
-    // still dedupe to one recorded observation.
-    const evaluationCount = Object.values(current.evaluations).filter((item) => item.snapshot_id === snapshotId).length;
+    // A refresh after new evaluation activity is a distinct observation — the CURRENT label
+    // depends on a pr_refreshed event later in the ledger than the final evaluation event
+    // (requested OR finding), so the idempotency key carries both the evaluation count and the
+    // recorded-finding count at refresh time. A refresh between begin_evaluation and
+    // record_evaluation therefore cannot swallow the required post-finding refresh, while plain
+    // retries (no intervening evaluation activity) still dedupe to one recorded observation.
+    const snapshotEvaluations = Object.values(current.evaluations).filter((item) => item.snapshot_id === snapshotId);
+    const evaluationCount = snapshotEvaluations.length;
+    const findingCount = snapshotEvaluations.reduce((total, item) => total + (item.findings?.length || 0), 0);
     appendEventUnlocked(runId, current, {
       type: 'pr_refreshed',
       origin: 'github_observed',
       payload: { snapshot_id: snapshotId, observed_head: currentHead, status: stale ? 'STALE' : 'CURRENT_AT_REFRESH' },
-      idempotencyKey: `refresh:${snapshotId}:${currentHead}:e${evaluationCount}`
+      idempotencyKey: `refresh:${snapshotId}:${currentHead}:e${evaluationCount}f${findingCount}`
     });
     current.pr_snapshots[snapshotId].current_head = currentHead;
     current.pr_snapshots[snapshotId].status = stale ? 'STALE' : current.pr_snapshots[snapshotId].status;

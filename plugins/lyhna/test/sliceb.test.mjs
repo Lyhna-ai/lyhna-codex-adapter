@@ -217,6 +217,45 @@ test('a clean re-snapshot after an inconsistent capture renders CURRENT, not INC
   assert.equal(labels.filter((label) => label === 'CURRENT').length, 1);
 });
 
+// A refresh landing BETWEEN begin_evaluation and record_evaluation must not burn the key for the
+// required post-finding refresh: the final head renders CURRENT, not NOT_REFRESHED.
+test('a mid-evaluation refresh does not swallow the post-finding refresh', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'mid-eval-refresh';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Mid-evaluation refresh run.' });
+  const snapshot = { ...stableSnapshot, id: 'pr_mid', head_before: HEAD_A, head_after: HEAD_A };
+  addPrSnapshot(parent, snapshot);
+  const evaluation = beginEvaluation(
+    parent,
+    snapshot.id,
+    { head: HEAD_A, clean: true, detached: true, path: 'fixture-mid' },
+    'initial'
+  );
+  // Refresh lands after begin_evaluation but before the finding is recorded.
+  markSnapshotRefreshed(parent, snapshot.id, HEAD_A);
+  const child = mintChild({ sessionId, agentId: 'mid-eval-evaluator' });
+  claimEvaluation(child, evaluation.id);
+  recordEvaluation(child, evaluation.id, 'Finding for the mid run.', [], {
+    head_before: HEAD_A,
+    head_after: HEAD_A,
+    clean_before: true,
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
+  });
+  const receipt = sealChildByAgent({ sessionId, agentId: 'mid-eval-evaluator' });
+  readSealedReceipt(parent, receipt.id);
+  // The required post-finding refresh must append a NEW event, not dedupe against the mid one.
+  markSnapshotRefreshed(parent, snapshot.id, HEAD_A);
+  requestClose(parent, 'Close the mid-evaluation refresh run.');
+  assert.equal(checkpointOrSeal(parent).status, 'SEALED');
+  const { state, events } = getRunForTesting(run.id);
+  assert.equal(events.filter((event) => event.type === 'pr_refreshed').length, 2);
+  const built = buildReceipt(state, events);
+  assert.deepEqual(built.pr_head_chains[0].heads.map((head) => head.chain_label), ['CURRENT']);
+});
+
 // A pre-evaluation refresh at head H must not swallow the post-evaluation refresh at the same H:
 // each is a distinct observation, and the final head renders CURRENT, not NOT_REFRESHED.
 test('an early same-head refresh does not swallow the post-evaluation refresh', { concurrency: false }, (t) => {
