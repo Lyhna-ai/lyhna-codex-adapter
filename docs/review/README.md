@@ -1,7 +1,6 @@
 # Evaluator Review Record
 
-> **Status (2026-07-16): ON HOLD at Adam's direction — no active build available for field testing.**
-> Resume point: Slice A (front door, v0.1.25 at `cf260f0`) is code-complete with a clean cross-platform review, **installed and verified on the operator's machine (2026-07-16: all 10 tools registered, isolated smoke passed)**, and awaits its field gate — one real `@lyhna-codex-adapter` invocation **in a fresh Codex task** showing `runtime_hook` origin in a `full` run (check `pending-miss/` if it misses). Slice B is fully specced (`SLICE-B-SPEC-2026-07-16.md`) and builds next. PR #2 carries everything; PR #1 remains open awaiting Adam's decision. The build plan, roadmap, and thesis in this directory are the complete context — no prior session is required to continue.
+> **Status (2026-07-22): ACTIVE.** Slice A is closed and field-proven (three `runtime_hook` confirmations, zero false positives or negatives). Slice B is code-final at v0.1.26 (`0ee68f3`, PR #3, clean cross-platform review after nine rounds plus two field fixes), installed on the operator's machine, awaiting its blind-reader field gate whenever the operator next uses the witness. The next build is CZ-14 (seal-as-you-go checkpoint anchors), specced in `HANDOFF-2026-07-22.md` §3. PR #2 carries the evaluator record; PR #1 remains open awaiting Adam's decision.
 
 Independent third-party evaluation record for the Lyhna Codex Adapter and the Lyhna product direction. Assembled by the evaluator session at Adam's direction; nothing here approves, certifies, or merges anything — canonical/adoption status of every document is Adam's decision.
 
