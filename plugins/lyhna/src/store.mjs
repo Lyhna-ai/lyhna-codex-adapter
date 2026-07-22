@@ -91,6 +91,10 @@ function anchorPath(runId) {
   return join(runDir(runId), 'seal-anchor.json');
 }
 
+function checkpointAnchorPath(runId) {
+  return join(runDir(runId), 'checkpoint-anchor.json');
+}
+
 function receiptIndexPath(receiptId) {
   return join(root(), 'receipt-index', `${sha256(receiptId)}.json`);
 }
@@ -282,6 +286,10 @@ function repairSeal(runId) {
   const { events, tip } = parseLedger(runId);
   assert(events.length === state.ledger_count && tip === state.ledger_tip, 'LOCAL_CHAIN_BROKEN');
   verifyChildReceipts(state);
+  // CZ-14: a sealed packet carries exactly one anchor — the seal anchor. If a pre-seal Stop left a
+  // checkpoint anchor behind (an interrupted seal that had not yet cleared it), drop it here. Absence
+  // is the normal case; presence is tolerated and cleaned up so the sealed run is unambiguous.
+  if (existsSync(checkpointAnchorPath(runId))) rmSync(checkpointAnchorPath(runId), { force: true });
   const stateHash = sha256(canonicalJson(state));
   const jsonPath = join(runDir(runId), 'receipt.json');
   const markdownPath = join(runDir(runId), 'RECEIPT.md');
@@ -1018,10 +1026,15 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       appendEventUnlocked(runId, current, {
         type: 'turn_checkpoint',
         origin: 'runtime_hook',
-        payload: { status: 'OPEN' },
+        // The renderer version is pinned in the hash-chained event (mirroring run_sealed), so the
+        // open-packet verification gate reads the ledger, never the mutable checkpoint anchor.
+        payload: { status: 'OPEN', receipt_renderer: ADAPTER_VERSION },
         idempotencyKey: `checkpoint:${deliveryKey || current.ledger_count + 1}`
       });
       saveState(current);
+      // CZ-14 seal-as-you-go: render this checkpoint's receipt and write the checkpoint anchor. A
+      // deduped checkpoint (same delivery key) still lands here and re-writes an identical anchor.
+      writeCheckpointArtifacts(runId, current);
       return { status: 'CHECKPOINTED', run_id: runId };
     }
     const evaluations = Object.values(current.evaluations);
@@ -1050,10 +1063,14 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       appendEventUnlocked(runId, current, {
         type: 'close_deferred',
         origin: 'runtime_hook',
-        payload: { blockers },
+        // Renderer pinned in the hash-chained event; the idempotency key still keys on blockers only,
+        // so a re-observed identical blocker set dedupes and re-writes an identical checkpoint anchor.
+        payload: { blockers, receipt_renderer: ADAPTER_VERSION },
         idempotencyKey: `close-deferred:${sha256(canonicalJson(blockers))}`
       });
       saveState(current);
+      // CZ-14 seal-as-you-go: the deferred close is itself a checkpoint — write its receipt + anchor.
+      writeCheckpointArtifacts(runId, current);
       return { status: 'CLOSE_DEFERRED', run_id: runId, blockers };
     }
     appendEventUnlocked(runId, current, {
@@ -1083,12 +1100,96 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       receipt_markdown_hash: sha256(receiptMarkdown),
       receipt_renderer: ADAPTER_VERSION
     });
+    // CZ-14 decision: a sealed packet carries exactly one anchor. Remove any checkpoint anchor
+    // written by earlier Stops so the sealed run has a single, unambiguous seal anchor. repairSeal
+    // tolerates both presence (interrupted seal) and absence of this file.
+    rmSync(checkpointAnchorPath(runId), { force: true });
     return { status: 'SEALED', run_id: runId, receipt_path: join(runDir(runId), 'RECEIPT.md') };
+  });
+}
+
+// CZ-14 seal-as-you-go: render the current (unsealed) receipt and write the checkpoint anchor with
+// the same discipline as the seal anchor. The latest checkpoint overwrites the prior one; history
+// lives in the ledger. Called only after the checkpoint/close_deferred event is appended and state
+// saved, so the parsed ledger and the passed state agree.
+function writeCheckpointArtifacts(runId, state) {
+  const { events, tip } = parseLedger(runId);
+  const receiptJson = renderReceiptJson(state, events);
+  const receiptMarkdown = renderReceiptMarkdown(state, events);
+  atomicWriteText(join(runDir(runId), 'receipt.json'), receiptJson);
+  atomicWriteText(join(runDir(runId), 'RECEIPT.md'), receiptMarkdown);
+  atomicWriteJson(checkpointAnchorPath(runId), {
+    run_id: runId,
+    as_of_seq: events.length,
+    tip_hash: tip,
+    state_hash: sha256(canonicalJson(state)),
+    receipt_json_hash: sha256(receiptJson),
+    receipt_markdown_hash: sha256(receiptMarkdown),
+    receipt_renderer: ADAPTER_VERSION
   });
 }
 
 export function verifySealedRun(runId) {
   return withLock(lockPath(runId), () => repairSeal(runId));
+}
+
+function assertCheckpointReceiptFiles(runId, anchor) {
+  const jsonPath = join(runDir(runId), 'receipt.json');
+  const markdownPath = join(runDir(runId), 'RECEIPT.md');
+  assert(existsSync(jsonPath) && sha256(readFileSync(jsonPath, 'utf8')) === anchor.receipt_json_hash, 'LOCAL_CHAIN_BROKEN');
+  assert(existsSync(markdownPath) && sha256(readFileSync(markdownPath, 'utf8')) === anchor.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
+}
+
+// CZ-14 open-packet verification. An unsealed run with a checkpoint anchor is a verifiable packet at
+// its last checkpoint. Verifies (a) the hash chain through as_of_seq and that the event hash there is
+// the anchor tip; (b) the on-disk receipt files hash-match the anchor; (c) renderer gating exactly
+// like seals — the gate value is read from the hash-chained checkpoint/close_deferred event, never
+// the anchor. When the ledger has not advanced past as_of_seq and the ledger pins the current
+// renderer, re-rendering must reproduce the anchored hashes. When the ledger HAS advanced (events
+// appended since the last Stop — legitimate on a live run), chain + file-hash checks still apply, but
+// state-hash equality and re-render reproduction do not, because the state cache has moved on.
+function verifyOpenPacket(runId) {
+  const state = loadState(runId);
+  assert(!state.sealed, 'RUN_SEALED');
+  const { events } = parseLedger(runId);
+  const anchor = readJson(checkpointAnchorPath(runId), null);
+  if (!anchor) {
+    // Legacy / pre-CZ-14 open shape: no checkpoint anchor. A structural result, never a raw throw.
+    return { status: 'OPEN_NO_CHECKPOINT', run_id: runId, event_count: events.length };
+  }
+  assert(
+    anchor.run_id === runId
+    && Number.isInteger(anchor.as_of_seq)
+    && anchor.as_of_seq >= 0
+    && anchor.as_of_seq <= events.length
+    && typeof anchor.tip_hash === 'string'
+    && typeof anchor.state_hash === 'string'
+    && typeof anchor.receipt_json_hash === 'string'
+    && typeof anchor.receipt_markdown_hash === 'string',
+    'LOCAL_CHAIN_BROKEN'
+  );
+  const tipAtSeq = anchor.as_of_seq === 0 ? ZERO_HASH : events[anchor.as_of_seq - 1].event_hash;
+  assert(tipAtSeq === anchor.tip_hash, 'LOCAL_CHAIN_BROKEN');
+  assertCheckpointReceiptFiles(runId, anchor);
+  const anchoredRenderer = events[anchor.as_of_seq - 1]?.payload?.receipt_renderer ?? null;
+  const ledgerAtAnchor = events.length === anchor.as_of_seq;
+  if (ledgerAtAnchor) {
+    assert(sha256(canonicalJson(state)) === anchor.state_hash, 'LOCAL_CHAIN_BROKEN');
+    if (anchoredRenderer === ADAPTER_VERSION) {
+      assert(sha256(renderReceiptJson(state, events)) === anchor.receipt_json_hash, 'LOCAL_CHAIN_BROKEN');
+      assert(sha256(renderReceiptMarkdown(state, events)) === anchor.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
+    }
+  }
+  return { status: 'CHECKPOINT_VERIFIED', run_id: runId, as_of_seq: anchor.as_of_seq, ledger_advanced: !ledgerAtAnchor };
+}
+
+// Dispatching verify: sealed runs keep verifySealedRun semantics unchanged; unsealed runs verify their
+// open packet (checkpoint anchor) or return the legacy structural result.
+export function verifyRun(runId) {
+  return withLock(lockPath(runId), () => {
+    const state = loadState(runId);
+    return state.sealed ? repairSeal(runId) : verifyOpenPacket(runId);
+  });
 }
 
 // CZ-11: a syntactically plausible but unknown capability is a rejected claim, not silence.

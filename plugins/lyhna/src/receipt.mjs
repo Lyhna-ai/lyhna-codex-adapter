@@ -38,6 +38,39 @@ function buildSeal(state, events) {
   };
 }
 
+// CZ-14: the receipt face always states its lifecycle honestly, observational vocabulary only, in
+// exactly one of three shapes — SEALED; a close was requested but the run had not sealed as of this
+// checkpoint (with the latest close_deferred blockers surfaced as observations); or OPEN with no close
+// request observed. Never "abandoned", never inferred completion or intent.
+function buildLifecycle(state, events) {
+  const eventCount = state.ledger_count ?? events.length;
+  if (state.sealed) {
+    return {
+      status: 'SEALED',
+      statement: 'This run is SEALED; the seal block records the closeout anchor.'
+    };
+  }
+  const closeRequested = events.find((event) => event.type === 'close_requested');
+  if (closeRequested) {
+    const deferred = events.filter((event) => event.type === 'close_deferred').at(-1);
+    const deferredSeq = deferred?.seq ?? null;
+    const blockers = deferred?.payload?.blockers || [];
+    return {
+      status: 'CLOSE_REQUESTED_NOT_SEALED',
+      statement: `A close was requested at event ${closeRequested.seq}; the run had not sealed as of this checkpoint (event ${eventCount}).`,
+      close_requested_seq: closeRequested.seq,
+      blockers_observed: [...blockers].sort(codepointCompare).map((code) => ({
+        code,
+        statement: `Recorded as an open closeout condition as of event ${deferredSeq}: ${code}.`
+      }))
+    };
+  }
+  return {
+    status: 'OPEN',
+    statement: `OPEN as of event ${eventCount} — no close request observed.`
+  };
+}
+
 // B-4: structural coverage boundary — no wall-clock claims.
 function buildCoverage(state, events) {
   const runBegun = events.find((event) => event.type === 'run_begun');
@@ -281,6 +314,7 @@ export function buildReceipt(state, events) {
     build_record: state.mode === 'pr_only' ? 'unavailable' : 'witnessed_within_configured_coverage',
     objective: state.objective,
     objective_origin: state.objective_origin,
+    lifecycle: buildLifecycle(state, events),
     seal: buildSeal(state, events),
     open_predecessors: buildOpenPredecessors(state),
     coverage: buildCoverage(state, events),
@@ -324,6 +358,19 @@ export function renderReceiptMarkdown(state, events) {
     `- Build record: **${receipt.build_record}**`,
     `- Objective origin: \`${receipt.objective_origin}\``,
     '',
+    '## Lifecycle',
+    '',
+    `- Lifecycle status: **${receipt.lifecycle.status}**`,
+    '',
+    receipt.lifecycle.statement,
+    ''
+  ];
+  if (receipt.lifecycle.blockers_observed?.length) {
+    lines.push('Open closeout conditions observed as of this checkpoint:');
+    for (const blocker of receipt.lifecycle.blockers_observed) lines.push(`- ${blocker.statement}`);
+    lines.push('');
+  }
+  lines.push(
     '## Seal',
     '',
     `- Seal status: **${receipt.seal.status}**`,
@@ -333,7 +380,7 @@ export function renderReceiptMarkdown(state, events) {
     '',
     receipt.seal.evidence_order,
     ''
-  ];
+  );
   if (receipt.seal.child_retrieval_at_closeout.length) {
     lines.push('Per-child retrieval status as of closeout:');
     for (const child of receipt.seal.child_retrieval_at_closeout) {

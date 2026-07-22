@@ -31,6 +31,8 @@ Use `mode: "full"` whenever the request asks to build, change, fix, continue, or
 10. After the final evaluation, call `refresh_pr` on the final head before closing. A refresh observed after the last evaluation with an unchanged head lets that head render `CURRENT`; without it the receipt honestly stamps the head `NOT_REFRESHED`. Closing still proceeds either way — Lyhna never claims a head is current that it did not observe refreshed.
 11. Call `request_close`. The next Stop hook seals only if every ordinary child has stopped with a sealed lifecycle receipt and required evaluator receipt retrieval is complete.
 
+Every Stop hook writes a checkpoint packet — the current `receipt.json`, `RECEIPT.md`, and a `checkpoint-anchor.json` — so the run is a verifiable packet at its latest checkpoint even before it seals. The receipt face states its lifecycle honestly: `SEALED`; close-requested-but-not-yet-sealed, with the deferred-close blockers surfaced as observations; or `OPEN` with no close request observed. At seal the single seal anchor replaces the checkpoint anchor. This is observation, never an intent judgment.
+
 ## Examine an existing PR
 
 1. Call `begin_run` with `mode: "pr_only"`.
