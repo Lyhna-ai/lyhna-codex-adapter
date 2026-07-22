@@ -123,3 +123,33 @@ The field record proves the voluntary design insufficient: three of the seven ru
 Proposed correction, judgment-free (scope decision is the operator's):
 1. **Operator close** — a local command (the master key re-derives any session capability) that closes and seals any open run from the operator's shell: no agent, no reopened thread, one gesture. "The operator closed the record" is an observation. Small; recommended as the next code item.
 2. **Seal-as-you-go checkpoint anchors** — the ledger is already hash-chained per event; anchoring a rendered checkpoint at every Stop makes a verifiable packet exist at every turn boundary, honestly stamped OPEN as of event N. An abandoned run becomes an unclosed record, never an unverifiable one. Slice C material.
+
+---
+
+# Addendum — 2026-07-22 (later): the B11 closeout, witnessed from both sides
+
+The operator supplied both ends of the B11 run's ending: the witness-side closeout tool transcript for `run_2a2bd199`, and the Homestead narrator's own handoff document ("B11 Keep Read Integrity and Relevance production closeout," 2026-07-22T01:50:07Z). Read together they are the strongest field validation of the CZ-14 decision yet — recorded here before CZ-14 ships.
+
+## What the witness recorded at closeout
+
+- `request_close` was called five times: three idempotent successes (`close_requested: true`) and **two structural `UNKNOWN_CAPABILITY` rejections** — the narrator presented a capability the store does not know, late in the session. The CZ-11 value-free traces for these should exist in the data root (`claim-rejected/` markers or in-run `claim_rejected` events) — to be confirmed whenever the operator next zips the data root; nothing is asked of anyone.
+- `refresh_pr` was attempted three times and **all three failed with a raw Node error**: `ERR_INVALID_ARG_TYPE: The "path" argument must be of type string. Received null`.
+- Four evaluations across the PR's successive heads, all `RECORDED` with `CONSISTENT_CLEAN` checkout integrity, all four child receipts sealed and retrieved — the Slice B machinery worked end to end, including two *distinct* same-head observations of `dd50157` (metadata changed between captures: checks `IN_PROGRESS` → `SUCCESS`) each carrying its own evaluation and `post_fix_reeval` trigger.
+
+## Diagnosis: the five failures are one phenomenon, and none of them is a new bug
+
+The raw `refresh_pr` error is the **already-fixed stale-capability edge**, hit in the field by the pre-fix installed build. Mechanism, verified against the installed code shape (`5dd2aea~1`): the old `refresh_pr` dispatch called `activeRunFor(capability)` without validating the capability first; a garbled token yields `null`, `getRunForTesting(null)` builds `join(root(), 'runs', null)`, and Node throws exactly the observed `ERR_INVALID_ARG_TYPE`. Commit `5dd2aea` (on the branch, in 0.1.26 code-final) added the `getCapability()` guard and the structural `NO_ACTIVE_RUN`; on current code the same call returns `UNKNOWN_CAPABILITY` and records its CZ-11 trace. The two `UNKNOWN_CAPABILITY` rejections on `request_close` are the **same bad token** seen through a path that already validated correctly (`requireParent` → `getCapability`).
+
+Correction to the 07-22 install note: the handoff judged the installed pre-fix build "suitable as-is" because the fixes "live in error/edge paths." The very first field closeout hit one of those edge paths. The judgment stands corrected by evidence: the edge paths are not rare in practice, because the narrator's token handling degrades exactly at closeout time. 0.1.27 installation supersedes this.
+
+## The run is stuck open — in exactly the CZ-14 shape
+
+Seven PR snapshots were captured across the run; four have recorded evaluations. The three others (heads `75bb70b`, `878612f`, `4b60672`) were superseded by later pushes but **remain `CONSISTENT` in state**, because staleness is only ever observed via `refresh_pr` — and no `refresh_pr` call ever succeeded in this run (three raw errors on the bad token; none attempted on the good one). `checkpointOrSeal` therefore defers close at every Stop with `EVALUATION_<id>_REQUIRED` blockers for the three unevaluated snapshots. Close was requested and honored as a request; the seal is fail-closed blocked; the run joins the open set as the **fourth unsealed run** — this time not by narrator silence but by narrator token degradation plus the unavailability of the §9 unstick path (a refresh).
+
+This is byte-for-byte the shape already specced as CZ-14's mandatory fixture: *close requested, seal deferred by blockers, run left open — the face must state it.*
+
+## The two-sided record is the CZ-14 thesis, verbatim
+
+The narrator's handoff states — with commendable vocabulary discipline, including "Lyhna observed and packages the run… Lyhna did not approve or block it" — that B11 is built, reviewed, merged (`fe5d615`), deployed, live-tested 17/17, and reconciled. External evidence (the merged PR, the running service) corroborates it. And yet the witness record of that same work **cannot testify to its own ending**: today it is an open run with no receipt at all. A reader holding only the handoff has testimony; a reader holding only the witness data has an unfinished ledger. CZ-14 closes exactly this gap without ever certifying "done": the packet becomes verifiable at its last checkpoint, and its face states, observationally, *close requested at event X; not sealed as of this checkpoint; blockers: [the three evaluation requirements]*.
+
+Note on the Slice B blind-reader gate: the earlier addendum hoped this run would seal and become the gate input. It will not seal on its own. Reopening the original thread to run three refreshes and a re-close would work mechanically (the good token still maps to the open run), but that is a witness errand routed through the operator's work — the CZ-13 boundary — and CZ-14 makes it unnecessary: once 0.1.27 is installed, this run is a verifiable open packet at its last checkpoint, and the gate runs on whatever seals naturally next. Whether to unstick B11 manually or leave it as the canonical open-packet exhibit is the operator's call; the record is complete either way.
