@@ -424,6 +424,13 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
     assert(contentHash === duplicate.content_hash, 'IDEMPOTENCY_CONFLICT');
     return duplicate;
   }
+  // No NEW event may follow a terminal run_sealed. The durable ledger seal is authoritative even when
+  // the passed state.sealed flag lags it (crash after the seal append, before state was saved), so
+  // EVERY mutable tool that reaches this shared append path — record_claim, snapshot_pr,
+  // request_close, record_evaluation, read_sealed_receipt's retrieval mark, etc. — fails closed with
+  // RUN_SEALED here rather than appending post-seal corruption. Idempotent re-appends returned above
+  // are unaffected.
+  assert(events.at(-1)?.type !== 'run_sealed', 'RUN_SEALED');
   const event = {
     schema: 'lyhna.codex.event.v0',
     seq: events.length + 1,

@@ -30,6 +30,28 @@ function readAnchor(directory) {
   return JSON.parse(readFileSync(join(directory, 'checkpoint-anchor.json'), 'utf8'));
 }
 
+// Append a validly hash-chained event straight to events.jsonl, bypassing the store's append guard.
+// Simulates an externally-tampered/corrupt ledger (e.g. a write appended after run_sealed) for the
+// detection paths — the store API itself now refuses to create such corruption.
+function rawAppendEvent(directory, { type, origin, payload, idempotencyKey }) {
+  const ledger = join(directory, 'events.jsonl');
+  const raw = readFileSync(ledger, 'utf8');
+  const lines = raw.split(/\r?\n/).filter(Boolean);
+  const contentHash = sha256(canonicalJson({ origin, payload, type }));
+  const event = {
+    schema: 'lyhna.codex.event.v0',
+    seq: lines.length + 1,
+    prev_hash: JSON.parse(lines.at(-1)).event_hash,
+    idempotency_key: idempotencyKey || contentHash,
+    content_hash: contentHash,
+    type,
+    origin,
+    payload
+  };
+  event.event_hash = sha256(canonicalJson(event));
+  writeFileSync(ledger, `${raw.endsWith('\n') ? raw : `${raw}\n`}${canonicalJson(event)}\n`);
+}
+
 // Drive a full run all the way to a seal, mirroring the established fixture flow.
 function evaluateAndRetrieve(sessionId, parent, snapshot, agentId) {
   addPrSnapshot(parent, snapshot);
@@ -710,8 +732,9 @@ test('a ledger with events after run_sealed fails closed instead of folding them
   requestClose(parent, 'Please close.');
   appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
   appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
-  // A stray observation lands AFTER run_sealed (state.sealed was never written, so the run looked active).
-  appendEvent(run.id, { type: 'builder_claim', origin: 'agent_reported', payload: { statement: 'post-seal write' }, idempotencyKey: 'claim:post-seal' });
+  // A stray observation lands AFTER run_sealed. The store API now refuses to create this, so simulate
+  // an externally-tampered ledger by writing the line directly.
+  rawAppendEvent(getRunForTesting(run.id).directory, { type: 'builder_claim', origin: 'agent_reported', payload: { statement: 'post-seal write' }, idempotencyKey: 'claim:post-seal' });
   // The redelivery must refuse to finalize a seal that has events after it.
   assert.throws(() => checkpointOrSeal(parent, 'stop-1'), /LOCAL_CHAIN_BROKEN/);
   assert.equal(getRunForTesting(run.id).state.sealed, false);
@@ -752,8 +775,10 @@ test('a ledger with a second run_sealed after a post-seal write fails closed', {
   requestClose(parent, 'Please close.');
   appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
   appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
-  appendEvent(run.id, { type: 'builder_claim', origin: 'agent_reported', payload: { statement: 'post-seal write' }, idempotencyKey: 'claim:post-seal' });
-  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: 'seal:duplicate' });
+  // The store API refuses post-seal appends; write the tampered continuation directly.
+  const { directory } = getRunForTesting(run.id);
+  rawAppendEvent(directory, { type: 'builder_claim', origin: 'agent_reported', payload: { statement: 'post-seal write' }, idempotencyKey: 'claim:post-seal' });
+  rawAppendEvent(directory, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: 'seal:duplicate' });
   // Terminal event is run_sealed, but the FIRST run_sealed is not terminal → corruption, fail closed.
   assert.throws(() => checkpointOrSeal(parent, 'stop-1'), /LOCAL_CHAIN_BROKEN/);
   assert.equal(getRunForTesting(run.id).state.sealed, false);
@@ -780,6 +805,22 @@ test('verifyRun adopts a terminal ledger seal instead of reporting the run open'
   assert(existsSync(join(finalized.directory, 'seal-anchor.json')));
   const receipt = JSON.parse(readFileSync(join(finalized.directory, 'receipt.json'), 'utf8'));
   assert.equal(receipt.status, 'SEALED');
+});
+
+// 11q (Codex round-15, P1). Every mutable tool must fail closed on a durable-sealed ledger whose
+// state.sealed flag lags it — no tool may append after a terminal run_sealed and corrupt the packet.
+test('a mutable tool appends nothing after a terminal run_sealed and reports RUN_SEALED', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-postseal-tool';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Post-seal tool append.' });
+  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
+  const before = getRunForTesting(run.id);
+  assert.equal(before.state.sealed, false);
+  const eventCount = before.events.length;
+  // record_claim reaches the shared append path; it must fail closed, not append after run_sealed.
+  assert.throws(() => recordClaim(parent, 'A claim after the ledger sealed.', []), /RUN_SEALED/);
+  assert.equal(getRunForTesting(run.id).events.length, eventCount);
 });
 
 // 11j (Codex round-9, P2). A present-but-malformed checkpoint-anchor.json is local corruption and
