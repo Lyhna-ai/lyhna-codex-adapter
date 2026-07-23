@@ -531,6 +531,46 @@ test('a stale checkpoint-anchor file after fresh receipt writes still verifies a
   assert.throws(() => verifyRun(run.id), /LOCAL_CHAIN_BROKEN/);
 });
 
+// 11f (Codex round-7). A redelivered Stop with the same delivery key, after other activity, must not
+// anchor: the turn_checkpoint dedupes, so re-anchoring would mutate the chain for a repeated hook with
+// no new observation. Idempotent replay leaves the ledger and the single anchor unchanged.
+test('a replayed Stop after later activity appends no new checkpoint anchor', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-replay';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Replayed Stop delivery.' });
+  assert.equal(checkpointOrSeal(parent, 'stop-1').status, 'CHECKPOINTED');
+  recordClaim(parent, 'Work after the checkpoint.', []);
+  const before = getRunForTesting(run.id);
+  const anchorsBefore = before.events.filter((event) => event.type === 'checkpoint_anchor').length;
+  // The Stop hook redelivers with the same delivery key.
+  assert.equal(checkpointOrSeal(parent, 'stop-1').status, 'CHECKPOINTED');
+  const after = getRunForTesting(run.id);
+  // No new turn_checkpoint and no new checkpoint_anchor: the replay was fully idempotent.
+  assert.equal(after.events.length, before.events.length);
+  assert.equal(after.events.filter((event) => event.type === 'checkpoint_anchor').length, anchorsBefore);
+  assert.equal(after.events.filter((event) => event.type === 'turn_checkpoint').length, 1);
+});
+
+// 11g (Codex round-7, close-deferred branch). The same replay on a deferred close: an unchanged
+// blocker set after later activity appends neither close_deferred nor a new anchor.
+test('a replayed deferred-close Stop after later activity appends no new anchor', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-replay-deferred';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Replayed deferred-close Stop.' });
+  requestClose(parent, 'Please close.');
+  assert.equal(checkpointOrSeal(parent, 'stop-1').status, 'CLOSE_DEFERRED');
+  recordClaim(parent, 'Work after the deferred close.', []);
+  const before = getRunForTesting(run.id);
+  const anchorsBefore = before.events.filter((event) => event.type === 'checkpoint_anchor').length;
+  assert.equal(checkpointOrSeal(parent, 'stop-1').status, 'CLOSE_DEFERRED');
+  const after = getRunForTesting(run.id);
+  assert.equal(after.events.length, before.events.length);
+  assert.equal(after.events.filter((event) => event.type === 'checkpoint_anchor').length, anchorsBefore);
+  assert.equal(after.events.filter((event) => event.type === 'close_deferred').length, 1);
+});
+
 // 11e (Codex round-5). A corrupted checkpoint-anchor.json cache must surface as LOCAL_CHAIN_BROKEN
 // even in the torn-write (incomplete) branch — an incomplete write must not hide a mutated cache.
 test('a corrupted anchor cache fails closed even in the incomplete-write branch', { concurrency: false }, (t) => {

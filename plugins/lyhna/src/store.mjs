@@ -1052,7 +1052,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       return repaired;
     }
     if (!current.close_requested) {
-      appendEventUnlocked(runId, current, {
+      const checkpointEvent = appendEventUnlocked(runId, current, {
         type: 'turn_checkpoint',
         origin: 'runtime_hook',
         // The renderer version also rides in this event for observability; the verification gate
@@ -1062,9 +1062,12 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         idempotencyKey: `checkpoint:${deliveryKey || current.ledger_count + 1}`
       });
       saveState(current);
-      // CZ-14 seal-as-you-go: render this checkpoint's receipt and write the checkpoint anchor. A
-      // deduped checkpoint (same delivery key) still lands here and re-writes an identical anchor.
-      writeCheckpointArtifacts(runId, current);
+      // CZ-14 seal-as-you-go: anchor this checkpoint ONLY when the turn_checkpoint was newly
+      // observed. A redelivered Stop (same delivery key) dedupes to the earlier event; a newly
+      // appended event is always the ledger tip (seq === ledger_count), so a dup after later
+      // activity is not, and re-anchoring it would mutate the chain for a repeated hook with no new
+      // observation. A dup with no intervening activity is already the tip and self-heals identically.
+      if (checkpointEvent.seq === current.ledger_count) writeCheckpointArtifacts(runId, current);
       return { status: 'CHECKPOINTED', run_id: runId };
     }
     const evaluations = Object.values(current.evaluations);
@@ -1090,11 +1093,21 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     }
     if (blockers.length) {
       blockers.sort();
-      // A blocker set identical to the LATEST close_deferred observation is a retry and appends no
-      // new event; any changed set — including one that recurs after an intervening different set
-      // (the prior-occurrence count keys it) — is a semantically distinct observation and appends
-      // its own event, so the lifecycle face's latest close_deferred is always the latest
-      // observation, never a stale one.
+      // Every Stop records a delivery-keyed turn_checkpoint (the "a Stop was observed" fact); a
+      // redelivered Stop dedupes to the earlier one. This is what distinguishes a genuinely new Stop
+      // — which anchors the current ledger, even if its blockers are unchanged — from a replayed hook,
+      // which must not mutate the chain. A newly appended event is always the ledger tip.
+      const checkpointEvent = appendEventUnlocked(runId, current, {
+        type: 'turn_checkpoint',
+        origin: 'runtime_hook',
+        payload: { status: 'OPEN', receipt_renderer: ADAPTER_VERSION },
+        idempotencyKey: `checkpoint:${deliveryKey || current.ledger_count + 1}`
+      });
+      const checkpointIsNew = checkpointEvent.seq === current.ledger_count;
+      // A blocker set identical to the LATEST close_deferred observation appends no new close_deferred;
+      // any changed set — including one that recurs after an intervening different set (the
+      // prior-occurrence count keys it) — is a semantically distinct observation and appends its own
+      // event, so the lifecycle face's latest close_deferred is always the latest observation.
       const { events: parsedEvents } = parseLedger(runId);
       const priorDeferred = parsedEvents.filter((event) => event.type === 'close_deferred');
       const latestDeferred = priorDeferred.at(-1);
@@ -1107,8 +1120,10 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         });
       }
       saveState(current);
-      // CZ-14 seal-as-you-go: the deferred close is itself a checkpoint — write its receipt + anchor.
-      writeCheckpointArtifacts(runId, current);
+      // CZ-14 seal-as-you-go: anchor a deferred close ONLY when its Stop was newly observed. A
+      // redelivered Stop dedupes its turn_checkpoint, so anchoring would mutate the chain for a
+      // repeated hook with no new observation.
+      if (checkpointIsNew) writeCheckpointArtifacts(runId, current);
       return { status: 'CLOSE_DEFERRED', run_id: runId, blockers };
     }
     appendEventUnlocked(runId, current, {
