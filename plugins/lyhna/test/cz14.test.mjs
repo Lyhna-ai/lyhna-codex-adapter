@@ -637,6 +637,19 @@ test('a corrupted anchor cache fails closed even in the incomplete-write branch'
   assert.throws(() => verifyRun(run.id), /LOCAL_CHAIN_BROKEN/);
 });
 
+// 11j (Codex round-9, P2). A present-but-malformed checkpoint-anchor.json is local corruption and
+// must fail closed as a structural LOCAL_CHAIN_BROKEN, never leak a raw Node SyntaxError.
+test('a malformed checkpoint-anchor cache fails open-packet verification closed', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-malformed-cache';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Malformed anchor cache.' });
+  checkpointOrSeal(parent, 'stop-1');
+  const { directory } = getRunForTesting(run.id);
+  writeFileSync(join(directory, 'checkpoint-anchor.json'), '{ not valid json');
+  assert.throws(() => verifyRun(run.id), /LOCAL_CHAIN_BROKEN/);
+});
+
 // 12 (review F5). A blocker set that changes and then recurs (S1 -> S2 -> S1) appends a fresh
 // close_deferred each time it changes, so the lifecycle face never lists stale blockers.
 test('a recurring blocker set appends a fresh observation and the face lists current blockers', { concurrency: false }, (t) => {

@@ -1269,8 +1269,16 @@ function verifyOpenPacket(runId) {
   // on-disk cache and fails closed — including in the torn-write branch, so a corrupted cache is
   // never hidden by an incomplete write.
   const assertAnchorFileCoherent = () => {
-    const anchorFile = readJson(checkpointAnchorPath(runId), null);
-    if (!anchorFile) return;
+    const anchorFilePath = checkpointAnchorPath(runId);
+    if (!existsSync(anchorFilePath)) return;
+    let anchorFile;
+    // A present-but-malformed cache is local corruption — a structural LOCAL_CHAIN_BROKEN, never a
+    // raw Node SyntaxError leaking out of the verifier.
+    try {
+      anchorFile = JSON.parse(readFileSync(anchorFilePath, 'utf8'));
+    } catch {
+      assert(false, 'LOCAL_CHAIN_BROKEN');
+    }
     const named = anchorEvents.find((event) => event.seq === anchorFile.anchor_event_seq);
     assert(named, 'LOCAL_CHAIN_BROKEN');
     const namedPayload = verifiedPayload(named);
