@@ -487,6 +487,11 @@ export function beginRun(capability, { mode, objective = '' }) {
     const current = activeRunFor(capability, { includeSealed: true });
     if (current) {
       const state = loadState(current);
+      // A durable terminal run_sealed whose state.sealed lagged (crash after the seal append, before
+      // state/anchor) must be adopted here too — begin_run is a likely recovery path. Otherwise
+      // reattach hands back a run every mutable tool now rejects with RUN_SEALED, wedging the session;
+      // adopt under the run lock like the Stop/verify paths, then fall through to finalize and start fresh.
+      if (!state.sealed) withLock(lockPath(current), () => adoptTerminalLedgerSeal(current, state));
       if (!state.sealed) {
         if (pending) rmSync(pendingPath, { force: true });
         return state;

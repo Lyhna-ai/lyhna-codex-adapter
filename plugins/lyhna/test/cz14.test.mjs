@@ -823,6 +823,26 @@ test('a mutable tool appends nothing after a terminal run_sealed and reports RUN
   assert.equal(getRunForTesting(run.id).events.length, eventCount);
 });
 
+// 11r (Codex round-16, P1). begin_run is a likely recovery path: if the prior run's ledger is
+// durable-sealed but state.sealed lagged, begin_run must finalize it and start fresh, not reattach to
+// a run every mutable tool would reject with RUN_SEALED.
+test('begin_run finalizes a durable-sealed prior run instead of reattaching to it', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz16-reattach';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'First run.' });
+  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
+  assert.equal(getRunForTesting(run.id).state.sealed, false);
+  // A recovery begin_run must not hand back the sealed-ledger run.
+  const next = beginRun(parent, { mode: 'full', objective: 'Second run.' });
+  assert.notEqual(next.id, run.id);
+  assert.equal(next.sealed, false);
+  // The prior run is finalized: sealed with an anchor.
+  const prior = getRunForTesting(run.id);
+  assert.equal(prior.state.sealed, true);
+  assert(existsSync(join(prior.directory, 'seal-anchor.json')));
+});
+
 // 11j (Codex round-9, P2). A present-but-malformed checkpoint-anchor.json is local corruption and
 // must fail closed as a structural LOCAL_CHAIN_BROKEN, never leak a raw Node SyntaxError.
 test('a malformed checkpoint-anchor cache fails open-packet verification closed', { concurrency: false }, (t) => {
