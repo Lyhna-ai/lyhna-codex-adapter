@@ -1,0 +1,19 @@
+{
+  "name": "lyhna-codex-adapter",
+  "version": "0.1.24",
+  "description": "Start and close local, evidence-scoped Lyhna witnessed runs in Codex.",
+  "author": {
+    "name": "Lyhna AI"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Lyhna",
+    "shortDescription": "Witness a Codex run and exact PR head.",
+    "longDescription": "Lyhna captures supported Codex lifecycle evidence, separates builder and evaluator capabilities, examines an exact GitHub PR head, and renders a local coverage-scoped receipt without becoming an approval authority.",
+    "developerName": "Lyhna AI",
+    "category": "Developer Tools",
+    "capabilities": ["local evidence ledger", "sealed child lifecycle receipts", "exact-head PR examination", "independent evaluator handoff"],
+    "defaultPrompt": "Start a Lyhna run, preserve the objective, use a distinct PR evaluator, retrieve its receipt, and leave the decision to me."
+  },
+  "mcpServers": "./.mcp.json"
+}
