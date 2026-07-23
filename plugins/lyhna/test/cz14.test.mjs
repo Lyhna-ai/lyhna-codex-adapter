@@ -446,6 +446,40 @@ test('a first-checkpoint torn write reports structurally incomplete, not tampere
   assert.throws(() => verifyRun(run.id), /LOCAL_CHAIN_BROKEN/);
 });
 
+// 10b (Codex round-4). Compound crash: the FINAL pre-seal checkpoint write was torn (receipt files
+// still hold an EARLIER checkpoint's bytes), and then the seal is also interrupted. repairSeal must
+// recover — the on-disk bytes match an earlier committed checkpoint anchor, not just the last — using
+// the same newest-first tolerance verifyOpenPacket applies, never classifying them as tamper.
+test('an interrupted seal recovers when the final checkpoint write was also torn', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-compound-crash';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Compound checkpoint+seal crash.' });
+  checkpointOrSeal(parent, 'stop-1');
+  const { directory } = getRunForTesting(run.id);
+  const firstJson = readFileSync(join(directory, 'receipt.json'), 'utf8');
+  const firstMarkdown = readFileSync(join(directory, 'RECEIPT.md'), 'utf8');
+  recordClaim(parent, 'Work between checkpoints.', []);
+  checkpointOrSeal(parent, 'stop-2');
+
+  evaluateAndRetrieve(sessionId, parent, { ...stableSnapshot, id: 'pr_compound', head_before: HEAD_A, head_after: HEAD_A }, 'evaluator-compound');
+  requestClose(parent, 'Close after evaluation.');
+  assert.equal(checkpointOrSeal(parent, 'stop-3').status, 'SEALED');
+
+  // Emulate both crashes at once: the sealed receipt files were never written AND the bytes on disk
+  // are the FIRST checkpoint's (the second checkpoint write had been torn), plus no seal anchor.
+  writeFileSync(join(directory, 'receipt.json'), firstJson);
+  writeFileSync(join(directory, 'RECEIPT.md'), firstMarkdown);
+  rmSync(join(directory, 'seal-anchor.json'));
+  assert.equal(verifySealedRun(run.id).status, 'ALREADY_SEALED');
+  assert(existsSync(join(directory, 'seal-anchor.json')));
+
+  // Bytes matching no committed checkpoint at all still fail closed.
+  writeFileSync(join(directory, 'RECEIPT.md'), `${firstMarkdown}\ntampered\n`);
+  rmSync(join(directory, 'seal-anchor.json'));
+  assert.throws(() => verifySealedRun(run.id), /LOCAL_CHAIN_BROKEN/);
+});
+
 // 11c (Codex round-2). A MIXED torn write — crash between the two atomic receipt-file renames, so one
 // file is the new checkpoint's bytes and the other is the prior checkpoint's — matches no single
 // anchor fully, but each present file is still vouched for by some committed anchor. Benign: reported

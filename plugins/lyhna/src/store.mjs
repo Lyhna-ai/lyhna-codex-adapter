@@ -343,18 +343,26 @@ function repairSeal(runId) {
   // after the sealed state was saved, before the sealed receipt files were written) presents here
   // with receipt bytes that mismatch the sealed render. Those bytes are recognized by the
   // hash-chained checkpoint_anchor event that committed them and overwritten with the sealed
-  // render — an interrupted seal recovers; it is not tamper. Bytes matching neither the sealed
-  // render nor the latest ledger-committed checkpoint fail closed.
-  const lastCheckpointAnchor = events.filter((event) => event.type === 'checkpoint_anchor').at(-1);
-  const staleCheckpointFile = (path, sealedHash, checkpointHashKey) => {
+  // render — an interrupted seal recovers; it is not tamper. Any committed checkpoint anchor's slot
+  // is accepted, not only the last: if that final checkpoint write was itself torn, the on-disk
+  // bytes legitimately match an EARLIER anchor (the same newest-first tolerance verifyOpenPacket
+  // applies). Bytes matching neither the sealed render nor any ledger-committed checkpoint fail closed.
+  const checkpointJsonHashes = new Set();
+  const checkpointMarkdownHashes = new Set();
+  for (const event of events) {
+    if (event.type !== 'checkpoint_anchor') continue;
+    checkpointJsonHashes.add(event.payload?.receipt_json_hash);
+    checkpointMarkdownHashes.add(event.payload?.receipt_markdown_hash);
+  }
+  const staleCheckpointFile = (path, sealedHash, committedHashes) => {
     if (!existsSync(path)) return true;
     const hash = sha256(readFileSync(path, 'utf8'));
     if (hash === sealedHash) return false;
-    assert(hash === lastCheckpointAnchor?.payload?.[checkpointHashKey], 'LOCAL_CHAIN_BROKEN');
+    assert(committedHashes.has(hash), 'LOCAL_CHAIN_BROKEN');
     return true;
   };
-  if (staleCheckpointFile(jsonPath, expected.receipt_json_hash, 'receipt_json_hash')) atomicWriteText(jsonPath, receiptJson);
-  if (staleCheckpointFile(markdownPath, expected.receipt_markdown_hash, 'receipt_markdown_hash')) atomicWriteText(markdownPath, receiptMarkdown);
+  if (staleCheckpointFile(jsonPath, expected.receipt_json_hash, checkpointJsonHashes)) atomicWriteText(jsonPath, receiptJson);
+  if (staleCheckpointFile(markdownPath, expected.receipt_markdown_hash, checkpointMarkdownHashes)) atomicWriteText(markdownPath, receiptMarkdown);
   atomicWriteJson(anchorPath(runId), expected);
   dropCheckpointAnchor(runId);
   return { status: 'ALREADY_SEALED', run_id: runId, receipt_path: markdownPath };
