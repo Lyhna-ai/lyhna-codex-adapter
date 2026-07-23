@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   addPrSnapshot,
+  appendEvent,
   beginEvaluation,
   beginRun,
   checkpointOrSeal,
@@ -635,6 +636,37 @@ test('a corrupted anchor cache fails closed even in the incomplete-write branch'
   anchor.anchor_event_seq = 999;
   writeFileSync(join(directory, 'checkpoint-anchor.json'), `${JSON.stringify(anchor, null, 2)}\n`);
   assert.throws(() => verifyRun(run.id), /LOCAL_CHAIN_BROKEN/);
+});
+
+// 11k (Codex round-10, P2). If a Stop crashes after its turn_checkpoint is appended and state saved
+// but before the closeout runs, that checkpoint is still the ledger tip. A redelivery must be
+// detected as a replay by its existing delivery key — not inferred from tip position — and must NOT
+// seal, even in a close-ready run. The seal happens only on a genuinely new Stop.
+test('a redelivered Stop whose checkpoint is still the ledger tip does not seal', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-tip-replay';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Replay when the checkpoint is the tip.' });
+  // Make the run close-ready (all blockers satisfied), then request close.
+  evaluateAndRetrieve(sessionId, parent, { ...stableSnapshot, id: 'pr_tip', head_before: HEAD_A, head_after: HEAD_A }, 'evaluator-tip');
+  requestClose(parent, 'Please close.');
+  // Emulate the crash window: append only the turn_checkpoint + save state, no closeout. This is
+  // exactly what checkpointOrSeal does before the seal branch, reproduced via the store directly.
+  appendEvent(run.id, {
+    type: 'turn_checkpoint',
+    origin: 'runtime_hook',
+    payload: { status: 'OPEN', receipt_renderer: '0.1.27' },
+    idempotencyKey: 'checkpoint:stop-1'
+  });
+  const tip = getRunForTesting(run.id);
+  assert.equal(tip.events.at(-1).type, 'turn_checkpoint');
+  assert.equal(tip.state.sealed, false);
+  // Redelivery of the same Stop: its checkpoint key already exists → replay, no seal.
+  const replay = checkpointOrSeal(parent, 'stop-1');
+  assert.equal(replay.replayed_delivery, true);
+  assert.equal(getRunForTesting(run.id).state.sealed, false);
+  // A genuinely new Stop seals.
+  assert.equal(checkpointOrSeal(parent, 'stop-2').status, 'SEALED');
 });
 
 // 11j (Codex round-9, P2). A present-but-malformed checkpoint-anchor.json is local corruption and

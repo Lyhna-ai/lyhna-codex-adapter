@@ -1052,24 +1052,27 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       return repaired;
     }
     // Every Stop records exactly one delivery-keyed turn_checkpoint — the "a Stop boundary was
-    // observed" fact. A redelivered Stop (same delivery key) dedupes to the earlier one; a newly
-    // appended event is always the ledger tip (seq === ledger_count), so a dedup is detectable.
-    // Repeated-hook idempotency (SPEC): a replayed Stop must NOT mutate the run — no new
-    // close_deferred, no seal, no new anchor — so it returns here before any closeout logic. Its
-    // status reflects the run's current lifecycle without re-observing it.
-    const checkpointEvent = appendEventUnlocked(runId, current, {
+    // observed" fact — and repeated-hook idempotency (SPEC) requires a replayed Stop to NOT mutate
+    // the run: no new close_deferred, no seal, no new anchor. A replay is identified by its
+    // delivery-keyed checkpoint ALREADY existing in the ledger, checked before anything is appended.
+    // (Inferring it from tip position would miss the crash window where the turn_checkpoint was
+    // appended and state saved but the closeout never ran — the dup would still be the tip, so a
+    // redelivery would wrongly seal.) A replay returns here reporting the run's current lifecycle.
+    const { events: preEvents } = parseLedger(runId);
+    const checkpointKey = `checkpoint:${deliveryKey || preEvents.length + 1}`;
+    if (preEvents.some((event) => event.idempotency_key === checkpointKey)) {
+      return { status: current.close_requested ? 'CLOSE_DEFERRED' : 'CHECKPOINTED', run_id: runId, replayed_delivery: true };
+    }
+    appendEventUnlocked(runId, current, {
       type: 'turn_checkpoint',
       origin: 'runtime_hook',
       // The renderer version rides in this event for observability; the verification gate reads the
       // checkpoint_anchor event that writeCheckpointArtifacts appends (never the mutable anchor
       // file), mirroring how run_sealed pins the seal renderer.
       payload: { status: 'OPEN', receipt_renderer: ADAPTER_VERSION },
-      idempotencyKey: `checkpoint:${deliveryKey || current.ledger_count + 1}`
+      idempotencyKey: checkpointKey
     });
     saveState(current);
-    if (checkpointEvent.seq !== current.ledger_count) {
-      return { status: current.close_requested ? 'CLOSE_DEFERRED' : 'CHECKPOINTED', run_id: runId, replayed_delivery: true };
-    }
     if (!current.close_requested) {
       writeCheckpointArtifacts(runId, current);
       return { status: 'CHECKPOINTED', run_id: runId };
