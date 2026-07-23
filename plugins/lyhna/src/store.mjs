@@ -1215,6 +1215,17 @@ function writeCheckpointArtifacts(runId, state) {
   // Nothing happened since the previous anchor (e.g. a redelivered Stop deduped its checkpoint
   // event): the ledger tip IS the anchor; re-anchoring would anchor the anchor. Idempotent no-op.
   if (events.at(-1)?.type === 'checkpoint_anchor') return;
+  // Recover the state prefix before hashing: on a replayed Stop whose original delivery crashed after
+  // appending turn_checkpoint/close_deferred but before saveState, the cached state lags the ledger.
+  // Those events do not mutate semantic state, so advancing ledger_count/ledger_tip (after asserting
+  // the cache is a valid prefix) makes the hashed state match the ledger this anchor commits to —
+  // otherwise the committed state hash would be for a shorter prefix and verifyRun would reject it.
+  if (events.length > state.ledger_count) {
+    const prefixTip = state.ledger_count === 0 ? ZERO_HASH : events[state.ledger_count - 1]?.event_hash;
+    assert(prefixTip === state.ledger_tip, 'LOCAL_CHAIN_BROKEN');
+    state.ledger_count = events.length;
+    state.ledger_tip = tip;
+  }
   const coversSeq = events.length;
   const receiptJson = renderReceiptJson(state, events);
   const receiptMarkdown = renderReceiptMarkdown(state, events);

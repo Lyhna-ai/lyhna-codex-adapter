@@ -843,6 +843,27 @@ test('begin_run finalizes a durable-sealed prior run instead of reattaching to i
   assert(existsSync(join(prior.directory, 'seal-anchor.json')));
 });
 
+// 11s (Codex round-17, P1). If the original delivery crashed after appending turn_checkpoint to the
+// ledger but before saveState, the cached state lags. The replay must recover the state prefix before
+// anchoring, or the committed state hash would be for a shorter prefix and verifyRun would reject it.
+test('a replayed Stop recovers a lagging state prefix before completing the packet', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz17-lagging-state';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Lagging state on replay.' });
+  const { directory } = getRunForTesting(run.id);
+  const statePath = join(directory, 'state.json');
+  // Crash after appending turn_checkpoint to events.jsonl but before saveState: ledger has it, state
+  // lags. Read state.json directly here — getRunForTesting/readLedger would reconcile and hide the lag.
+  rawAppendEvent(directory, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
+  assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).ledger_count, 1);
+  // The redelivery completes the packet from the recovered prefix; without the recovery verifyRun
+  // would reject the anchor's stale state hash as LOCAL_CHAIN_BROKEN.
+  const replay = checkpointOrSeal(parent, 'stop-1');
+  assert.equal(replay.replayed_delivery, true);
+  assert.equal(verifyRun(run.id).status, 'CHECKPOINT_VERIFIED');
+});
+
 // 11j (Codex round-9, P2). A present-but-malformed checkpoint-anchor.json is local corruption and
 // must fail closed as a structural LOCAL_CHAIN_BROKEN, never leak a raw Node SyntaxError.
 test('a malformed checkpoint-anchor cache fails open-packet verification closed', { concurrency: false }, (t) => {
