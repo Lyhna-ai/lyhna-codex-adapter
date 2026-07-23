@@ -280,6 +280,29 @@ export function readLedger(runId, { allowOpen = true, recoverOpen = true } = {})
   });
 }
 
+// The DURABLE seal signal is the run_sealed EVENT in the ledger, not the state.sealed flag: a crash
+// after run_sealed is appended but before state and the seal anchor are written leaves the ledger
+// sealed while state.sealed is still false. Adopt that terminal event into state (so repairSeal's
+// consistency holds and any reader routes to the sealed path), failing closed if anything follows the
+// first run_sealed — that would be post-seal corruption to surface, not fold into the receipt. Shared
+// by checkpointOrSeal and verifyRun so a sealed ledger is never misclassified as open. Returns the
+// parsed ledger so the caller can reuse it.
+function adoptTerminalLedgerSeal(runId, state) {
+  const parsed = parseLedger(runId);
+  if (!state.sealed) {
+    const sealedIndex = parsed.events.findIndex((event) => event.type === 'run_sealed');
+    if (sealedIndex !== -1) {
+      assert(sealedIndex === parsed.events.length - 1, 'LOCAL_CHAIN_BROKEN');
+      stripLegacyChildReceiptPaths(state);
+      state.sealed = true;
+      state.ledger_count = parsed.events.length;
+      state.ledger_tip = parsed.tip;
+      saveState(state);
+    }
+  }
+  return parsed;
+}
+
 function repairSeal(runId) {
   const state = loadState(runId);
   assert(state.sealed, 'RUN_NOT_SEALED');
@@ -1051,28 +1074,9 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
   if (!runId) return { status: 'NO_ACTIVE_RUN' };
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
-    const { events: preEvents, tip: preTip } = parseLedger(runId);
-    // The DURABLE seal signal is the run_sealed EVENT in the ledger, not the state.sealed flag: a
-    // crash after run_sealed is appended but before state and the seal anchor are written leaves the
-    // ledger sealed while state.sealed is still false. Adopt that event into state so repairSeal's
-    // consistency holds, then let repairSeal finalize the seal (write the missing receipts + anchor)
-    // idempotently. This runs BEFORE the replay guard, which would otherwise short-circuit and leave
-    // an unsealed run that no later Stop is guaranteed to repair.
-    if (!current.sealed) {
-      const sealedIndex = preEvents.findIndex((event) => event.type === 'run_sealed');
-      if (sealedIndex !== -1) {
-        // run_sealed MUST be the terminal ledger event. Once the seal is logged the run is sealed, so
-        // any event after it means the run kept being written to after sealing while state falsely
-        // looked active — corruption, not a recoverable interrupt. Fail closed rather than fold those
-        // post-seal observations into the sealed receipt; otherwise adopt and finalize.
-        assert(sealedIndex === preEvents.length - 1, 'LOCAL_CHAIN_BROKEN');
-        stripLegacyChildReceiptPaths(current);
-        current.sealed = true;
-        current.ledger_count = preEvents.length;
-        current.ledger_tip = preTip;
-        saveState(current);
-      }
-    }
+    // Adopt a durable terminal run_sealed (crash after the seal append, before state/anchor) BEFORE the
+    // replay guard, which would otherwise short-circuit and leave an unsealed run no later Stop repairs.
+    const { events: preEvents } = adoptTerminalLedgerSeal(runId, current);
     if (current.sealed) {
       return repairSeal(runId);
     }
@@ -1403,6 +1407,10 @@ function verifyOpenPacket(runId) {
 export function verifyRun(runId) {
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
+    // A reader calling verifyRun before any hook redelivery must not misclassify a durable-sealed
+    // ledger as open: adopt a terminal run_sealed (the same source of truth checkpointOrSeal uses),
+    // then route sealed runs to repairSeal.
+    adoptTerminalLedgerSeal(runId, state);
     return state.sealed ? repairSeal(runId) : verifyOpenPacket(runId);
   });
 }

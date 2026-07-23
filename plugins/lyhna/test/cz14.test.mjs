@@ -759,6 +759,29 @@ test('a ledger with a second run_sealed after a post-seal write fails closed', {
   assert.equal(getRunForTesting(run.id).state.sealed, false);
 });
 
+// 11p (Codex round-13, P2). verifyRun must not misclassify a durable-sealed ledger as open: a reader
+// calling it before any hook redelivery, when run_sealed is in the ledger but state.sealed never
+// persisted, must adopt the ledger seal and report the sealed packet.
+test('verifyRun adopts a terminal ledger seal instead of reporting the run open', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-verify-seal';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'verifyRun adopts a ledger seal.' });
+  evaluateAndRetrieve(sessionId, parent, { ...stableSnapshot, id: 'pr_vseal', head_before: HEAD_A, head_after: HEAD_A }, 'evaluator-vseal');
+  requestClose(parent, 'Please close.');
+  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
+  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
+  assert.equal(getRunForTesting(run.id).state.sealed, false);
+  // A reader verifies BEFORE any hook redelivery.
+  const result = verifyRun(run.id);
+  assert.equal(result.status, 'ALREADY_SEALED');
+  const finalized = getRunForTesting(run.id);
+  assert.equal(finalized.state.sealed, true);
+  assert(existsSync(join(finalized.directory, 'seal-anchor.json')));
+  const receipt = JSON.parse(readFileSync(join(finalized.directory, 'receipt.json'), 'utf8'));
+  assert.equal(receipt.status, 'SEALED');
+});
+
 // 11j (Codex round-9, P2). A present-but-malformed checkpoint-anchor.json is local corruption and
 // must fail closed as a structural LOCAL_CHAIN_BROKEN, never leak a raw Node SyntaxError.
 test('a malformed checkpoint-anchor cache fails open-packet verification closed', { concurrency: false }, (t) => {
