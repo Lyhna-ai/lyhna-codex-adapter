@@ -1047,9 +1047,22 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
   if (!runId) return { status: 'NO_ACTIVE_RUN' };
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
+    const { events: preEvents, tip: preTip } = parseLedger(runId);
+    // The DURABLE seal signal is the run_sealed EVENT in the ledger, not the state.sealed flag: a
+    // crash after run_sealed is appended but before state and the seal anchor are written leaves the
+    // ledger sealed while state.sealed is still false. Adopt that event into state so repairSeal's
+    // consistency holds, then let repairSeal finalize the seal (write the missing receipts + anchor)
+    // idempotently. This runs BEFORE the replay guard, which would otherwise short-circuit and leave
+    // an unsealed run that no later Stop is guaranteed to repair.
+    if (!current.sealed && preEvents.some((event) => event.type === 'run_sealed')) {
+      stripLegacyChildReceiptPaths(current);
+      current.sealed = true;
+      current.ledger_count = preEvents.length;
+      current.ledger_tip = preTip;
+      saveState(current);
+    }
     if (current.sealed) {
-      const repaired = repairSeal(runId);
-      return repaired;
+      return repairSeal(runId);
     }
     // Every Stop records exactly one delivery-keyed turn_checkpoint — the "a Stop boundary was
     // observed" fact — and repeated-hook idempotency (SPEC) requires a replayed Stop to NOT mutate
@@ -1058,7 +1071,6 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     // (Inferring it from tip position would miss the crash window where the turn_checkpoint was
     // appended and state saved but the closeout never ran — the dup would still be the tip, so a
     // redelivery would wrongly seal.) A replay returns here reporting the run's current lifecycle.
-    const { events: preEvents } = parseLedger(runId);
     const checkpointKey = `checkpoint:${deliveryKey || preEvents.length + 1}`;
     if (preEvents.some((event) => event.idempotency_key === checkpointKey)) {
       return { status: current.close_requested ? 'CLOSE_DEFERRED' : 'CHECKPOINTED', run_id: runId, replayed_delivery: true };

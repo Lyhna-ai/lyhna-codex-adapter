@@ -669,6 +669,35 @@ test('a redelivered Stop whose checkpoint is still the ledger tip does not seal'
   assert.equal(checkpointOrSeal(parent, 'stop-2').status, 'SEALED');
 });
 
+// 11l (Codex round-11, P2). If a Stop crashes after run_sealed is appended to the ledger but before
+// state.sealed and the seal anchor are written, the ledger is sealed while state.sealed is false. A
+// redelivery must FINALIZE the seal (not be swallowed by the replay guard), since the Stop hook is
+// the only close trigger and no later Stop is guaranteed.
+test('a redelivered Stop finalizes a seal whose run_sealed event is already in the ledger', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-seal-crash';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Seal interrupted after run_sealed.' });
+  evaluateAndRetrieve(sessionId, parent, { ...stableSnapshot, id: 'pr_sealcrash', head_before: HEAD_A, head_after: HEAD_A }, 'evaluator-sealcrash');
+  requestClose(parent, 'Please close.');
+  // Emulate the crash window: the Stop appended its turn_checkpoint and the run_sealed event, but
+  // died before state.sealed / the seal anchor were written (appendEvent saves ledger position only).
+  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
+  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
+  const crashed = getRunForTesting(run.id);
+  assert.equal(crashed.state.sealed, false);
+  assert(!existsSync(join(crashed.directory, 'seal-anchor.json')));
+
+  // Redelivery of the same Stop: adopts the ledger's run_sealed and finalizes via repairSeal.
+  const result = checkpointOrSeal(parent, 'stop-1');
+  assert.equal(result.status, 'ALREADY_SEALED');
+  const finalized = getRunForTesting(run.id);
+  assert.equal(finalized.state.sealed, true);
+  assert(existsSync(join(finalized.directory, 'seal-anchor.json')));
+  const receipt = JSON.parse(readFileSync(join(finalized.directory, 'receipt.json'), 'utf8'));
+  assert.equal(receipt.status, 'SEALED');
+});
+
 // 11j (Codex round-9, P2). A present-but-malformed checkpoint-anchor.json is local corruption and
 // must fail closed as a structural LOCAL_CHAIN_BROKEN, never leak a raw Node SyntaxError.
 test('a malformed checkpoint-anchor cache fails open-packet verification closed', { concurrency: false }, (t) => {
