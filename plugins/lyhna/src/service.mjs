@@ -7,11 +7,13 @@ import {
   beginRun,
   claimEvaluation,
   getCapability,
+  isEvaluationFinished,
   listChildReceipts,
   markSnapshotRefreshed,
   readSealedReceipt,
   recordClaim,
   recordEvaluation as recordEvaluationStore,
+  recordRejectedClaim,
   requestClose
 } from './store.mjs';
 
@@ -25,7 +27,7 @@ export const toolDefinitions = [
   ['begin_run', 'Start an explicitly requested Lyhna run. Use mode "full" whenever the request asks to build, change, fix, continue, or delegate work; use "pr_only" only for a solely retrospective examination of an existing PR; when ambiguous, choose "full".', ['session_capability', 'mode']],
   ['record_claim', 'Record a builder assertion with optional evidence references.', ['session_capability', 'statement']],
   ['snapshot_pr', 'Capture sanitized GitHub metadata at an exact observed PR head.', ['session_capability', 'repository', 'pr_number']],
-  ['begin_evaluation', 'Create an evaluator request and detached exact-head checkout.', ['session_capability', 'pr_snapshot_id', 'source_cwd']],
+  ['begin_evaluation', 'Create an evaluator request and detached exact-head checkout. Optional trigger names why this evaluation runs.', ['session_capability', 'pr_snapshot_id', 'source_cwd']],
   ['claim_evaluation', 'Bind a hook-issued child capability to an evaluator request.', ['child_capability', 'evaluation_request_id']],
   ['record_evaluation', 'Record an attributed evaluator finding and checkout integrity observations.', ['child_capability', 'evaluation_request_id', 'finding', 'checkout_head_before', 'checkout_clean_before', 'checkout_detached_before']],
   ['refresh_pr', 'Explicitly recheck whether a PR snapshot head is current.', ['session_capability', 'pr_snapshot_id']],
@@ -50,6 +52,7 @@ export const toolDefinitions = [
       pr_snapshot_id: { type: 'string' },
       source_cwd: { type: 'string' },
       evaluation_request_id: { type: 'string' },
+      trigger: { type: 'string', enum: ['initial', 'post_fix_reeval', 'gate_audit', 're_examination'], description: 'Optional structural reason this evaluation runs; absent means unspecified and is never inferred.' },
       finding: { type: 'string' },
       checkout_head_before: { type: 'string' },
       checkout_head_after: { type: 'string' },
@@ -65,12 +68,17 @@ export const toolDefinitions = [
 }));
 
 export function createService({ githubRunner } = {}) {
-  return {
-    async call(name, args = {}) {
+  async function dispatch(name, args) {
       switch (name) {
         case 'begin_run': {
           const state = beginRun(args.session_capability, { mode: args.mode, objective: args.objective });
-          return { run_id: state.id, mode: state.mode, objective_origin: state.objective_origin, status: 'OPEN' };
+          return {
+            run_id: state.id,
+            mode: state.mode,
+            objective_origin: state.objective_origin,
+            status: 'OPEN',
+            open_predecessors: state.open_predecessors || []
+          };
         }
         case 'record_claim':
           return recordClaim(args.session_capability, args.statement, args.evidence_refs || []);
@@ -79,12 +87,21 @@ export function createService({ githubRunner } = {}) {
           return addPrSnapshot(args.session_capability, snapshot);
         }
         case 'begin_evaluation': {
+          // Validate the token before any path is built from its run: a stale or garbled
+          // capability must surface as the structural UNKNOWN_CAPABILITY (with its CZ-11
+          // trace), and a valid token with no open run as NO_ACTIVE_RUN — never as a raw
+          // Node path error.
+          getCapability(args.session_capability);
           const active = (await import('./store.mjs')).activeRunFor(args.session_capability);
+          if (!active) throw Object.assign(new Error('NO_ACTIVE_RUN'), { code: 'NO_ACTIVE_RUN' });
           const state = (await import('./store.mjs')).getRunForTesting(active).state;
           const snapshot = requireSnapshot(state, args.pr_snapshot_id);
           const evaluationPath = join(dataRoot(), 'evaluations', `${active}-${args.pr_snapshot_id}`, 'worktree');
-          const existing = Object.values(state.evaluations).find((item) => item.snapshot_id === args.pr_snapshot_id && !['STALE', 'INVALID'].includes(item.status));
-          if (existing) return { ...existing, checkout_path: evaluationPath };
+          // Retry idempotency mirrors the store: only a still non-terminal evaluation short-circuits
+          // here. Once every prior evaluation for this snapshot is terminal, a fresh begin_evaluation
+          // is a distinct re-examination — fall through to prepare its checkout and record a new one.
+          const activeEvaluation = Object.values(state.evaluations).find((item) => item.snapshot_id === args.pr_snapshot_id && !isEvaluationFinished(item));
+          if (activeEvaluation) return { ...activeEvaluation, checkout_path: evaluationPath };
           let checkout = {};
           if (snapshot?.status === 'CONSISTENT') {
             try {
@@ -95,7 +112,7 @@ export function createService({ githubRunner } = {}) {
               throw failure;
             }
           }
-          const stored = beginEvaluationStore(args.session_capability, args.pr_snapshot_id, checkout);
+          const stored = beginEvaluationStore(args.session_capability, args.pr_snapshot_id, checkout, args.trigger);
           return { ...stored, checkout_path: checkout.path };
         }
         case 'claim_evaluation':
@@ -128,7 +145,9 @@ export function createService({ githubRunner } = {}) {
           return recordEvaluationStore(args.child_capability, args.evaluation_request_id, args.finding, args.evidence_refs || [], observed);
         }
         case 'refresh_pr': {
+          getCapability(args.session_capability);
           const active = (await import('./store.mjs')).activeRunFor(args.session_capability);
+          if (!active) throw Object.assign(new Error('NO_ACTIVE_RUN'), { code: 'NO_ACTIVE_RUN' });
           const state = (await import('./store.mjs')).getRunForTesting(active).state;
           const snapshot = requireSnapshot(state, args.pr_snapshot_id);
           const head = refreshPrHead({ repository: snapshot.repository, prNumber: snapshot.pr_number, runner: githubRunner });
@@ -142,6 +161,17 @@ export function createService({ githubRunner } = {}) {
           return requestClose(args.session_capability, args.reason);
         default:
           throw Object.assign(new Error(`UNKNOWN_TOOL: ${name}`), { code: 'UNKNOWN_TOOL' });
+      }
+  }
+  return {
+    async call(name, args = {}) {
+      try {
+        return await dispatch(name, args);
+      } catch (error) {
+        if (error?.code === 'UNKNOWN_CAPABILITY') {
+          recordRejectedClaim(args.child_capability || args.session_capability);
+        }
+        throw error;
       }
     }
   };

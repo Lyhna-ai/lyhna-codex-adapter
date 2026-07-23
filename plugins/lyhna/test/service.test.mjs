@@ -81,3 +81,43 @@ test('managed evaluation preserves the evaluator before-check and re-inspects de
   assert.equal(stored.checkout_clean_after, true);
   assert.equal(stored.checkout_detached_after, true);
 });
+
+// Field defect (B11 run, 2026-07-22): a stale capability after context compaction crashed
+// refresh_pr with a raw Node path error instead of a structural code. Both unguarded
+// call sites must fail structurally: UNKNOWN_CAPABILITY for a bad token (with its CZ-11
+// trace), NO_ACTIVE_RUN for a valid token with no open run.
+test('a stale capability fails structurally, never as a raw path error', { concurrency: false }, async (t) => {
+  isolatedData(t);
+  const service = createService({
+    githubRunner: () => {
+      throw new Error('GitHub runner must not be called for an invalid capability');
+    }
+  });
+  const stale = `lyhna_session_${'e'.repeat(64)}`;
+  await assert.rejects(
+    service.call('refresh_pr', { session_capability: stale, pr_snapshot_id: 'pr_any' }),
+    /UNKNOWN_CAPABILITY/
+  );
+  await assert.rejects(
+    service.call('begin_evaluation', { session_capability: stale, pr_snapshot_id: 'pr_any', source_cwd: process.cwd() }),
+    /UNKNOWN_CAPABILITY/
+  );
+});
+
+test('a valid capability with no open run fails as NO_ACTIVE_RUN', { concurrency: false }, async (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'no-active-run', cwd: process.cwd() });
+  const service = createService({
+    githubRunner: () => {
+      throw new Error('GitHub runner must not be called with no active run');
+    }
+  });
+  await assert.rejects(
+    service.call('refresh_pr', { session_capability: parent, pr_snapshot_id: 'pr_any' }),
+    /NO_ACTIVE_RUN/
+  );
+  await assert.rejects(
+    service.call('begin_evaluation', { session_capability: parent, pr_snapshot_id: 'pr_any', source_cwd: process.cwd() }),
+    /NO_ACTIVE_RUN/
+  );
+});

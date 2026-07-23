@@ -1,11 +1,10 @@
 # Evaluator Review Record
 
-> **Status (2026-07-16): ON HOLD at Adam's direction — no active build available for field testing.**
-> Resume point: Slice A (front door, v0.1.25 at `cf260f0`) is code-complete with a clean cross-platform review, **installed and verified on the operator's machine (2026-07-16: all 10 tools registered, isolated smoke passed)**, and awaits its field gate — one real `@lyhna-codex-adapter` invocation **in a fresh Codex task** showing `runtime_hook` origin in a `full` run (check `pending-miss/` if it misses). Slice B is fully specced (`SLICE-B-SPEC-2026-07-16.md`) and builds next. PR #2 carries everything; PR #1 remains open awaiting Adam's decision. The build plan, roadmap, and thesis in this directory are the complete context — no prior session is required to continue.
+> **Status (2026-07-23): ACTIVE.** Slice A is closed and field-proven (three `runtime_hook` confirmations, zero false positives or negatives). Slice B is code-final at v0.1.26 (`0ee68f3`), installed on the operator's machine, awaiting its blind-reader field gate whenever the operator next uses the witness. CZ-14 (seal-as-you-go checkpoint anchors) is **code-final and clean through hosted Codex review at v0.1.27** (`2a6b384`, 100/100 tests, every PR #3 thread resolved), its build record in `BUILD-PLAN-2026-07-16.md`, ready to install and awaiting its blind-reader field gate; the `HANDOFF-2026-07-22.md` §3 spec that drove it is now historical. PR #3 is the working PR (Slice B + CZ-14); PR #2 carries the evaluator record; PR #1 remains open awaiting Adam's decision.
 
 Independent third-party evaluation record for the Lyhna Codex Adapter and the Lyhna product direction. Assembled by the evaluator session at Adam's direction; nothing here approves, certifies, or merges anything — canonical/adoption status of every document is Adam's decision.
 
-**Taking over from a prior session? Read [HANDOFF-2026-07-16.md](HANDOFF-2026-07-16.md) first** — it carries the role, the exact current state, the operating loop, and the continuation prompt.
+**Taking over from a prior session? Read the status banner above first for the shipped state, then [HANDOFF-2026-07-22.md](HANDOFF-2026-07-22.md)** for the role's standing rules and the working relationship — its §3 CZ-14 spec is now historical (CZ-14 is code-complete at v0.1.27; its outcome lives in `BUILD-PLAN-2026-07-16.md`), so read it as context, not as a build to start. Then [HANDOFF-2026-07-16.md](HANDOFF-2026-07-16.md) for the constitution and the operating loop.
 
 Read in this order:
 

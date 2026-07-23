@@ -38,8 +38,13 @@ function main(input) {
   const parentCapability = findParentCapabilityBySession(input.session_id);
   const payload = sanitizeHook(input);
   const deliveryKey = input.event_id || input.tool_use_id || input.call_id || sha256(JSON.stringify(payload));
-  const childLifecycle = event === 'SubagentStart' || event === 'SubagentStop';
-  if (parentCapability && activeRunFor(parentCapability) && !childLifecycle) {
+  // SubagentStart/Stop record their own child-lifecycle events; Stop records its single durable
+  // marker atomically inside checkpointOrSeal (the delivery-keyed turn_checkpoint IS the Stop
+  // observation). Recording a separate hook_stop here would make the Stop marker span two
+  // non-atomic appends, so a crash between them could let a redelivered Stop reach the seal path
+  // after blockers cleared. Excluding Stop keeps the turn_checkpoint the sole, first-written marker.
+  const ownsOwnRecord = event === 'SubagentStart' || event === 'SubagentStop' || event === 'Stop';
+  if (parentCapability && activeRunFor(parentCapability) && !ownsOwnRecord) {
     recordHookForParent(parentCapability, payload, `hook:${event}:${deliveryKey}`);
   }
 
