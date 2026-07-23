@@ -285,8 +285,10 @@ function repairSeal(runId) {
   assert(state.sealed, 'RUN_NOT_SEALED');
   const { events, tip } = parseLedger(runId);
   assert(events.length === state.ledger_count && tip === state.ledger_tip, 'LOCAL_CHAIN_BROKEN');
-  // A sealed run's run_sealed is always its terminal event; anything after it is post-seal corruption.
-  assert(events.at(-1)?.type === 'run_sealed', 'LOCAL_CHAIN_BROKEN');
+  // A sealed run's FIRST run_sealed must be its terminal event: exactly one seal, at the end. Anything
+  // after it — including a second run_sealed with a post-seal event between — is corruption to fail on,
+  // not fold into the receipt (checking only the last event would miss an earlier seal + later write).
+  assert(events.findIndex((event) => event.type === 'run_sealed') === events.length - 1, 'LOCAL_CHAIN_BROKEN');
   verifyChildReceipts(state);
   const stateHash = sha256(canonicalJson(state));
   const jsonPath = join(runDir(runId), 'receipt.json');
@@ -1075,14 +1077,21 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       return repairSeal(runId);
     }
     // Every Stop records exactly one delivery-keyed turn_checkpoint — the "a Stop boundary was
-    // observed" fact — and repeated-hook idempotency (SPEC) requires a replayed Stop to NOT mutate
-    // the run: no new close_deferred, no seal, no new anchor. A replay is identified by its
-    // delivery-keyed checkpoint ALREADY existing in the ledger, checked before anything is appended.
-    // (Inferring it from tip position would miss the crash window where the turn_checkpoint was
-    // appended and state saved but the closeout never ran — the dup would still be the tip, so a
-    // redelivery would wrongly seal.) A replay returns here reporting the run's current lifecycle.
+    // observed" fact — and repeated-hook idempotency (SPEC) requires a replayed Stop to NOT re-observe
+    // the run: no new close_deferred, no seal. A replay is identified by its delivery-keyed checkpoint
+    // ALREADY existing in the ledger, checked before anything is appended. (Inferring it from tip
+    // position would miss the crash window where the turn_checkpoint was appended and state saved but
+    // the closeout never ran — the dup would still be the tip, so a redelivery would wrongly seal.)
     const checkpointKey = `checkpoint:${deliveryKey || preEvents.length + 1}`;
-    if (preEvents.some((event) => event.idempotency_key === checkpointKey)) {
+    const priorCheckpoint = preEvents.find((event) => event.idempotency_key === checkpointKey);
+    if (priorCheckpoint) {
+      // The Stop was observed. If the original delivery crashed after appending the turn_checkpoint
+      // but before writeCheckpointArtifacts wrote the packet, no checkpoint_anchor follows it — finish
+      // that interrupted packet now so every observed Stop has its verifiable checkpoint. If an anchor
+      // already follows this checkpoint the packet is complete; do NOT re-anchor (that would fold later
+      // activity into a fresh anchor for a repeated hook). Never re-seal or re-defer.
+      const packetComplete = preEvents.some((event) => event.type === 'checkpoint_anchor' && event.seq > priorCheckpoint.seq);
+      if (!packetComplete) writeCheckpointArtifacts(runId, current);
       return { status: current.close_requested ? 'CLOSE_DEFERRED' : 'CHECKPOINTED', run_id: runId, replayed_delivery: true };
     }
     appendEventUnlocked(runId, current, {

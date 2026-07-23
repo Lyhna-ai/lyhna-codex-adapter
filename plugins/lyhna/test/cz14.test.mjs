@@ -717,6 +717,48 @@ test('a ledger with events after run_sealed fails closed instead of folding them
   assert.equal(getRunForTesting(run.id).state.sealed, false);
 });
 
+// 11n (Codex round-13, P1). If a Stop crashes after its turn_checkpoint is appended but before
+// writeCheckpointArtifacts wrote the anchor + receipts, the redelivery must FINISH the interrupted
+// packet (not just return), so the observed Stop has its verifiable checkpoint.
+test('a redelivered Stop completes an interrupted checkpoint packet', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-finish-packet';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Interrupted checkpoint packet.' });
+  // Emulate the crash: turn_checkpoint appended and state saved, but no checkpoint_anchor / receipts.
+  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
+  const before = getRunForTesting(run.id);
+  assert.equal(before.events.at(-1).type, 'turn_checkpoint');
+  assert.equal(verifyRun(run.id).status, 'OPEN_NO_CHECKPOINT');
+  // Redelivery finishes the packet.
+  const replay = checkpointOrSeal(parent, 'stop-1');
+  assert.equal(replay.replayed_delivery, true);
+  const after = getRunForTesting(run.id);
+  assert.equal(after.events.at(-1).type, 'checkpoint_anchor');
+  assert.equal(verifyRun(run.id).status, 'CHECKPOINT_VERIFIED');
+  // A second redelivery is now a no-op: the packet is complete, so no fresh anchor is appended.
+  checkpointOrSeal(parent, 'stop-1');
+  assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'checkpoint_anchor').length, 1);
+});
+
+// 11o (Codex round-13, P2). Two run_sealed events with a post-seal write between must fail closed —
+// checking only the last event would miss the earlier seal and fold the middle write into the receipt.
+test('a ledger with a second run_sealed after a post-seal write fails closed', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-double-seal';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Double run_sealed corruption.' });
+  evaluateAndRetrieve(sessionId, parent, { ...stableSnapshot, id: 'pr_double', head_before: HEAD_A, head_after: HEAD_A }, 'evaluator-double');
+  requestClose(parent, 'Please close.');
+  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
+  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
+  appendEvent(run.id, { type: 'builder_claim', origin: 'agent_reported', payload: { statement: 'post-seal write' }, idempotencyKey: 'claim:post-seal' });
+  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: 'seal:duplicate' });
+  // Terminal event is run_sealed, but the FIRST run_sealed is not terminal → corruption, fail closed.
+  assert.throws(() => checkpointOrSeal(parent, 'stop-1'), /LOCAL_CHAIN_BROKEN/);
+  assert.equal(getRunForTesting(run.id).state.sealed, false);
+});
+
 // 11j (Codex round-9, P2). A present-but-malformed checkpoint-anchor.json is local corruption and
 // must fail closed as a structural LOCAL_CHAIN_BROKEN, never leak a raw Node SyntaxError.
 test('a malformed checkpoint-anchor cache fails open-packet verification closed', { concurrency: false }, (t) => {
