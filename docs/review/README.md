@@ -4,7 +4,7 @@
 
 Independent third-party evaluation record for the Lyhna Codex Adapter and the Lyhna product direction. Assembled by the evaluator session at Adam's direction; nothing here approves, certifies, or merges anything — canonical/adoption status of every document is Adam's decision.
 
-**Taking over from a prior session? Read [HANDOFF-2026-07-22.md](HANDOFF-2026-07-22.md) first** — it carries the current state and the next build (CZ-14). Then [HANDOFF-2026-07-16.md](HANDOFF-2026-07-16.md) for the role, the constitution, and the operating loop.
+**Taking over from a prior session? Read the status banner above first for the shipped state, then [HANDOFF-2026-07-22.md](HANDOFF-2026-07-22.md)** for the role's standing rules and the working relationship — its §3 CZ-14 spec is now historical (CZ-14 is code-complete at v0.1.27; its outcome lives in `BUILD-PLAN-2026-07-16.md`), so read it as context, not as a build to start. Then [HANDOFF-2026-07-16.md](HANDOFF-2026-07-16.md) for the constitution and the operating loop.
 
 Read in this order:
 
