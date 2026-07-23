@@ -1249,6 +1249,30 @@ function verifyOpenPacket(runId) {
     );
     return payload;
   };
+  // The checkpoint-anchor.json file is a convenience MIRROR of a checkpoint_anchor event, never a
+  // trust root — every gating hash is read from the ledger, never from this file. It may legitimately
+  // lag one write behind: writeCheckpointArtifacts renames both receipt files before rewriting this
+  // file, so a crash in that window leaves the receipt files on the LATEST anchor while this file
+  // still names the PRIOR one. Validate it against the anchor EVENT it names (stale-but-valid is
+  // fine); a file naming no committed anchor, or disagreeing with the one it names, is an incoherent
+  // on-disk cache and fails closed — including in the torn-write branch, so a corrupted cache is
+  // never hidden by an incomplete write.
+  const assertAnchorFileCoherent = () => {
+    const anchorFile = readJson(checkpointAnchorPath(runId), null);
+    if (!anchorFile) return;
+    const named = anchorEvents.find((event) => event.seq === anchorFile.anchor_event_seq);
+    assert(named, 'LOCAL_CHAIN_BROKEN');
+    const namedPayload = verifiedPayload(named);
+    assert(
+      anchorFile.run_id === runId
+      && anchorFile.as_of_seq === namedPayload.covers_seq
+      && anchorFile.tip_hash === namedPayload.tip_hash
+      && anchorFile.state_hash === namedPayload.state_hash
+      && anchorFile.receipt_json_hash === namedPayload.receipt_json_hash
+      && anchorFile.receipt_markdown_hash === namedPayload.receipt_markdown_hash,
+      'LOCAL_CHAIN_BROKEN'
+    );
+  };
   const latest = anchorEvents.at(-1);
   const latestPayload = verifiedPayload(latest);
   // Which ledger-committed anchor do BOTH on-disk receipt files reproduce? Normally the latest. A
@@ -1279,6 +1303,8 @@ function verifyOpenPacket(runId) {
     const markdownPath = join(runDir(runId), 'RECEIPT.md');
     if (existsSync(jsonPath)) assert(jsonHashes.has(sha256(readFileSync(jsonPath, 'utf8'))), 'LOCAL_CHAIN_BROKEN');
     if (existsSync(markdownPath)) assert(markdownHashes.has(sha256(readFileSync(markdownPath, 'utf8'))), 'LOCAL_CHAIN_BROKEN');
+    // A corrupted anchor cache must surface even in the incomplete-write case, not be hidden by it.
+    assertAnchorFileCoherent();
     let reproducible = false;
     if (events.length === latest.seq && latestPayload.receipt_renderer === ADAPTER_VERSION) {
       const stateAtAnchor = { ...state, ledger_count: latestPayload.covers_seq, ledger_tip: latestPayload.tip_hash };
@@ -1296,28 +1322,7 @@ function verifyOpenPacket(runId) {
       content_reproducible_from_ledger: reproducible
     };
   }
-  // The checkpoint-anchor.json file is a convenience MIRROR of a checkpoint_anchor event, never a
-  // trust root — every hash above is read from the ledger, never from this file. It may legitimately
-  // lag one write behind: writeCheckpointArtifacts renames both receipt files before rewriting this
-  // file, so a crash in that window leaves the receipt files matching the LATEST anchor while this
-  // file still names the PRIOR one. Validate it against the anchor EVENT it names (stale-but-valid is
-  // fine), never against the receipt-file-matched anchor; a file naming no committed anchor, or
-  // disagreeing with the one it names, is an incoherent on-disk cache and fails closed.
-  const anchorFile = readJson(checkpointAnchorPath(runId), null);
-  if (anchorFile) {
-    const named = anchorEvents.find((event) => event.seq === anchorFile.anchor_event_seq);
-    assert(named, 'LOCAL_CHAIN_BROKEN');
-    const namedPayload = verifiedPayload(named);
-    assert(
-      anchorFile.run_id === runId
-      && anchorFile.as_of_seq === namedPayload.covers_seq
-      && anchorFile.tip_hash === namedPayload.tip_hash
-      && anchorFile.state_hash === namedPayload.state_hash
-      && anchorFile.receipt_json_hash === namedPayload.receipt_json_hash
-      && anchorFile.receipt_markdown_hash === namedPayload.receipt_markdown_hash,
-      'LOCAL_CHAIN_BROKEN'
-    );
-  }
+  assertAnchorFileCoherent();
   if (events.length === matched.seq) {
     // Ledger exactly at the anchor: the current state minus the anchor event itself must reproduce
     // the committed state hash, and the current renderer must reproduce the committed bytes.

@@ -531,6 +531,25 @@ test('a stale checkpoint-anchor file after fresh receipt writes still verifies a
   assert.throws(() => verifyRun(run.id), /LOCAL_CHAIN_BROKEN/);
 });
 
+// 11e (Codex round-5). A corrupted checkpoint-anchor.json cache must surface as LOCAL_CHAIN_BROKEN
+// even in the torn-write (incomplete) branch — an incomplete write must not hide a mutated cache.
+test('a corrupted anchor cache fails closed even in the incomplete-write branch', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-incomplete-badcache';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Incomplete write with corrupted cache.' });
+  checkpointOrSeal(parent, 'stop-1');
+  const { directory } = getRunForTesting(run.id);
+  // Torn write: both receipt files absent (would otherwise report CHECKPOINT_INCOMPLETE)...
+  rmSync(join(directory, 'receipt.json'));
+  rmSync(join(directory, 'RECEIPT.md'));
+  // ...but the anchor cache is mutated to name a non-existent anchor event.
+  const anchor = readAnchor(directory);
+  anchor.anchor_event_seq = 999;
+  writeFileSync(join(directory, 'checkpoint-anchor.json'), `${JSON.stringify(anchor, null, 2)}\n`);
+  assert.throws(() => verifyRun(run.id), /LOCAL_CHAIN_BROKEN/);
+});
+
 // 12 (review F5). A blocker set that changes and then recurs (S1 -> S2 -> S1) appends a fresh
 // close_deferred each time it changes, so the lifecycle face never lists stale blockers.
 test('a recurring blocker set appends a fresh observation and the face lists current blockers', { concurrency: false }, (t) => {
