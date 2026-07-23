@@ -1051,23 +1051,27 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       const repaired = repairSeal(runId);
       return repaired;
     }
+    // Every Stop records exactly one delivery-keyed turn_checkpoint — the "a Stop boundary was
+    // observed" fact. A redelivered Stop (same delivery key) dedupes to the earlier one; a newly
+    // appended event is always the ledger tip (seq === ledger_count), so a dedup is detectable.
+    // Repeated-hook idempotency (SPEC): a replayed Stop must NOT mutate the run — no new
+    // close_deferred, no seal, no new anchor — so it returns here before any closeout logic. Its
+    // status reflects the run's current lifecycle without re-observing it.
+    const checkpointEvent = appendEventUnlocked(runId, current, {
+      type: 'turn_checkpoint',
+      origin: 'runtime_hook',
+      // The renderer version rides in this event for observability; the verification gate reads the
+      // checkpoint_anchor event that writeCheckpointArtifacts appends (never the mutable anchor
+      // file), mirroring how run_sealed pins the seal renderer.
+      payload: { status: 'OPEN', receipt_renderer: ADAPTER_VERSION },
+      idempotencyKey: `checkpoint:${deliveryKey || current.ledger_count + 1}`
+    });
+    saveState(current);
+    if (checkpointEvent.seq !== current.ledger_count) {
+      return { status: current.close_requested ? 'CLOSE_DEFERRED' : 'CHECKPOINTED', run_id: runId, replayed_delivery: true };
+    }
     if (!current.close_requested) {
-      const checkpointEvent = appendEventUnlocked(runId, current, {
-        type: 'turn_checkpoint',
-        origin: 'runtime_hook',
-        // The renderer version also rides in this event for observability; the verification gate
-        // reads the checkpoint_anchor event that writeCheckpointArtifacts appends (never the
-        // mutable anchor file), mirroring how run_sealed pins the seal renderer.
-        payload: { status: 'OPEN', receipt_renderer: ADAPTER_VERSION },
-        idempotencyKey: `checkpoint:${deliveryKey || current.ledger_count + 1}`
-      });
-      saveState(current);
-      // CZ-14 seal-as-you-go: anchor this checkpoint ONLY when the turn_checkpoint was newly
-      // observed. A redelivered Stop (same delivery key) dedupes to the earlier event; a newly
-      // appended event is always the ledger tip (seq === ledger_count), so a dup after later
-      // activity is not, and re-anchoring it would mutate the chain for a repeated hook with no new
-      // observation. A dup with no intervening activity is already the tip and self-heals identically.
-      if (checkpointEvent.seq === current.ledger_count) writeCheckpointArtifacts(runId, current);
+      writeCheckpointArtifacts(runId, current);
       return { status: 'CHECKPOINTED', run_id: runId };
     }
     const evaluations = Object.values(current.evaluations);
@@ -1093,21 +1097,11 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     }
     if (blockers.length) {
       blockers.sort();
-      // Every Stop records a delivery-keyed turn_checkpoint (the "a Stop was observed" fact); a
-      // redelivered Stop dedupes to the earlier one. This is what distinguishes a genuinely new Stop
-      // — which anchors the current ledger, even if its blockers are unchanged — from a replayed hook,
-      // which must not mutate the chain. A newly appended event is always the ledger tip.
-      const checkpointEvent = appendEventUnlocked(runId, current, {
-        type: 'turn_checkpoint',
-        origin: 'runtime_hook',
-        payload: { status: 'OPEN', receipt_renderer: ADAPTER_VERSION },
-        idempotencyKey: `checkpoint:${deliveryKey || current.ledger_count + 1}`
-      });
-      const checkpointIsNew = checkpointEvent.seq === current.ledger_count;
-      // A blocker set identical to the LATEST close_deferred observation appends no new close_deferred;
-      // any changed set — including one that recurs after an intervening different set (the
-      // prior-occurrence count keys it) — is a semantically distinct observation and appends its own
-      // event, so the lifecycle face's latest close_deferred is always the latest observation.
+      // This Stop is newly observed (a replay returned above). A blocker set identical to the LATEST
+      // close_deferred observation appends no new close_deferred; any changed set — including one that
+      // recurs after an intervening different set (the prior-occurrence count keys it) — is a
+      // semantically distinct observation and appends its own event, so the lifecycle face's latest
+      // close_deferred is always the latest observation.
       const { events: parsedEvents } = parseLedger(runId);
       const priorDeferred = parsedEvents.filter((event) => event.type === 'close_deferred');
       const latestDeferred = priorDeferred.at(-1);
@@ -1120,10 +1114,8 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         });
       }
       saveState(current);
-      // CZ-14 seal-as-you-go: anchor a deferred close ONLY when its Stop was newly observed. A
-      // redelivered Stop dedupes its turn_checkpoint, so anchoring would mutate the chain for a
-      // repeated hook with no new observation.
-      if (checkpointIsNew) writeCheckpointArtifacts(runId, current);
+      // The deferred close is this newly observed Stop's checkpoint — anchor it.
+      writeCheckpointArtifacts(runId, current);
       return { status: 'CLOSE_DEFERRED', run_id: runId, blockers };
     }
     appendEventUnlocked(runId, current, {
@@ -1245,6 +1237,10 @@ function verifyOpenPacket(runId) {
   );
   const cacheTip = state.ledger_count === 0 ? ZERO_HASH : events[state.ledger_count - 1].event_hash;
   assert(cacheTip === state.ledger_tip, 'LOCAL_CHAIN_BROKEN');
+  // Child receipts are sealed to their own files during the run and named by the state; an open
+  // packet must hash-check them exactly as the sealed path does, so a corrupted or deleted child
+  // artifact cannot hide behind an otherwise-valid parent checkpoint.
+  verifyChildReceipts(state);
   const anchorEvents = events.filter((event) => event.type === 'checkpoint_anchor');
   if (!anchorEvents.length) {
     // Legacy / pre-CZ-14 open shape (or a run that never reached a Stop): structural, never a throw.

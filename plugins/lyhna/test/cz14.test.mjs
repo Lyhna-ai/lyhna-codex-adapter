@@ -571,6 +571,53 @@ test('a replayed deferred-close Stop after later activity appends no new anchor'
   assert.equal(after.events.filter((event) => event.type === 'close_deferred').length, 1);
 });
 
+// 11h (Codex round-8, P1). Open-packet verification must hash-check the sealed child receipt files
+// named by the state, exactly as the sealed path does — a corrupted or deleted child artifact must
+// not hide behind an otherwise-valid parent checkpoint.
+test('open-packet verification fails closed on a tampered child receipt file', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-child-verify';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Child receipt tamper on an open packet.' });
+  evaluateAndRetrieve(sessionId, parent, { ...stableSnapshot, id: 'pr_child', head_before: HEAD_A, head_after: HEAD_A }, 'evaluator-child');
+  checkpointOrSeal(parent, 'stop-1');
+  const opened = getRunForTesting(run.id);
+  assert.equal(verifyRun(run.id).status, 'CHECKPOINT_VERIFIED');
+  const childId = Object.keys(opened.state.child_receipts)[0];
+  const childPath = join(opened.directory, 'child-receipts', childId, 'receipt.json');
+  writeFileSync(childPath, `${readFileSync(childPath, 'utf8')}\ntampered\n`);
+  assert.throws(() => verifyRun(run.id), /LOCAL_CHAIN_BROKEN/);
+});
+
+// 11i (Codex round-8, P1). A replayed Stop must not mutate or seal the run even if its blockers have
+// cleared since the original delivery — repeated-hook idempotency governs the seal path too.
+test('a replayed Stop after blockers clear does not seal the run', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-replay-seal';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'A replayed Stop must not seal.' });
+  const snapshotId = 'pr_seal2';
+  addPrSnapshot(parent, { ...stableSnapshot, id: snapshotId, head_before: HEAD_A, head_after: HEAD_A });
+  requestClose(parent, 'Please close.');
+  // Blocker present (evaluation required): the first Stop defers.
+  assert.equal(checkpointOrSeal(parent, 'stop-1').status, 'CLOSE_DEFERRED');
+  // Clear the blocker via a full evaluation + child seal + retrieval.
+  const evaluation = beginEvaluation(parent, snapshotId, { head: HEAD_A, clean: true, detached: true, path: `fixture-${snapshotId}` }, 'initial');
+  const child = mintChild({ sessionId, agentId: 'evaluator-seal2' });
+  claimEvaluation(child, evaluation.id);
+  recordEvaluation(child, evaluation.id, 'Finding.', [], {
+    head_before: HEAD_A, head_after: HEAD_A, clean_before: true, clean_after: true, detached_before: true, detached_after: true
+  });
+  const receipt = sealChildByAgent({ sessionId, agentId: 'evaluator-seal2' });
+  readSealedReceipt(parent, receipt.id);
+  // Replay the SAME Stop delivery: not newly observed, so it must NOT seal.
+  const replay = checkpointOrSeal(parent, 'stop-1');
+  assert.equal(replay.replayed_delivery, true);
+  assert.equal(getRunForTesting(run.id).state.sealed, false);
+  // A genuinely new Stop delivery seals.
+  assert.equal(checkpointOrSeal(parent, 'stop-2').status, 'SEALED');
+});
+
 // 11e (Codex round-5). A corrupted checkpoint-anchor.json cache must surface as LOCAL_CHAIN_BROKEN
 // even in the torn-write (incomplete) branch — an incomplete write must not hide a mutated cache.
 test('a corrupted anchor cache fails closed even in the incomplete-write branch', { concurrency: false }, (t) => {
