@@ -285,6 +285,8 @@ function repairSeal(runId) {
   assert(state.sealed, 'RUN_NOT_SEALED');
   const { events, tip } = parseLedger(runId);
   assert(events.length === state.ledger_count && tip === state.ledger_tip, 'LOCAL_CHAIN_BROKEN');
+  // A sealed run's run_sealed is always its terminal event; anything after it is post-seal corruption.
+  assert(events.at(-1)?.type === 'run_sealed', 'LOCAL_CHAIN_BROKEN');
   verifyChildReceipts(state);
   const stateHash = sha256(canonicalJson(state));
   const jsonPath = join(runDir(runId), 'receipt.json');
@@ -1054,12 +1056,20 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     // consistency holds, then let repairSeal finalize the seal (write the missing receipts + anchor)
     // idempotently. This runs BEFORE the replay guard, which would otherwise short-circuit and leave
     // an unsealed run that no later Stop is guaranteed to repair.
-    if (!current.sealed && preEvents.some((event) => event.type === 'run_sealed')) {
-      stripLegacyChildReceiptPaths(current);
-      current.sealed = true;
-      current.ledger_count = preEvents.length;
-      current.ledger_tip = preTip;
-      saveState(current);
+    if (!current.sealed) {
+      const sealedIndex = preEvents.findIndex((event) => event.type === 'run_sealed');
+      if (sealedIndex !== -1) {
+        // run_sealed MUST be the terminal ledger event. Once the seal is logged the run is sealed, so
+        // any event after it means the run kept being written to after sealing while state falsely
+        // looked active — corruption, not a recoverable interrupt. Fail closed rather than fold those
+        // post-seal observations into the sealed receipt; otherwise adopt and finalize.
+        assert(sealedIndex === preEvents.length - 1, 'LOCAL_CHAIN_BROKEN');
+        stripLegacyChildReceiptPaths(current);
+        current.sealed = true;
+        current.ledger_count = preEvents.length;
+        current.ledger_tip = preTip;
+        saveState(current);
+      }
     }
     if (current.sealed) {
       return repairSeal(runId);

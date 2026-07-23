@@ -698,6 +698,25 @@ test('a redelivered Stop finalizes a seal whose run_sealed event is already in t
   assert.equal(receipt.status, 'SEALED');
 });
 
+// 11m (Codex round-12, P1). If events were appended AFTER run_sealed (a hook wrote to the run while
+// state falsely looked active in the seal crash window), that is post-seal corruption — the seal
+// finalization must fail closed, never fold those observations into the sealed receipt.
+test('a ledger with events after run_sealed fails closed instead of folding them into the seal', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'cz14-postseal';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Post-seal corruption.' });
+  evaluateAndRetrieve(sessionId, parent, { ...stableSnapshot, id: 'pr_postseal', head_before: HEAD_A, head_after: HEAD_A }, 'evaluator-postseal');
+  requestClose(parent, 'Please close.');
+  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
+  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
+  // A stray observation lands AFTER run_sealed (state.sealed was never written, so the run looked active).
+  appendEvent(run.id, { type: 'builder_claim', origin: 'agent_reported', payload: { statement: 'post-seal write' }, idempotencyKey: 'claim:post-seal' });
+  // The redelivery must refuse to finalize a seal that has events after it.
+  assert.throws(() => checkpointOrSeal(parent, 'stop-1'), /LOCAL_CHAIN_BROKEN/);
+  assert.equal(getRunForTesting(run.id).state.sealed, false);
+});
+
 // 11j (Codex round-9, P2). A present-but-malformed checkpoint-anchor.json is local corruption and
 // must fail closed as a structural LOCAL_CHAIN_BROKEN, never leak a raw Node SyntaxError.
 test('a malformed checkpoint-anchor cache fails open-packet verification closed', { concurrency: false }, (t) => {
