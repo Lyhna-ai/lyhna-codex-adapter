@@ -93,14 +93,17 @@ jobs:
           zip -qr "${staging}.zip" "${staging}"
           echo "BUNDLE=${staging}.zip" >> "$GITHUB_ENV"
 
+      # `gh release create` creates the tag itself at --target, so there is no `git tag` here and no
+      # committer identity to configure. The first run failed on exactly that: a runner has no
+      # git ident, and an annotated tag needs one. Deleting the step beats configuring a fake author
+      # for a tag nobody authored.
       - name: Tag and publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${{ needs.verify.outputs.version }}"
-          git tag -a "v${version}" -m "v${version}"
-          git push origin "v${version}"
           gh release create "v${version}" "${BUNDLE}" \
+            --target "${{ github.sha }}" \
             --title "v${version}" \
             --notes "Installable bundle for Codex. Download and unzip, then:
 
