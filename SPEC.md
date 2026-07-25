@@ -67,6 +67,17 @@ The adapter records what was observed. It never approves, blocks, certifies, mer
 - Identical normalized receipt input produces byte-identical Markdown and JSON output.
 - “Append-only,” “sealed,” and “cannot rewrite” are logical local-store properties, not adversary-resistant claims against an agent with unrestricted filesystem access. Reads verify the hash chain and surface deletion or mutation as `LOCAL_CHAIN_BROKEN`; v0 does not claim cryptographic custody beyond that detection boundary.
 
+## Continuation and lineage across context windows
+
+- Every Stop writes `continuation.json` and `HANDOFF.md` into the run packet, including for a window that is abandoned rather than closed. The common real case is a window ending because it became expensive, not because the work reached a boundary.
+- Both files are deterministic folds of `(state, ledger)` produced by the supervisor hook path. The agent's MCP surface can append claims; it cannot author the fold, set a support label, or seal. Identical input produces byte-identical output.
+- `settled`, `open`, and `next` are derived from structural observations and each carries the evidence reference it was derived from. They are never agent narration.
+- Builder claims are labeled against the ledger: `SUPPORTED` when every cited reference resolves to an event witnessed in that run, `UNSUPPORTED` when no evidence is cited, and `UNRESOLVED_EVIDENCE` when a cited reference does not resolve within configured coverage. `UNRESOLVED_EVIDENCE` is deliberately distinct — a reference this run cannot resolve may be valid elsewhere, and calling it unsupported would overclaim.
+- `begin_run` accepts `continues_from`, a prior `capsule_ref`. The store resolves it against the local packet and records that packet's `state_hash` itself; the caller cannot supply it. An unresolvable reference is recorded as `UNRESOLVED_LOCALLY`, never rejected or invented.
+- The inheritance edge is written into `run_begun`, so it is inside the hash chain and covered by the seal anchor. It cannot be added or altered afterward without breaking the chain.
+- Continuation artifacts are deliberately not hash-anchored like the receipt. They are pure projections, so lineage verification re-folds them from the ledger — which catches a file regenerated wholesale with a matching hash, and preserves read-compat with packets sealed by an earlier renderer.
+- `verify-lineage` is an offline, directory-based checker that re-walks both chains itself rather than trusting the store's reader. A `LINKED` result is a local structural finding: internal consistency plus a genuine inheritance commitment. It is not cryptographic custody and must never be reported as such.
+
 ## Independent evaluation rule
 
 - The builder and evaluator must be different agents.
