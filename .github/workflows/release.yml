@@ -1,0 +1,113 @@
+# Release on version bump — no terminal, no clicks, no tag pushed by hand.
+#
+# The validator already enforces that the version agrees across plugin.json, package.json, and
+# version.mjs. That single number is therefore a reliable release trigger: when a merge to main
+# changes it, this workflow verifies the tree, tags it, and publishes an installable bundle.
+#
+# Deliberately gated on a *new* version. Re-running on an unchanged version is a no-op, so a
+# re-merge, a revert, or a docs-only push cannot mint a duplicate release.
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      exists: ${{ steps.check.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Never publish an artifact the suite has not passed on the platform users install on.
+      - name: Test adapter
+        run: npm test
+      - name: Validate plugin package
+        run: npm run validate:plugin
+
+      - name: Read adapter version
+        id: read
+        shell: bash
+        run: echo "version=$(node -p "require('./plugins/lyhna/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version is already released
+        id: check
+        shell: bash
+        run: |
+          if git rev-parse "v${{ steps.read.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: verify
+    if: needs.verify.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The bundle preserves the layout the marketplace manifest expects: `.agents/plugins/
+      # marketplace.json` points at `./plugins/lyhna`, so an unzipped release is installable as-is
+      # with `codex plugin marketplace add <folder>` — no clone, no repo, no git.
+      - name: Build the installable bundle
+        run: |
+          version="${{ needs.verify.outputs.version }}"
+          staging="lyhna-codex-adapter-${version}"
+          mkdir -p "${staging}/.agents/plugins"
+          cp -R plugins "${staging}/plugins"
+          cp -R scripts "${staging}/scripts"
+          cp .agents/plugins/marketplace.json "${staging}/.agents/plugins/marketplace.json"
+          cp README.md SPEC.md AGENTS.md "${staging}/"
+          rm -rf "${staging}/plugins/lyhna/test"
+          # A trimmed manifest: the bundle is an install, not a dev checkout. It advertises only
+          # commands that actually work here — the fixtures are stripped, so `npm test` must not be
+          # offered. A bundle that lists a command it cannot run is the same defect this project
+          # exists to catch, one layer out.
+          node -e "
+            const fs = require('fs');
+            const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            fs.writeFileSync('${staging}/package.json', JSON.stringify({
+              name: root.name,
+              private: true,
+              version: '${version}',
+              scripts: {
+                'validate:plugin': root.scripts['validate:plugin'],
+                'verify:lineage': root.scripts['verify:lineage'],
+                key: root.scripts.key
+              }
+            }, null, 2) + '\n');
+          "
+          zip -qr "${staging}.zip" "${staging}"
+          echo "BUNDLE=${staging}.zip" >> "$GITHUB_ENV"
+
+      - name: Tag and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ needs.verify.outputs.version }}"
+          git tag -a "v${version}" -m "v${version}"
+          git push origin "v${version}"
+          gh release create "v${version}" "${BUNDLE}" \
+            --title "v${version}" \
+            --notes "Installable bundle for Codex. Download and unzip, then:
+
+          \`\`\`
+          codex plugin marketplace add <unzipped-folder>
+          codex plugin add lyhna-codex-adapter@lyhna-ai
+          \`\`\`
+
+          Tests and plugin validation passed on windows-latest before this artifact was built.
+          See SPEC.md for the evidence contract and honesty boundaries."
