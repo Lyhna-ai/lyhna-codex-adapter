@@ -86,6 +86,16 @@ export function sanitizeHook(input) {
   return payload;
 }
 
+// A claim is the agent's own assertion, to this user, about this user's work, stored on this
+// user's machine. There is no third party whose privacy is served by hiding it from them — and a
+// claimed-vs-actual system that will not show you the claim has thrown away the half of the diff
+// that only a human can judge. So the text is RETAINED, with secrets scrubbed and length bounded.
+//
+// Withholding is a PROJECTION decision made when a packet leaves the machine (see the run's
+// privacy_mode), never a storage decision made on the owner's behalf. Store it; project it away
+// on the way out.
+export const CLAIM_TEXT_MAX = 500;
+
 export function sanitizeClaim(statement, evidenceRefs = []) {
   const normalizeEvidenceRef = (item) => {
     const text = String(item).trim();
@@ -93,9 +103,12 @@ export function sanitizeClaim(statement, evidenceRefs = []) {
     if (/^[a-f0-9]{64}$/i.test(text)) return `sha256:${text.toLowerCase()}`;
     return `sha256:${sha256(text)}`;
   };
-  return {
+  const payload = {
     statement: structuralSummary(statement, 'Attributed statement'),
     statement_ref: reference(statement),
     evidence_refs: [...new Set(evidenceRefs.map(normalizeEvidenceRef))].sort()
   };
+  const text = boundedText(statement, CLAIM_TEXT_MAX);
+  if (text) payload.statement_text = text;
+  return payload;
 }

@@ -45,6 +45,7 @@ export const toolDefinitions = [
       child_capability: { type: 'string' },
       mode: { type: 'string', enum: ['full', 'pr_only'], description: '"full" for any request to build, change, fix, continue, or delegate work; "pr_only" only for a solely retrospective PR examination; prefer "full" when ambiguous.' },
       objective: { type: 'string' },
+      privacy_mode: { type: 'string', enum: ['verified_context', 'proof'], description: 'verified_context (default) retains claim text for the owner; proof projects it away for a packet that leaves the machine. Fixed at run start and sealed into the chain.' },
       continues_from: { type: 'string', description: 'capsule_ref of the prior window this run continues. Recorded as an inheritance edge inside this run\'s hash chain; the prior state hash is read from the local packet, never accepted from the caller.' },
       statement: { type: 'string' },
       evidence_refs: { type: 'array', items: { type: 'string' } },
@@ -75,11 +76,13 @@ export function createService({ githubRunner } = {}) {
           const state = beginRun(args.session_capability, {
             mode: args.mode,
             objective: args.objective,
-            continuesFrom: args.continues_from
+            continuesFrom: args.continues_from,
+            privacyMode: args.privacy_mode
           });
           return {
             run_id: state.id,
             mode: state.mode,
+            privacy_mode: state.privacy_mode,
             objective_origin: state.objective_origin,
             status: 'OPEN',
             open_predecessors: state.open_predecessors || [],

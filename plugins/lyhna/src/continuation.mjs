@@ -51,7 +51,7 @@ function countBy(items, key) {
  * resolve may still be valid elsewhere (another run, another surface). Calling that "unsupported"
  * would be the overclaim this system exists to prevent.
  */
-export function labelClaims(events) {
+export function labelClaims(events, privacyMode = 'verified_context') {
   const witnessedRefs = new Set(events.map((event) => `sha256:${event.event_hash}`));
   return events
     .filter((event) => event.type === 'builder_claim')
@@ -61,7 +61,11 @@ export function labelClaims(events) {
       const support = refs.length === 0
         ? 'UNSUPPORTED'
         : unresolved.length > 0 ? 'UNRESOLVED_EVIDENCE' : 'SUPPORTED';
-      return {
+      // Verified Context is the default because the owner reading their own machine should see
+      // their own claim. Proof Mode projects the text away for a packet that leaves the machine —
+      // the support label and its evidence refs survive either way, so a content-blind packet is
+      // still auditable, just not readable.
+      const claim = {
         seq: event.seq,
         ref: `sha256:${event.event_hash}`,
         statement: event.payload?.statement ?? '',
@@ -70,8 +74,17 @@ export function labelClaims(events) {
         unresolved_refs: unresolved,
         support
       };
+      if (privacyMode !== 'proof' && event.payload?.statement_text) {
+        claim.statement_text = event.payload.statement_text;
+      }
+      return claim;
     })
     .sort((a, b) => a.seq - b.seq);
+}
+
+/** What a human should read for this claim: the words when retained, the shape when projected away. */
+export function claimText(claim) {
+  return claim.statement_text || claim.statement;
 }
 
 /** Structural facts this run actually observed. Counts and refs only — never interpretation. */
@@ -123,7 +136,7 @@ function buildSettled(state, events, claims) {
   }
   for (const claim of claims) {
     if (claim.support !== 'SUPPORTED') continue;
-    settled.push(entry(`Builder claim supported by witnessed evidence: ${claim.statement}`, claim.ref));
+    settled.push(entry(`Builder claim supported by witnessed evidence: ${claimText(claim)}`, claim.ref));
   }
   return settled;
 }
@@ -165,7 +178,7 @@ function buildOpen(state, events, claims) {
   }
   for (const claim of claims) {
     if (claim.support === 'SUPPORTED') continue;
-    open.push(entry(`Builder claim is ${claim.support} within configured coverage: ${claim.statement}`, claim.ref));
+    open.push(entry(`Builder claim is ${claim.support} within configured coverage: ${claimText(claim)}`, claim.ref));
   }
   return open;
 }
@@ -204,6 +217,7 @@ export function buildCarryForward(capsule) {
   return {
     run_id: capsule.run_id,
     mode: capsule.mode,
+    privacy_mode: capsule.privacy_mode,
     status: capsule.status,
     objective: capsule.objective,
     objective_origin: capsule.objective_origin,
@@ -226,12 +240,14 @@ export function deriveCapsuleRef(capsule) {
 }
 
 export function buildContinuation(state, events) {
-  const claims = labelClaims(events);
+  const privacyMode = state.privacy_mode || 'verified_context';
+  const claims = labelClaims(events, privacyMode);
   const open = buildOpen(state, events, claims);
   const capsule = {
     schema: CONTINUATION_VERSION,
     run_id: state.id,
     mode: state.mode,
+    privacy_mode: privacyMode,
     status: state.sealed ? 'SEALED' : state.close_requested ? 'CLOSE_REQUESTED_NOT_SEALED' : 'OPEN',
     objective: state.objective,
     objective_origin: state.objective_origin,

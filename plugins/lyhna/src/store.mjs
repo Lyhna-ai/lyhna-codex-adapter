@@ -528,10 +528,22 @@ function requireChild(capability) {
   return { record, runId: record.parent_run_id, state };
 }
 
-export function beginRun(capability, { mode, objective = '', continuesFrom = '' }) {
+export const PRIVACY_MODES = new Set(['verified_context', 'proof']);
+
+// Fixed at run start and sealed into run_begun, NEVER read from the environment at render time.
+// Rendering must stay a pure function of the packet: if the same ledger could render differently
+// depending on an env var, re-verification would fail and determinism would be gone.
+function resolvePrivacyMode(requested) {
+  const candidate = String(requested || process.env.LYHNA_PRIVACY_MODE || 'verified_context').trim();
+  assert(PRIVACY_MODES.has(candidate), 'INVALID_PRIVACY_MODE');
+  return candidate;
+}
+
+export function beginRun(capability, { mode, objective = '', continuesFrom = '', privacyMode = '' }) {
   const parent = getCapability(capability);
   assert(parent.kind === 'parent', 'PARENT_CAPABILITY_REQUIRED');
   assert(mode === 'full' || mode === 'pr_only', 'INVALID_MODE');
+  const privacy = resolvePrivacyMode(privacyMode);
   return withLock(sessionLockPath(capability), () => {
     const pendingPath = join(root(), 'pending', `${parent.session_hash}.json`);
     const pending = readJson(pendingPath, null);
@@ -564,6 +576,7 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '' 
       schema: 'lyhna.codex.run.v0',
       id: runId,
       mode,
+      privacy_mode: privacy,
       sealed: false,
       parent_capability_hash: sha256(capability),
       objective: pending?.summary || promptSynopsis(objective),
@@ -583,7 +596,7 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '' 
       child_receipts: {}
     };
     mkdirSync(runDir(runId), { recursive: true });
-    const runBegunPayload = { mode, objective_origin: state.objective_origin };
+    const runBegunPayload = { mode, privacy_mode: privacy, objective_origin: state.objective_origin };
     if (pending) runBegunPayload.invocation = { matched_form: pending.matched_form, mention_offset: pending.mention_offset };
     if (openPredecessors.length) runBegunPayload.open_predecessors = openPredecessors;
     // Sealed into run_begun, therefore inside the hash chain, therefore covered by the seal anchor:

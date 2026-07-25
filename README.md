@@ -14,7 +14,7 @@ Every Stop writes `HANDOFF.md` and `continuation.json` into the run packet, fold
 npm run verify:lineage -- <prior-run-dir> <current-run-dir> [...more]
 ```
 
-Claims carried forward are labeled against the record — `SUPPORTED`, `UNSUPPORTED`, or `UNRESOLVED_EVIDENCE` — so the next window knows what the last one actually established and what it merely asserted. See [SPEC.md](./SPEC.md#continuation-and-lineage-across-context-windows).
+Claims carried forward are labeled against the record — `SUPPORTED`, `UNSUPPORTED`, or `UNRESOLVED_EVIDENCE` — and the claim text is retained, so the next window sees *which* claim was unsupported, not just how many. Pass `privacy_mode: "proof"` at `begin_run` when a packet is meant to leave your machine: it projects claim text out while keeping every support label and evidence reference. See [SPEC.md](./SPEC.md#continuation-and-lineage-across-context-windows).
 
 ## Install from this checkout
 

@@ -48,9 +48,9 @@ function evaluateAndRetrieve(sessionId, parent, snapshot, agentId) {
 }
 
 /** Drive one window from begin to seal, returning its packet directory and sealed capsule. */
-function runWindow({ sessionId, objective, continuesFrom, claims = [] }) {
+function runWindow({ sessionId, objective, continuesFrom, privacyMode, claims = [] }) {
   const parent = mintSession({ sessionId });
-  const run = beginRun(parent, { mode: 'full', objective, continuesFrom });
+  const run = beginRun(parent, { mode: 'full', objective, continuesFrom, privacyMode });
   for (const claim of claims) recordClaim(parent, claim.statement, claim.evidence_refs || []);
   evaluateAndRetrieve(sessionId, parent, stableSnapshot, `${sessionId}-evaluator`);
   requestClose(parent, 'Window complete.');
@@ -220,4 +220,76 @@ test('the lineage checker re-walks the chain itself rather than trusting the sto
   const broken = verifyLedgerChain(directory);
   assert.equal(broken.ok, false);
   assert.match(broken.detail, /hash does not match its content/);
+});
+
+test('the owner sees their own claim: verified context retains the words', (t) => {
+  isolatedData(t);
+  const { directory } = runWindow({
+    sessionId: 'plain',
+    objective: 'Read my own claims.',
+    claims: [{ statement: 'I deployed the migration to production and it succeeded.' }]
+  });
+
+  const capsule = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8'));
+  assert.equal(capsule.privacy_mode, 'verified_context');
+  assert.equal(capsule.claims[0].statement_text, 'I deployed the migration to production and it succeeded.');
+
+  const handoff = readFileSync(join(directory, 'HANDOFF.md'), 'utf8');
+  assert.match(handoff, /I deployed the migration to production and it succeeded\./);
+  assert.ok(capsule.open.some((item) => /I deployed the migration to production/.test(item.statement)));
+});
+
+test('proof mode projects the words away but keeps the verdict auditable', (t) => {
+  isolatedData(t);
+  const { directory } = runWindow({
+    sessionId: 'blind',
+    objective: 'Share this packet.',
+    privacyMode: 'proof',
+    claims: [{ statement: 'I deployed the migration to production and it succeeded.' }]
+  });
+
+  const capsule = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8'));
+  assert.equal(capsule.privacy_mode, 'proof');
+  assert.equal(capsule.claims[0].statement_text, undefined);
+  assert.equal(capsule.claims[0].support, 'UNSUPPORTED');
+  assert.ok(capsule.claims[0].statement_ref, 'the claim stays addressable by hash');
+
+  const handoff = readFileSync(join(directory, 'HANDOFF.md'), 'utf8');
+  assert.doesNotMatch(handoff, /I deployed the migration/);
+  assert.match(handoff, /claim text is projected away in this packet/);
+  assert.match(handoff, /UNSUPPORTED/);
+  assert.doesNotMatch(readFileSync(join(directory, 'receipt.json'), 'utf8'), /I deployed the migration/);
+});
+
+test('secrets are still scrubbed from retained claim text', (t) => {
+  isolatedData(t);
+  const { directory } = runWindow({
+    sessionId: 'secrets',
+    objective: 'Do not leak.',
+    claims: [{ statement: 'Deployed with token=ghp_abcdefghijklmnopqrstuvwxyz012345 as configured.' }]
+  });
+
+  const handoff = readFileSync(join(directory, 'HANDOFF.md'), 'utf8');
+  assert.match(handoff, /Deployed with/);
+  assert.doesNotMatch(handoff, /ghp_abcdefghijklmnopqrstuvwxyz012345/);
+  assert.match(handoff, /REDACTED/);
+});
+
+test('privacy mode is sealed into the chain, so rendering never depends on the environment', (t) => {
+  isolatedData(t);
+  const { run, directory } = runWindow({
+    sessionId: 'sealed-mode',
+    objective: 'Determinism.',
+    privacyMode: 'proof',
+    claims: [{ statement: 'A claim whose words are withheld.' }]
+  });
+
+  const runBegun = getRunForTesting(run.id).events.find((event) => event.type === 'run_begun');
+  assert.equal(runBegun.payload.privacy_mode, 'proof');
+
+  const before = readFileSync(join(directory, 'continuation.json'), 'utf8');
+  process.env.LYHNA_PRIVACY_MODE = 'verified_context';
+  t.after(() => { delete process.env.LYHNA_PRIVACY_MODE; });
+  const { state, events } = getRunForTesting(run.id);
+  assert.equal(canonicalJson(buildContinuation(state, events), true), before);
 });

@@ -1,3 +1,15 @@
+# Lyhna — Product Thesis v2 (ADOPTED)
+
+> **ADOPTION RECORD — 2026-07-25.** Adam ratified this thesis. It supersedes `THESIS.md` (2026-06-13) and is now canonical. The body below §1 is preserved verbatim as the adoption terms require; nothing in it was edited, softened, or "improved." Two amendments are recorded below, both driven by evidence found after 2026-07-15 — neither reverses a v2 position.
+>
+> **Amendment A — the continuation lane is a first-class surface, not a receipt field.**
+> §4 named `HANDOFF.md` / `handoff.json` / the continuation object as surfaces of the trust-labeled receipt. Evidence since: the failure that actually costs users is not a bad receipt, it is a **bad handoff between context windows**. A window ends when it becomes expensive, the outgoing agent writes its own summary, and drift compounds window over window until the thread is no longer describing the same project — with no way for a non-engineer to detect it. So the continuation capsule and its **cross-window lineage check** are promoted to a named product surface in their own right. Corollary, now constitutional: *the agent does not write its own report card.* The handoff is folded from the ledger by the supervisor path, and whether window N+1 truly inherited window N is a **mechanically verifiable question**, not a judgment call. Shipped in `lyhna-codex-adapter` 0.1.28.
+>
+> **Amendment B — Verified Context is the default; content-blindness is an export projection, not a storage policy.**
+> The adapter stored builder claims content-blind, reducing an agent's own assertion — to its own owner, about that owner's work, on that owner's machine — to a word count. That is reversed. A claimed-vs-actual product that will not show you the claim has discarded the half of the diff only a human can judge, and there is no third party whose privacy was being served. Claim text is now **retained**, with secrets scrubbed and length bounded. Withholding became `privacy_mode: proof`, a projection applied when a packet **leaves** the machine, fixed at run start and sealed into the chain so rendering stays deterministic. What is *not* reversed: secrets, credentials, environment values, full tool output, and full command output remain unstored — those protect the owner when a packet is shared, rather than protecting anything from the owner. Shipped in `lyhna-codex-adapter` 0.1.29.
+
+## Original draft header (preserved)
+
 # Lyhna — Product Thesis v2 (DRAFT FOR ADAM'S DECISION)
 
 > **Provenance.** Drafted 2026-07-15 by the independent third-party evaluator session, at Adam's direction, after: (a) an evidence-bound review of `lyhna-codex-adapter` PR #1; (b) strategy-grade maps of `lyhna-witness` and `lyhna-mcp-proxy`; (c) three independent adversarial reviews of a draft thesis — buyer/GTM, platform/competition, and technical evidence-value (the last grounded in the actual code, with file:line citations); (d) market verification with sources. The full evidence record is `LYHNA-REVIEW-DOSSIER.md` (companion file).

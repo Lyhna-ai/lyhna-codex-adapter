@@ -64,6 +64,7 @@ export function renderHandoffMarkdown(capsule) {
     `- Status: \`${capsule.status}\``,
     `- Capsule ref: \`${capsule.capsule_ref}\``,
     `- Carry-forward state hash: \`${capsule.state_hash}\``,
+    `- Privacy mode: \`${capsule.privacy_mode}\`${capsule.privacy_mode === 'proof' ? ' — claim text is projected away in this packet' : ''}`,
     `- Continues from: ${capsule.inherits ? `\`${capsule.inherits.capsule_ref}\`` : '_no prior capsule declared_'}`,
     '',
     '## Paste this into the next window',
@@ -89,7 +90,8 @@ export function renderHandoffMarkdown(capsule) {
     lines.push('| Support | Claim | Evidence |', '| --- | --- | --- |');
     for (const claim of capsule.claims) {
       const evidence = claim.evidence_refs.length ? claim.evidence_refs.join('<br>') : '_none cited_';
-      lines.push(`| ${SUPPORT_MARK[claim.support] || claim.support} | ${claim.statement} | ${evidence} |`);
+      const text = (claim.statement_text || claim.statement).replaceAll('|', '\\|');
+      lines.push(`| ${SUPPORT_MARK[claim.support] || claim.support} | ${text} | ${evidence} |`);
     }
     lines.push('');
   }
