@@ -9,7 +9,7 @@ import {
   recordEvaluation, requestClose, sealChildByAgent
 } from '../src/store.mjs';
 import {
-  DEFAULT_KEY_ID, exportKey, importKey, keyPath, loadOrCreateKeypair,
+  DEFAULT_KEY_ID, exportKey, importKey, keyPath, keyProtection, loadOrCreateKeypair,
   signCapsule, verifyCapsuleSignature
 } from '../src/signing.mjs';
 import { buildContinuation, deriveCapsuleRef } from '../src/continuation.mjs';
@@ -121,11 +121,27 @@ test('an unsigned capsule is reported honestly rather than treated as tampered',
   assert.equal(report.ok, true, 'an unsigned but internally consistent chain still links');
 });
 
-test('the private key is written owner-only and round-trips through export/import', (t) => {
+test('the private key is protected as far as the platform allows, and says so honestly', (t) => {
+  isolatedData(t);
+  loadOrCreateKeypair();
+  const protection = keyProtection();
+
+  if (protection.mode_enforced) {
+    assert.equal(statSync(keyPath()).mode & 0o777, 0o600, 'POSIX must actually enforce owner-only');
+    assert.match(protection.statement, /0600/);
+  } else {
+    // Windows cannot express a POSIX mode. Claiming owner-only there would be false, so the
+    // reported protection must name the ACL it actually relies on instead.
+    assert.equal(protection.platform, 'win32');
+    assert.match(protection.statement, /ACL inherited from its directory/);
+    assert.ok(statSync(keyPath()).isFile(), 'the key is still written');
+  }
+});
+
+test('key material round-trips through export/import', (t) => {
   isolatedData(t);
   const original = loadOrCreateKeypair();
 
-  assert.equal(statSync(keyPath()).mode & 0o777, 0o600);
   assert.throws(() => importKey(exportKey()), /KEY_ALREADY_EXISTS/);
 
   const material = exportKey();

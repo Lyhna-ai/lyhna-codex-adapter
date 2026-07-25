@@ -12,14 +12,19 @@
 // The exported file contains a PRIVATE KEY. Treat it like an SSH key.
 
 import { readFileSync } from 'node:fs';
-import { exportKey, importKey, keyPath, loadOrCreateKeypair } from '../plugins/lyhna/src/signing.mjs';
+import { exportKey, importKey, keyPath, keyProtection, loadOrCreateKeypair } from '../plugins/lyhna/src/signing.mjs';
 
 const [command, keyId = 'default'] = process.argv.slice(2);
 
 try {
   if (command === 'show') {
     const keypair = loadOrCreateKeypair(keyId);
-    process.stdout.write(`key_id:     ${keypair.key_id}\npublic_key: ${keypair.public_key}\nstored_at:  ${keyPath(keyId)}\n`);
+    process.stdout.write(
+      `key_id:     ${keypair.key_id}\n`
+      + `public_key: ${keypair.public_key}\n`
+      + `stored_at:  ${keyPath(keyId)}\n`
+      + `protection: ${keyProtection().statement}\n`
+    );
   } else if (command === 'export') {
     process.stdout.write(exportKey(keyId));
   } else if (command === 'import') {

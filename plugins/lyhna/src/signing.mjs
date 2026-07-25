@@ -27,11 +27,35 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign as edSign, verify as edVerify } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { platform } from 'node:process';
 
 import { canonicalJson, dataRoot } from './util.mjs';
 
 export const SIGNATURE_ALGORITHM = 'ed25519';
 export const DEFAULT_KEY_ID = 'default';
+
+/**
+ * How the private key is actually protected on this platform — stated honestly, because it differs.
+ *
+ * On POSIX the file is written 0600 and is genuinely owner-only. On Windows `chmod` cannot express
+ * a POSIX mode at all (Node maps it only to the read-only attribute), so the key is protected by
+ * the ACL it INHERITS from its directory. Under the default data root that is `%USERPROFILE%`,
+ * which is user-restricted — but if LYHNA_CODEX_DATA points somewhere broadly readable, so is the
+ * key. Saying "owner-only" flatly would be false on the platform this product targets first.
+ */
+export function keyProtection() {
+  return platform === 'win32'
+    ? {
+      platform: 'win32',
+      mode_enforced: false,
+      statement: 'Windows cannot express POSIX file modes; the key is protected by the ACL inherited from its directory. Under %USERPROFILE% that is user-restricted. A data root on a shared or world-readable path leaves the key equally readable.'
+    }
+    : {
+      platform,
+      mode_enforced: true,
+      statement: 'The key file is written 0600 (owner read/write only).'
+    };
+}
 
 // SPKI DER header for an Ed25519 public key, followed by the 32 raw key bytes. Matching
 // lyhna-verify's constant exactly is what lets it consume these public keys unchanged.
@@ -39,6 +63,23 @@ const SPKI_ED25519_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
 export function keyPath(keyId = DEFAULT_KEY_ID) {
   return join(dataRoot(), 'keys', `${keyId}.json`);
+}
+
+/**
+ * Write key material as restrictively as the platform allows, then rename into place — so the file
+ * is never briefly readable between creation and hardening. On Windows the mode request is accepted
+ * and ignored by the OS; see `keyProtection()` for what actually guards it there.
+ */
+function writeKeyFile(path, record) {
+  mkdirSync(dirname(path), { recursive: true });
+  const temp = `${path}.${process.pid}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flush: true });
+  try {
+    chmodSync(temp, 0o600);
+  } catch {
+    // Non-POSIX filesystems reject the mode outright. Not a failure — just not a guarantee.
+  }
+  renameSync(temp, path);
 }
 
 function rawPublicKeyHex(publicKey) {
@@ -76,13 +117,7 @@ export function loadOrCreateKeypair(keyId = DEFAULT_KEY_ID) {
     public_key: rawPublicKeyHex(publicKey),
     private_key_pem: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()
   };
-  mkdirSync(dirname(path), { recursive: true });
-  // Written 0600 and renamed into place: the private key must never exist group/world-readable,
-  // not even for the instant between create and chmod.
-  const temp = `${path}.${process.pid}.tmp`;
-  writeFileSync(temp, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flush: true });
-  chmodSync(temp, 0o600);
-  renameSync(temp, path);
+  writeKeyFile(path, record);
   return { key_id: keyId, privateKey, public_key: record.public_key };
 }
 
@@ -155,10 +190,6 @@ export function importKey(material, { keyId = DEFAULT_KEY_ID, overwrite = false 
   if (derived !== record.public_key) throw Object.assign(new Error('KEY_MATERIAL_INCONSISTENT'), { code: 'KEY_MATERIAL_INCONSISTENT' });
   const path = keyPath(keyId);
   if (existsSync(path) && !overwrite) throw Object.assign(new Error('KEY_ALREADY_EXISTS'), { code: 'KEY_ALREADY_EXISTS' });
-  mkdirSync(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.tmp`;
-  writeFileSync(temp, `${JSON.stringify({ ...record, key_id: keyId }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flush: true });
-  chmodSync(temp, 0o600);
-  renameSync(temp, path);
+  writeKeyFile(path, { ...record, key_id: keyId });
   return { key_id: keyId, public_key: record.public_key };
 }
