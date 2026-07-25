@@ -24,7 +24,7 @@ function requireSnapshot(state, snapshotId) {
 }
 
 export const toolDefinitions = [
-  ['begin_run', 'Start an explicitly requested Lyhna run. Use mode "full" whenever the request asks to build, change, fix, continue, or delegate work; use "pr_only" only for a solely retrospective examination of an existing PR; when ambiguous, choose "full".', ['session_capability', 'mode']],
+  ['begin_run', 'Start an explicitly requested Lyhna run. Use mode "full" whenever the request asks to build, change, fix, continue, or delegate work; use "pr_only" only for a solely retrospective examination of an existing PR; when ambiguous, choose "full". Pass continues_from with a prior capsule_ref when this window continues an earlier one.', ['session_capability', 'mode']],
   ['record_claim', 'Record a builder assertion with optional evidence references.', ['session_capability', 'statement']],
   ['snapshot_pr', 'Capture sanitized GitHub metadata at an exact observed PR head.', ['session_capability', 'repository', 'pr_number']],
   ['begin_evaluation', 'Create an evaluator request and detached exact-head checkout. Optional trigger names why this evaluation runs.', ['session_capability', 'pr_snapshot_id', 'source_cwd']],
@@ -45,6 +45,8 @@ export const toolDefinitions = [
       child_capability: { type: 'string' },
       mode: { type: 'string', enum: ['full', 'pr_only'], description: '"full" for any request to build, change, fix, continue, or delegate work; "pr_only" only for a solely retrospective PR examination; prefer "full" when ambiguous.' },
       objective: { type: 'string' },
+      privacy_mode: { type: 'string', enum: ['verified_context', 'proof'], description: 'verified_context (default) retains claim text for the owner; proof projects it away for a packet that leaves the machine. Fixed at run start and sealed into the chain.' },
+      continues_from: { type: 'string', description: 'capsule_ref of the prior window this run continues. Recorded as an inheritance edge inside this run\'s hash chain; the prior state hash is read from the local packet, never accepted from the caller.' },
       statement: { type: 'string' },
       evidence_refs: { type: 'array', items: { type: 'string' } },
       repository: { type: 'string' },
@@ -71,13 +73,20 @@ export function createService({ githubRunner } = {}) {
   async function dispatch(name, args) {
       switch (name) {
         case 'begin_run': {
-          const state = beginRun(args.session_capability, { mode: args.mode, objective: args.objective });
+          const state = beginRun(args.session_capability, {
+            mode: args.mode,
+            objective: args.objective,
+            continuesFrom: args.continues_from,
+            privacyMode: args.privacy_mode
+          });
           return {
             run_id: state.id,
             mode: state.mode,
+            privacy_mode: state.privacy_mode,
             objective_origin: state.objective_origin,
             status: 'OPEN',
-            open_predecessors: state.open_predecessors || []
+            open_predecessors: state.open_predecessors || [],
+            inherits: state.inherits || null
           };
         }
         case 'record_claim':

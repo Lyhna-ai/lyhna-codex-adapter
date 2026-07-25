@@ -273,7 +273,19 @@ function buildHeadChains(state, events) {
   return chains.sort((a, b) => codepointCompare(`${a.repository}#${a.pr_number}`, `${b.repository}#${b.pr_number}`));
 }
 
+// Proof Mode strips retained claim text on the way OUT. The words stay in the local ledger — this
+// is a projection for a packet that leaves the owner's machine, not a decision about what the owner
+// is allowed to see. The privacy mode is read from sealed state, never from the environment, so
+// re-rendering a packet always reproduces the anchored bytes.
+function projectPayload(payload, privacyMode) {
+  if (privacyMode !== 'proof' || !payload || typeof payload !== 'object') return payload;
+  if (!('statement_text' in payload)) return payload;
+  const { statement_text: _withheld, ...rest } = payload;
+  return rest;
+}
+
 export function buildReceipt(state, events) {
+  const privacyMode = state.privacy_mode || 'verified_context';
   const snapshots = Object.values(state.pr_snapshots || {}).map((snapshot) => ({
     id: snapshot.id,
     repository: snapshot.repository,
@@ -318,13 +330,14 @@ export function buildReceipt(state, events) {
     seal: buildSeal(state, events),
     open_predecessors: buildOpenPredecessors(state),
     coverage: buildCoverage(state, events),
+    privacy_mode: privacyMode,
     evidence: events.map((event) => ({
       seq: event.seq,
       ref: `sha256:${event.event_hash}`,
       type: event.type,
       origin: event.origin,
       label: eventLabel(event),
-      payload: event.payload
+      payload: projectPayload(event.payload, privacyMode)
     })),
     pr_snapshots: snapshots,
     pr_head_chains: buildHeadChains(state, events),

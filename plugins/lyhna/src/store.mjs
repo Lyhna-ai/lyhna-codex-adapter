@@ -12,6 +12,8 @@ import { join } from 'node:path';
 import { atomicWriteJson, atomicWriteText, assert, canonicalJson, dataRoot, ORIGINS, readJson, sha256, withLock } from './util.mjs';
 import { boundedText, promptSynopsis, reference, sanitizeClaim, structuralSummary } from './redact.mjs';
 import { renderReceiptJson, renderReceiptMarkdown } from './receipt.mjs';
+import { buildContinuation, renderContinuationJson } from './continuation.mjs';
+import { renderHandoffMarkdown } from './handoff.mjs';
 import { ADAPTER_VERSION } from './version.mjs';
 
 const ZERO_HASH = '0'.repeat(64);
@@ -97,6 +99,55 @@ function checkpointAnchorPath(runId) {
 
 function receiptIndexPath(receiptId) {
   return join(root(), 'receipt-index', `${sha256(receiptId)}.json`);
+}
+
+// The window-handoff artifacts: what the NEXT context window inherits from this run.
+//
+// Deliberately NOT anchored by hash the way the receipt is. Both files are pure, deterministic
+// projections of (state, ledger), so the lineage checker re-FOLDS them from the chain instead of
+// comparing a stored hash. Re-folding is the stronger check: a hash comparison only catches an
+// edited file, while a re-fold also catches a file regenerated wholesale with a matching hash.
+// Keeping them out of the anchor payload also preserves read-compat with packets sealed by an
+// earlier renderer, whose anchors have no such fields.
+function writeContinuationArtifacts(runId, state, events) {
+  const capsule = buildContinuation(state, events);
+  atomicWriteText(join(runDir(runId), 'continuation.json'), renderContinuationJson(state, events));
+  atomicWriteText(join(runDir(runId), 'HANDOFF.md'), renderHandoffMarkdown(capsule));
+  return capsule;
+}
+
+// A capsule_ref -> run_id index, so a run started in a LATER session (a new window is a new
+// session_id) can resolve the predecessor it names. Mirrors the receipt index.
+function capsuleIndexPath(capsuleRef) {
+  return join(root(), 'capsule-index', `${sha256(capsuleRef)}.json`);
+}
+
+/**
+ * Resolve a declared predecessor against what this store can actually see.
+ *
+ * The state_hash recorded in the inherits edge is READ FROM THE PRIOR PACKET, never accepted from
+ * the caller. An agent can therefore name a predecessor, but it cannot fabricate what that
+ * predecessor's carry-forward state was — the commitment sealed into this run's chain either
+ * matches the prior packet or the lineage check fails.
+ *
+ * A ref this store cannot see is recorded as UNRESOLVED rather than rejected: the packet may be
+ * genuine and simply live on another machine. Silence would be the overclaim.
+ */
+function resolveContinuesFrom(capsuleRef) {
+  const ref = String(capsuleRef || '').trim();
+  if (!ref) return null;
+  const indexed = readJson(capsuleIndexPath(ref), null);
+  const priorRunId = indexed?.run_id;
+  const published = priorRunId ? readJson(join(runDir(priorRunId), 'continuation.json'), null) : null;
+  if (!published || published.capsule_ref !== ref) {
+    return { capsule_ref: ref, run_id: null, state_hash: null, resolution: 'UNRESOLVED_LOCALLY' };
+  }
+  return {
+    capsule_ref: ref,
+    run_id: priorRunId,
+    state_hash: published.state_hash,
+    resolution: 'RESOLVED_LOCAL_PACKET'
+  };
 }
 
 function sessionLockPath(capability) {
@@ -477,10 +528,22 @@ function requireChild(capability) {
   return { record, runId: record.parent_run_id, state };
 }
 
-export function beginRun(capability, { mode, objective = '' }) {
+export const PRIVACY_MODES = new Set(['verified_context', 'proof']);
+
+// Fixed at run start and sealed into run_begun, NEVER read from the environment at render time.
+// Rendering must stay a pure function of the packet: if the same ledger could render differently
+// depending on an env var, re-verification would fail and determinism would be gone.
+function resolvePrivacyMode(requested) {
+  const candidate = String(requested || process.env.LYHNA_PRIVACY_MODE || 'verified_context').trim();
+  assert(PRIVACY_MODES.has(candidate), 'INVALID_PRIVACY_MODE');
+  return candidate;
+}
+
+export function beginRun(capability, { mode, objective = '', continuesFrom = '', privacyMode = '' }) {
   const parent = getCapability(capability);
   assert(parent.kind === 'parent', 'PARENT_CAPABILITY_REQUIRED');
   assert(mode === 'full' || mode === 'pr_only', 'INVALID_MODE');
+  const privacy = resolvePrivacyMode(privacyMode);
   return withLock(sessionLockPath(capability), () => {
     const pendingPath = join(root(), 'pending', `${parent.session_hash}.json`);
     const pending = readJson(pendingPath, null);
@@ -513,6 +576,7 @@ export function beginRun(capability, { mode, objective = '' }) {
       schema: 'lyhna.codex.run.v0',
       id: runId,
       mode,
+      privacy_mode: privacy,
       sealed: false,
       parent_capability_hash: sha256(capability),
       objective: pending?.summary || promptSynopsis(objective),
@@ -523,15 +587,21 @@ export function beginRun(capability, { mode, objective = '' }) {
       ledger_tip: ZERO_HASH,
       close_requested: null,
       open_predecessors: openPredecessors,
+      // The lineage edge to the window this run continues. Resolved locally, never taken on the
+      // agent's word; null when no predecessor was declared.
+      inherits: resolveContinuesFrom(continuesFrom),
       pr_snapshots: {},
       evaluations: {},
       children: {},
       child_receipts: {}
     };
     mkdirSync(runDir(runId), { recursive: true });
-    const runBegunPayload = { mode, objective_origin: state.objective_origin };
+    const runBegunPayload = { mode, privacy_mode: privacy, objective_origin: state.objective_origin };
     if (pending) runBegunPayload.invocation = { matched_form: pending.matched_form, mention_offset: pending.mention_offset };
     if (openPredecessors.length) runBegunPayload.open_predecessors = openPredecessors;
+    // Sealed into run_begun, therefore inside the hash chain, therefore covered by the seal anchor:
+    // the inheritance claim cannot be added or altered after the fact without breaking the chain.
+    if (state.inherits) runBegunPayload.inherits = state.inherits;
     withLock(lockPath(runId), () => {
       appendEventUnlocked(runId, state, {
         type: 'run_begun',
@@ -1186,6 +1256,8 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     const receiptMarkdown = renderReceiptMarkdown(current, events);
     atomicWriteText(join(runDir(runId), 'receipt.json'), receiptJson);
     atomicWriteText(join(runDir(runId), 'RECEIPT.md'), receiptMarkdown);
+    const capsule = writeContinuationArtifacts(runId, current, events);
+    atomicWriteJson(capsuleIndexPath(capsule.capsule_ref), { run_id: runId, capsule_ref: capsule.capsule_ref });
     atomicWriteJson(anchorPath(runId), {
       run_id: runId,
       final_seq: current.ledger_count,
@@ -1198,7 +1270,14 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     // CZ-14 decision: a sealed packet carries exactly one anchor — remove the checkpoint anchor
     // written by earlier Stops. repairSeal tolerates both presence (interrupted seal) and absence.
     dropCheckpointAnchor(runId);
-    return { status: 'SEALED', run_id: runId, receipt_path: join(runDir(runId), 'RECEIPT.md') };
+    return {
+      status: 'SEALED',
+      run_id: runId,
+      receipt_path: join(runDir(runId), 'RECEIPT.md'),
+      handoff_path: join(runDir(runId), 'HANDOFF.md'),
+      continuation_path: join(runDir(runId), 'continuation.json'),
+      capsule_ref: capsule.capsule_ref
+    };
   });
 }
 
@@ -1248,6 +1327,10 @@ function writeCheckpointArtifacts(runId, state) {
   saveState(state);
   atomicWriteText(join(runDir(runId), 'receipt.json'), receiptJson);
   atomicWriteText(join(runDir(runId), 'RECEIPT.md'), receiptMarkdown);
+  // Every Stop refreshes the handoff, so a window that is abandoned rather than closed still leaves
+  // a current continuation for the next one. This is the case that matters most in practice: the
+  // human switches windows because the window got expensive, not because the work reached a close.
+  writeContinuationArtifacts(runId, state, events);
   atomicWriteJson(checkpointAnchorPath(runId), {
     run_id: runId,
     as_of_seq: coversSeq,

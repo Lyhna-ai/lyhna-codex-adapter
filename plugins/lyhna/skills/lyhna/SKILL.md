@@ -20,7 +20,7 @@ Use `mode: "full"` whenever the request asks to build, change, fix, continue, or
 ## Start a full witnessed run
 
 1. Read the `LYHNA_SESSION_CAPABILITY` supplied in SessionStart context.
-2. Call `begin_run` with `mode: "full"` before consequential work. Preserve the user's objective without strengthening it.
+2. Call `begin_run` with `mode: "full"` before consequential work. Preserve the user's objective without strengthening it. If this window continues an earlier one, pass that window's `capsule_ref` as `continues_from`.
 3. Use `record_claim` for consequential completion statements, citing event or artifact references when available.
 4. Build normally. Lyhna hooks record only their supported lifecycle coverage.
 5. When a PR exists, call `snapshot_pr` for the repository and PR number.
@@ -32,6 +32,20 @@ Use `mode: "full"` whenever the request asks to build, change, fix, continue, or
 11. Call `request_close`. The next Stop hook seals only if every ordinary child has stopped with a sealed lifecycle receipt and required evaluator receipt retrieval is complete.
 
 Every Stop hook writes a checkpoint packet — the current `receipt.json`, `RECEIPT.md`, and a `checkpoint-anchor.json` — so the run is a verifiable packet at its latest checkpoint even before it seals. The receipt face states its lifecycle honestly: `SEALED`; close-requested-but-not-yet-sealed, with the deferred-close blockers surfaced as observations; or `OPEN` with no close request observed. At seal the single seal anchor replaces the checkpoint anchor. This is observation, never an intent judgment.
+
+## Continue across context windows
+
+A long task outlives one context window. Switching windows is normal and should be cheap; what makes it expensive is that the handoff is usually a document the outgoing agent writes about itself, so errors compound window over window.
+
+Every Stop writes `continuation.json` and `HANDOFF.md` into the run packet, folded from the hash-chained ledger by the hook path. You do not author these files and cannot edit them. Do not write a separate handoff summary of your own and do not restate their contents as if you had verified them.
+
+1. When a window is ending, point the user at `HANDOFF.md` in the run packet. Its fenced block is what they paste into the next window.
+2. In the next window, call `begin_run` with `continues_from` set to the prior `capsule_ref`. Lyhna resolves that reference against the local packet and records the prior carry-forward state hash itself; a reference it cannot resolve is recorded as `UNRESOLVED_LOCALLY` rather than rejected or assumed.
+3. Claim text is retained by default (`privacy_mode: verified_context`), so the capsule names which claim is unsupported rather than only how many. Use `privacy_mode: "proof"` at `begin_run` only when the packet is meant to leave the owner's machine; it projects claim text out of the receipt and continuation while keeping every support label and evidence reference. The mode is fixed at run start and cannot be changed afterward.
+4. Treat every claim the capsule labels `UNSUPPORTED` or `UNRESOLVED_EVIDENCE` as unverified. Re-check it in this window before relying on it. A prior window's confidence is not evidence.
+5. A human can verify the chain independently with `node scripts/verify-lineage.mjs <prior-run-dir> <current-run-dir>`. Never claim a chain is verified that you have not seen that checker pass.
+
+Lyhna reports whether a window inherited what it says it inherited. It does not judge whether the continuation was a good idea.
 
 ## Examine an existing PR
 

@@ -94,7 +94,7 @@ test('a plain checkpoint writes an anchor and receipts, and the face reads OPEN'
   const anchorEvent = events.at(-1);
   assert.equal(anchorEvent.type, 'checkpoint_anchor');
   assert.equal(anchorEvent.payload.covers_seq, events.length - 1);
-  assert.equal(anchorEvent.payload.receipt_renderer, '0.1.27');
+  assert.equal(anchorEvent.payload.receipt_renderer, '0.1.29');
   assert.equal(anchorEvent.payload.receipt_json_hash, sha256(readFileSync(join(directory, 'receipt.json'), 'utf8')));
   assert.equal(anchorEvent.payload.receipt_markdown_hash, sha256(readFileSync(join(directory, 'RECEIPT.md'), 'utf8')));
   const anchor = readAnchor(directory);
@@ -102,7 +102,7 @@ test('a plain checkpoint writes an anchor and receipts, and the face reads OPEN'
   assert.equal(anchor.as_of_seq, events.length - 1);
   assert.equal(anchor.anchor_event_seq, anchorEvent.seq);
   assert.equal(anchor.tip_hash, events.at(-2).event_hash);
-  assert.equal(anchor.receipt_renderer, '0.1.27');
+  assert.equal(anchor.receipt_renderer, '0.1.29');
   assert.equal(anchor.receipt_json_hash, anchorEvent.payload.receipt_json_hash);
   assert.equal(anchor.receipt_markdown_hash, anchorEvent.payload.receipt_markdown_hash);
 
@@ -115,7 +115,7 @@ test('a plain checkpoint writes an anchor and receipts, and the face reads OPEN'
   assert.match(markdown, /OPEN as of event \d+ — no close request observed\./);
   // The checkpoint event itself precedes its anchor in the ledger.
   assert.equal(events.at(-2).type, 'turn_checkpoint');
-  assert.equal(events.at(-2).payload.receipt_renderer, '0.1.27');
+  assert.equal(events.at(-2).payload.receipt_renderer, '0.1.29');
   // Never an intent judgment.
   assert(!/abandon/i.test(markdown));
 });
@@ -151,7 +151,7 @@ test('a close-deferred checkpoint face states close-requested-not-sealed and lis
   assert(!/\b(approv|refus|block|escalat|certif)/i.test(receipt.lifecycle.statement));
   // The deferred close is itself a checkpoint: close_deferred, then its hash-chained anchor.
   assert.equal(events.at(-2).type, 'close_deferred');
-  assert.equal(events.at(-2).payload.receipt_renderer, '0.1.27');
+  assert.equal(events.at(-2).payload.receipt_renderer, '0.1.29');
   assert.equal(events.at(-1).type, 'checkpoint_anchor');
 });
 
@@ -357,7 +357,7 @@ test('a re-deferred close after intervening events stays fully verifiable and fo
   assert.equal(events.filter((event) => event.type === 'close_deferred').length, 1);
   const anchors = events.filter((event) => event.type === 'checkpoint_anchor');
   assert.equal(anchors.length, 2);
-  assert.equal(anchors.at(-1).payload.receipt_renderer, '0.1.27');
+  assert.equal(anchors.at(-1).payload.receipt_renderer, '0.1.29');
   const clean = verifyRun(run.id);
   assert.equal(clean.status, 'CHECKPOINT_VERIFIED');
   assert.equal(clean.ledger_advanced, false);
@@ -677,7 +677,7 @@ test('a redelivered Stop whose checkpoint is still the ledger tip does not seal'
   appendEvent(run.id, {
     type: 'turn_checkpoint',
     origin: 'runtime_hook',
-    payload: { status: 'OPEN', receipt_renderer: '0.1.27' },
+    payload: { status: 'OPEN', receipt_renderer: '0.1.29' },
     idempotencyKey: 'checkpoint:stop-1'
   });
   const tip = getRunForTesting(run.id);
@@ -704,8 +704,8 @@ test('a redelivered Stop finalizes a seal whose run_sealed event is already in t
   requestClose(parent, 'Please close.');
   // Emulate the crash window: the Stop appended its turn_checkpoint and the run_sealed event, but
   // died before state.sealed / the seal anchor were written (appendEvent saves ledger position only).
-  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
-  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
+  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.29' }, idempotencyKey: 'checkpoint:stop-1' });
+  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.29' }, idempotencyKey: `seal:${run.id}` });
   const crashed = getRunForTesting(run.id);
   assert.equal(crashed.state.sealed, false);
   assert(!existsSync(join(crashed.directory, 'seal-anchor.json')));
@@ -730,8 +730,8 @@ test('a ledger with events after run_sealed fails closed instead of folding them
   const run = beginRun(parent, { mode: 'full', objective: 'Post-seal corruption.' });
   evaluateAndRetrieve(sessionId, parent, { ...stableSnapshot, id: 'pr_postseal', head_before: HEAD_A, head_after: HEAD_A }, 'evaluator-postseal');
   requestClose(parent, 'Please close.');
-  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
-  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
+  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.29' }, idempotencyKey: 'checkpoint:stop-1' });
+  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.29' }, idempotencyKey: `seal:${run.id}` });
   // A stray observation lands AFTER run_sealed. The store API now refuses to create this, so simulate
   // an externally-tampered ledger by writing the line directly.
   rawAppendEvent(getRunForTesting(run.id).directory, { type: 'builder_claim', origin: 'agent_reported', payload: { statement: 'post-seal write' }, idempotencyKey: 'claim:post-seal' });
@@ -749,7 +749,7 @@ test('a redelivered Stop completes an interrupted checkpoint packet', { concurre
   const parent = mintSession({ sessionId, cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'Interrupted checkpoint packet.' });
   // Emulate the crash: turn_checkpoint appended and state saved, but no checkpoint_anchor / receipts.
-  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
+  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.29' }, idempotencyKey: 'checkpoint:stop-1' });
   const before = getRunForTesting(run.id);
   assert.equal(before.events.at(-1).type, 'turn_checkpoint');
   assert.equal(verifyRun(run.id).status, 'OPEN_NO_CHECKPOINT');
@@ -773,12 +773,12 @@ test('a ledger with a second run_sealed after a post-seal write fails closed', {
   const run = beginRun(parent, { mode: 'full', objective: 'Double run_sealed corruption.' });
   evaluateAndRetrieve(sessionId, parent, { ...stableSnapshot, id: 'pr_double', head_before: HEAD_A, head_after: HEAD_A }, 'evaluator-double');
   requestClose(parent, 'Please close.');
-  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
-  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
+  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.29' }, idempotencyKey: 'checkpoint:stop-1' });
+  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.29' }, idempotencyKey: `seal:${run.id}` });
   // The store API refuses post-seal appends; write the tampered continuation directly.
   const { directory } = getRunForTesting(run.id);
   rawAppendEvent(directory, { type: 'builder_claim', origin: 'agent_reported', payload: { statement: 'post-seal write' }, idempotencyKey: 'claim:post-seal' });
-  rawAppendEvent(directory, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: 'seal:duplicate' });
+  rawAppendEvent(directory, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.29' }, idempotencyKey: 'seal:duplicate' });
   // Terminal event is run_sealed, but the FIRST run_sealed is not terminal → corruption, fail closed.
   assert.throws(() => checkpointOrSeal(parent, 'stop-1'), /LOCAL_CHAIN_BROKEN/);
   assert.equal(getRunForTesting(run.id).state.sealed, false);
@@ -794,8 +794,8 @@ test('verifyRun adopts a terminal ledger seal instead of reporting the run open'
   const run = beginRun(parent, { mode: 'full', objective: 'verifyRun adopts a ledger seal.' });
   evaluateAndRetrieve(sessionId, parent, { ...stableSnapshot, id: 'pr_vseal', head_before: HEAD_A, head_after: HEAD_A }, 'evaluator-vseal');
   requestClose(parent, 'Please close.');
-  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
-  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
+  appendEvent(run.id, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.29' }, idempotencyKey: 'checkpoint:stop-1' });
+  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.29' }, idempotencyKey: `seal:${run.id}` });
   assert.equal(getRunForTesting(run.id).state.sealed, false);
   // A reader verifies BEFORE any hook redelivery.
   const result = verifyRun(run.id);
@@ -814,7 +814,7 @@ test('a mutable tool appends nothing after a terminal run_sealed and reports RUN
   const sessionId = 'cz14-postseal-tool';
   const parent = mintSession({ sessionId, cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'Post-seal tool append.' });
-  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
+  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.29' }, idempotencyKey: `seal:${run.id}` });
   const before = getRunForTesting(run.id);
   assert.equal(before.state.sealed, false);
   const eventCount = before.events.length;
@@ -831,7 +831,7 @@ test('begin_run finalizes a durable-sealed prior run instead of reattaching to i
   const sessionId = 'cz16-reattach';
   const parent = mintSession({ sessionId, cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'First run.' });
-  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.27' }, idempotencyKey: `seal:${run.id}` });
+  appendEvent(run.id, { type: 'run_sealed', origin: 'runtime_hook', payload: { status: 'SEALED', receipt_renderer: '0.1.29' }, idempotencyKey: `seal:${run.id}` });
   assert.equal(getRunForTesting(run.id).state.sealed, false);
   // A recovery begin_run must not hand back the sealed-ledger run.
   const next = beginRun(parent, { mode: 'full', objective: 'Second run.' });
@@ -855,7 +855,7 @@ test('a replayed Stop recovers a lagging state prefix before completing the pack
   const statePath = join(directory, 'state.json');
   // Crash after appending turn_checkpoint to events.jsonl but before saveState: ledger has it, state
   // lags. Read state.json directly here — getRunForTesting/readLedger would reconcile and hide the lag.
-  rawAppendEvent(directory, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.27' }, idempotencyKey: 'checkpoint:stop-1' });
+  rawAppendEvent(directory, { type: 'turn_checkpoint', origin: 'runtime_hook', payload: { status: 'OPEN', receipt_renderer: '0.1.29' }, idempotencyKey: 'checkpoint:stop-1' });
   assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).ledger_count, 1);
   // The redelivery completes the packet from the recovered prefix; without the recovery verifyRun
   // would reject the anchor's stale state hash as LOCAL_CHAIN_BROKEN.
