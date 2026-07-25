@@ -14,6 +14,7 @@ import { boundedText, promptSynopsis, reference, sanitizeClaim, structuralSummar
 import { renderReceiptJson, renderReceiptMarkdown } from './receipt.mjs';
 import { buildContinuation, renderContinuationJson } from './continuation.mjs';
 import { renderHandoffMarkdown } from './handoff.mjs';
+import { loadOrCreateKeypair, signCapsule } from './signing.mjs';
 import { ADAPTER_VERSION } from './version.mjs';
 
 const ZERO_HASH = '0'.repeat(64);
@@ -111,9 +112,18 @@ function receiptIndexPath(receiptId) {
 // earlier renderer, whose anchors have no such fields.
 function writeContinuationArtifacts(runId, state, events) {
   const capsule = buildContinuation(state, events);
-  atomicWriteText(join(runDir(runId), 'continuation.json'), renderContinuationJson(state, events));
-  atomicWriteText(join(runDir(runId), 'HANDOFF.md'), renderHandoffMarkdown(capsule));
-  return capsule;
+  // Signing is best-effort at the artifact layer: a machine that cannot mint or read a key still
+  // gets a complete, verifiable-by-hash packet. An UNSIGNED capsule is honest; a packet that
+  // silently failed to write would not be.
+  let published = capsule;
+  try {
+    published = signCapsule(capsule, loadOrCreateKeypair());
+  } catch {
+    published = capsule;
+  }
+  atomicWriteText(join(runDir(runId), 'continuation.json'), canonicalJson(published, true));
+  atomicWriteText(join(runDir(runId), 'HANDOFF.md'), renderHandoffMarkdown(published));
+  return published;
 }
 
 // A capsule_ref -> run_id index, so a run started in a LATER session (a new window is a new

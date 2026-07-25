@@ -110,9 +110,11 @@ test('sealing writes a handoff that carries the unsupported claims forward', (t)
   assert.match(handoff, /have no witnessed support in that run/);
   assert.match(handoff, new RegExp(sealed.capsule_ref));
 
-  // The capsule the handoff renders from must be the run's own fold.
+  // The capsule the handoff renders from must be the run's own fold, plus its signature.
+  const published = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8'));
   const { state, events } = getRunForTesting(run.id);
-  assert.equal(renderHandoffMarkdown(buildContinuation(state, events)), handoff);
+  assert.equal(deriveCapsuleRef(published), buildContinuation(state, events).capsule_ref);
+  assert.equal(renderHandoffMarkdown(published), handoff);
 });
 
 test('every Stop refreshes the handoff, so an abandoned window still hands off', (t) => {
@@ -152,7 +154,8 @@ test('a second window that continues the first verifies as linked', (t) => {
   const report = verifyLineage(first.directory, second.directory);
   assert.equal(report.ok, true, JSON.stringify(report.checks, null, 2));
   assert.ok(report.checks.every((item) => item.ok));
-  assert.match(report.trust_notice, /not cryptographic custody/);
+  assert.match(report.trust_notice, /does NOT prove the observations were true/);
+  assert.match(report.trust_notice, /not custody against the machine that produced the packet/);
 });
 
 test('lineage fails when the second window commits to a different capsule', (t) => {
@@ -287,9 +290,9 @@ test('privacy mode is sealed into the chain, so rendering never depends on the e
   const runBegun = getRunForTesting(run.id).events.find((event) => event.type === 'run_begun');
   assert.equal(runBegun.payload.privacy_mode, 'proof');
 
-  const before = readFileSync(join(directory, 'continuation.json'), 'utf8');
+  const { signature: _published, ...before } = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8'));
   process.env.LYHNA_PRIVACY_MODE = 'verified_context';
   t.after(() => { delete process.env.LYHNA_PRIVACY_MODE; });
   const { state, events } = getRunForTesting(run.id);
-  assert.equal(canonicalJson(buildContinuation(state, events), true), before);
+  assert.equal(canonicalJson(buildContinuation(state, events)), canonicalJson(before));
 });

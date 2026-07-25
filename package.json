@@ -5,6 +5,7 @@
   "scripts": {
     "test": "npm --prefix plugins/lyhna test",
     "validate:plugin": "node scripts/validate-plugin.mjs",
-    "verify:lineage": "node scripts/verify-lineage.mjs"
+    "verify:lineage": "node scripts/verify-lineage.mjs",
+    "key": "node scripts/lyhna-key.mjs"
   }
 }

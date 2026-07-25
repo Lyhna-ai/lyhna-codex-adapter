@@ -31,13 +31,16 @@ import { join } from 'node:path';
 
 import { canonicalJson, sha256 } from './util.mjs';
 import { buildContinuation, buildCarryForward, deriveCapsuleRef } from './continuation.mjs';
+import { verifyCapsuleSignature } from './signing.mjs';
 
 const ZERO_HASH = '0'.repeat(64);
 
 export const LINEAGE_TRUST_NOTICE =
-  'Local structural check only. This verifies internal consistency and the inheritance commitment '
-  + 'between two packets; it is not cryptographic custody and does not prove the packets were never '
-  + 'edited by a process with filesystem access.';
+  'This verifies internal consistency and the inheritance commitment between two packets. A valid '
+  + 'signature proves the holder of that key folded exactly these bytes and that none has changed '
+  + 'since — it does NOT prove the observations were true, and it does NOT defend against the key '
+  + 'holder editing their own ledger before folding. Signing establishes integrity and continuity '
+  + 'in transit and over time; it is not custody against the machine that produced the packet.';
 
 function check(name, ok, detail) {
   return { name, ok, detail };
@@ -97,6 +100,7 @@ export function verifyLineage(priorDirectory, currentDirectory) {
     prior_packet: priorDirectory,
     current_packet: currentDirectory,
     prior_capsule_ref: null,
+    prior_signed_by: null,
     current_run_id: null,
     checks,
     trust_notice: LINEAGE_TRUST_NOTICE
@@ -135,13 +139,28 @@ export function verifyLineage(priorDirectory, currentDirectory) {
     if (!refolded) {
       checks.push(check('prior_continuation_refolds', false, 'prior packet has no state.json to re-fold from'));
     } else {
-      const matches = canonicalJson(refolded) === canonicalJson(published);
+      // Compare WITHOUT the signature block: a fresh fold has no signature, and the signature is
+      // checked separately below. Stripping it here keeps the re-fold a test of the CONTENT.
+      const { signature: _publishedSignature, ...publishedCore } = published;
+      const { signature: _refoldedSignature, ...refoldedCore } = refolded;
+      const matches = canonicalJson(refoldedCore) === canonicalJson(publishedCore);
       checks.push(check(
         'prior_continuation_refolds',
         matches,
         matches ? 're-folding the prior ledger reproduces the published continuation exactly' : 'the published continuation does not match a fresh fold of its own ledger'
       ));
     }
+  }
+
+  // Signature: who folded this, and has a byte changed since. An UNSIGNED capsule is reported as
+  // such rather than failed — a packet can be complete and hash-verifiable without a key, and
+  // calling that tampered would be the overclaim. A signature that is PRESENT and BAD does fail.
+  const signatureResult = verifyCapsuleSignature(published);
+  report.prior_signed_by = signatureResult.public_key;
+  if (!published.signature) {
+    checks.push(check('prior_signature', true, 'unsigned capsule — identity not attested, content still hash-verified'));
+  } else {
+    checks.push(check('prior_signature', signatureResult.ok, `${signatureResult.reason} (key_id ${signatureResult.key_id})`));
   }
 
   // 4. The current packet's inheritance commitment, read from inside its own hash chain.
@@ -185,11 +204,13 @@ export function renderLineageMarkdown(report) {
     `- Prior packet: \`${report.prior_packet}\``,
     `- Current packet: \`${report.current_packet}\``,
     `- Prior capsule ref: \`${report.prior_capsule_ref ?? 'none'}\``,
+    `- Signed by: ${report.prior_signed_by ? `\`${report.prior_signed_by}\`` : '_unsigned_'}`,
     '',
     '## Checks',
     ''
   ];
   for (const item of report.checks) lines.push(`- ${item.ok ? 'PASS' : 'FAIL'} — \`${item.name}\`: ${item.detail}`);
   lines.push('', '## Trust boundary', '', report.trust_notice, '');
+  lines.push('', 'A signature proves who folded a capsule and that it has not changed since. It does not', 'make the observations true.', '');
   return `${lines.join('\n')}\n`;
 }

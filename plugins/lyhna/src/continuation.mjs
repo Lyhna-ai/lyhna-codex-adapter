@@ -233,9 +233,15 @@ export function deriveStateHash(capsule) {
   return sha256(canonicalJson(buildCarryForward(capsule)));
 }
 
-/** `capsule_ref` is the identity a successor run commits to. Derived over the capsule minus itself. */
+/**
+ * `capsule_ref` is the identity a successor run commits to.
+ *
+ * Derived over the capsule minus its own ref AND minus the signature block: the ref names the WORK,
+ * not who attested it. That separation is what lets the same fold be signed by more than one party
+ * (a second reviewer counter-signing later) without changing what the capsule is called.
+ */
 export function deriveCapsuleRef(capsule) {
-  const { capsule_ref: _ignored, ...rest } = capsule;
+  const { capsule_ref: _ignored, signature: _attestation, ...rest } = capsule;
   return sha256(canonicalJson(rest));
 }
 
