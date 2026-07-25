@@ -14,6 +14,8 @@ Every Stop writes `HANDOFF.md` and `continuation.json` into the run packet, fold
 npm run verify:lineage -- <prior-run-dir> <current-run-dir> [...more]
 ```
 
+Each sealed capsule is signed with a local Ed25519 key whose public key travels inside the capsule, so a `capsule_ref` is a durable citation: paste it into notes, a job record, or a PR comment and it still resolves and verifies years later on a machine that never met this one. A signature proves who folded the capsule and that it has not changed — never that the observations were true. Manage the identity with `node scripts/lyhna-key.mjs show|export|import`; there is no recovery if the key is lost, so export it if you want to keep it.
+
 Claims carried forward are labeled against the record — `SUPPORTED`, `UNSUPPORTED`, or `UNRESOLVED_EVIDENCE` — and the claim text is retained, so the next window sees *which* claim was unsupported, not just how many. Pass `privacy_mode: "proof"` at `begin_run` when a packet is meant to leave your machine: it projects claim text out while keeping every support label and evidence reference. See [SPEC.md](./SPEC.md#continuation-and-lineage-across-context-windows).
 
 ## Install from this checkout

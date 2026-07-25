@@ -43,7 +43,8 @@ Every Stop writes `continuation.json` and `HANDOFF.md` into the run packet, fold
 2. In the next window, call `begin_run` with `continues_from` set to the prior `capsule_ref`. Lyhna resolves that reference against the local packet and records the prior carry-forward state hash itself; a reference it cannot resolve is recorded as `UNRESOLVED_LOCALLY` rather than rejected or assumed.
 3. Claim text is retained by default (`privacy_mode: verified_context`), so the capsule names which claim is unsupported rather than only how many. Use `privacy_mode: "proof"` at `begin_run` only when the packet is meant to leave the owner's machine; it projects claim text out of the receipt and continuation while keeping every support label and evidence reference. The mode is fixed at run start and cannot be changed afterward.
 4. Treat every claim the capsule labels `UNSUPPORTED` or `UNRESOLVED_EVIDENCE` as unverified. Re-check it in this window before relying on it. A prior window's confidence is not evidence.
-5. A human can verify the chain independently with `node scripts/verify-lineage.mjs <prior-run-dir> <current-run-dir>`. Never claim a chain is verified that you have not seen that checker pass.
+5. Each sealed capsule is signed with the local key and carries its own public key. Report a signature as proving who folded the capsule and that it is unchanged — never as proving the observations were true. An unsigned capsule is unsigned, not tampered; say so plainly.
+6. A human can verify the chain independently with `node scripts/verify-lineage.mjs <prior-run-dir> <current-run-dir>`. Never claim a chain is verified that you have not seen that checker pass.
 
 Lyhna reports whether a window inherited what it says it inherited. It does not judge whether the continuation was a good idea.
 
