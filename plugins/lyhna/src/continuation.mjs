@@ -220,6 +220,7 @@ export function buildCarryForward(capsule) {
     privacy_mode: capsule.privacy_mode,
     status: capsule.status,
     objective: capsule.objective,
+    objective_text: capsule.objective_text ?? null,
     objective_origin: capsule.objective_origin,
     ledger_tip: capsule.witnessed.ledger_tip,
     event_count: capsule.witnessed.event_count,
@@ -256,6 +257,7 @@ export function buildContinuation(state, events) {
     privacy_mode: privacyMode,
     status: state.sealed ? 'SEALED' : state.close_requested ? 'CLOSE_REQUESTED_NOT_SEALED' : 'OPEN',
     objective: state.objective,
+    ...(privacyMode !== 'proof' && state.objective_text ? { objective_text: state.objective_text } : {}),
     objective_origin: state.objective_origin,
     // The lineage edge: which prior capsule this run declared it continues from. Sealed into the
     // run_begun event, therefore inside the hash chain, therefore covered by the seal anchor.

@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteJson, atomicWriteText, assert, canonicalJson, dataRoot, ORIGINS, readJson, sha256, withLock } from './util.mjs';
-import { boundedText, promptSynopsis, reference, sanitizeClaim, structuralSummary } from './redact.mjs';
+import { boundedText, objectiveText, promptSynopsis, reference, sanitizeClaim, structuralSummary } from './redact.mjs';
 import { renderReceiptJson, renderReceiptMarkdown } from './receipt.mjs';
 import { buildContinuation, renderContinuationJson } from './continuation.mjs';
 import { renderHandoffMarkdown } from './handoff.mjs';
@@ -590,6 +590,9 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
       sealed: false,
       parent_capability_hash: sha256(capability),
       objective: pending?.summary || promptSynopsis(objective),
+      // Retained alongside the structural summary, exactly as claim text is: the owner's own request,
+      // on the owner's own machine. Proof mode projects it away for a packet that leaves.
+      objective_text: pending?.text || objectiveText(objective),
       objective_ref: pending?.ref || sha256(String(objective || '')),
       objective_origin: pending ? 'runtime_hook' : 'agent_reported',
       configured_hooks: CONFIGURED_HOOKS,
@@ -718,6 +721,7 @@ export function rememberInvocation({ sessionId, prompt }) {
   const sessionHash = sha256(String(sessionId));
   atomicWriteJson(join(root(), 'pending', `${sessionHash}.json`), {
     summary: promptSynopsis(promptText),
+    text: objectiveText(promptText),
     ref: sha256(promptText),
     matched_form: detected.matched_form,
     mention_offset: detected.mention_offset,

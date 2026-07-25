@@ -26,6 +26,7 @@ import {
   verifySealedRun
 } from '../src/store.mjs';
 import { sanitizeHook } from '../src/redact.mjs';
+import { renderReceiptJson } from '../src/receipt.mjs';
 import { sha256 } from '../src/util.mjs';
 import { isolatedData, stableSnapshot } from './helpers.mjs';
 
@@ -255,7 +256,7 @@ test('sealed state and rendered receipt tampering are detected', { concurrency: 
   }
 });
 
-test('stale lock ownership is recovered and free-form credentials never persist', { concurrency: false }, (t) => {
+test('stale lock ownership is recovered; credentials never persist though the request does', { concurrency: false }, (t) => {
   const root = isolatedData(t);
   const rawPrompt = '@lyhna build the private customer feature password=hunter2 Authorization: Basic dXNlcjpwYXNz without copying this full prompt';
   const sensitiveCwd = 'C:\\Users\\Adam\\Customers\\private-customer';
@@ -282,12 +283,25 @@ test('stale lock ownership is recovered and free-form credentials never persist'
   };
   visit(root);
   const all = texts.join('\n');
-  assert(!all.includes('hunter2'));
-  assert(!all.includes('dXNlcjpwYXNz'));
-  assert(!all.includes(rawPrompt));
-  assert(!all.includes(sensitiveCwd));
-  assert(all.includes('Invocation objective retained by hash'));
-  assert(!all.includes('private customer feature'));
+  // Credentials never persist, in any form, anywhere under the data root.
+  assert(!all.includes('hunter2'), 'an assigned password must never reach disk');
+  assert(!all.includes('dXNlcjpwYXNz'), 'a Basic authorization value must never reach disk');
+  assert(!all.includes(sensitiveCwd), 'the working directory is stored by hash, never as a path');
+  assert(!all.includes(rawPrompt), 'the prompt is never stored verbatim — it is scrubbed and bounded');
+
+  // The REQUEST does persist, scrubbed. This is the Verified Context ruling: the objective is the
+  // owner's own words about their own work, on their own machine, and a capsule that reduces it to a
+  // byte count has discarded the authored product. The structural summary is retained alongside it.
+  assert(all.includes('Invocation objective retained by hash'), 'the structural summary survives');
+  assert(all.includes('build the private customer feature'), 'the request itself is retained');
+  assert(all.includes('password=[REDACTED]'), 'the retained request carries the scrubbed form');
+
+  // And a packet meant to leave the machine projects the request away again.
+  const proofParent = mintSession({ sessionId: 'privacy-proof' });
+  const proofRun = beginRun(proofParent, { mode: 'full', objective: 'build the private customer feature', privacyMode: 'proof' });
+  const proofReceipt = renderReceiptJson(getRunForTesting(proofRun.id).state, getRunForTesting(proofRun.id).events);
+  assert(!proofReceipt.includes('build the private customer feature'), 'proof mode withholds the request');
+  assert(proofReceipt.includes('Invocation objective retained by hash'), 'proof mode keeps the structural summary');
 });
 
 test('invocation capture recognizes a boundary Lyhna mention anywhere in the prompt', { concurrency: false }, (t) => {

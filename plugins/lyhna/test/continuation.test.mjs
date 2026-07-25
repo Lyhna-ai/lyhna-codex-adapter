@@ -296,3 +296,48 @@ test('privacy mode is sealed into the chain, so rendering never depends on the e
   const { state, events } = getRunForTesting(run.id);
   assert.equal(canonicalJson(buildContinuation(state, events)), canonicalJson(before));
 });
+
+test('the request survives the handoff instead of arriving as a byte count', (t) => {
+  isolatedData(t);
+  const { directory } = runWindow({
+    sessionId: 'objective',
+    objective: 'Port the judgment ledger and close the drift on the canonical context.'
+  });
+
+  const capsule = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8'));
+  assert.equal(capsule.objective_text, 'Port the judgment ledger and close the drift on the canonical context.');
+  assert.match(capsule.objective, /retained by hash/, 'the structural summary is kept alongside');
+
+  // The next window reads the request, not its length.
+  const handoff = readFileSync(join(directory, 'HANDOFF.md'), 'utf8');
+  assert.match(handoff, /Port the judgment ledger and close the drift/);
+});
+
+test('proof mode withholds the request from a packet that leaves the machine', (t) => {
+  isolatedData(t);
+  const { directory } = runWindow({
+    sessionId: 'objective-blind',
+    objective: 'Port the judgment ledger and close the drift on the canonical context.',
+    privacyMode: 'proof'
+  });
+
+  const capsule = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8'));
+  assert.equal(capsule.objective_text, undefined);
+  assert.match(capsule.objective, /retained by hash/);
+
+  const handoff = readFileSync(join(directory, 'HANDOFF.md'), 'utf8');
+  assert.doesNotMatch(handoff, /Port the judgment ledger/);
+  assert.match(handoff, /text withheld in this packet/);
+});
+
+test('the retained request carries forward into the inherited state hash', (t) => {
+  isolatedData(t);
+  const first = runWindow({ sessionId: 'obj-1', objective: 'The original request.' });
+  const second = runWindow({ sessionId: 'obj-2', objective: 'Continues it.', continuesFrom: first.sealed.capsule_ref });
+
+  // objective_text is part of the carry-forward core, so a successor commits to the request itself
+  // and not merely to its shape.
+  assert.equal(verifyLineage(first.directory, second.directory).ok, true);
+  const capsule = JSON.parse(readFileSync(join(first.directory, 'continuation.json'), 'utf8'));
+  assert.equal(capsule.objective_text, 'The original request.');
+});

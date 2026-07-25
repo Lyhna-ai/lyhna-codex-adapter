@@ -325,6 +325,7 @@ export function buildReceipt(state, events) {
     status: state.sealed ? 'SEALED' : 'OPEN',
     build_record: state.mode === 'pr_only' ? 'unavailable' : 'witnessed_within_configured_coverage',
     objective: state.objective,
+    ...(privacyMode !== 'proof' && state.objective_text ? { objective_text: state.objective_text } : {}),
     objective_origin: state.objective_origin,
     lifecycle: buildLifecycle(state, events),
     seal: buildSeal(state, events),
