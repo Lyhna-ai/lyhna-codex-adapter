@@ -96,6 +96,17 @@ export function sanitizeHook(input) {
 // on the way out.
 export const CLAIM_TEXT_MAX = 500;
 
+// The objective is the single most important human-authored fact in a packet: it is WHY the work
+// exists, and it is what must survive four windows intact. Stored generously — a spec is worth more
+// characters than an assertion about one — with the same secret scrubbing and the same export
+// projection. A capsule that records the request as a word count has discarded the authored product
+// and kept only the generated material.
+export const OBJECTIVE_TEXT_MAX = 1000;
+
+export function objectiveText(value) {
+  return boundedText(value, OBJECTIVE_TEXT_MAX);
+}
+
 export function sanitizeClaim(statement, evidenceRefs = []) {
   const normalizeEvidenceRef = (item) => {
     const text = String(item).trim();

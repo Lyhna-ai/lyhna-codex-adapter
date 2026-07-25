@@ -75,7 +75,8 @@ export function renderHandoffMarkdown(capsule) {
     '',
     '## Objective',
     '',
-    `- ${capsule.objective || '_none recorded_'} _(origin: ${capsule.objective_origin})_`,
+    `- ${capsule.objective_text || capsule.objective || '_none recorded_'}`,
+    `- _origin: ${capsule.objective_origin}${capsule.objective_text ? '' : '; text withheld in this packet'}_`,
     ''
   ];
 
