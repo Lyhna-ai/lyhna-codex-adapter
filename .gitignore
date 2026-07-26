@@ -3,3 +3,8 @@ dist/
 coverage/
 .lyhna/
 *.log
+
+# Agent worktrees are transient checkouts created inside the repo. Committing
+# one would land a nested copy of the whole tree. Project config under
+# .claude/ stays trackable.
+.claude/worktrees/
