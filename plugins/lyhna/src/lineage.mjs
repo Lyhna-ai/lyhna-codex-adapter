@@ -20,6 +20,12 @@
 // Pure, local, deterministic: it reads two directories, computes, and returns a report. No network,
 // no subprocess, no clock.
 //
+// EVERY REPORT CARRIES EVERY CHECK. A check that could not be evaluated — because something it
+// depends on failed first — is reported NOT RUN with its reason, never omitted. Dropping the row
+// would let "we could not check this" read as "this did not apply", which is the same collapse
+// UNRESOLVED_EVIDENCE exists to prevent one layer down. A reader comparing two reports should never
+// see a row disappear.
+//
 // TRUST BOUNDARY (stated in every report, pass or fail): this is a LOCAL STRUCTURAL check. As SPEC
 // states for the ledger itself, "append-only", "sealed", and "cannot rewrite" are logical local-store
 // properties, not adversary-resistant claims against an agent with unrestricted filesystem access.
@@ -42,12 +48,77 @@ export const LINEAGE_TRUST_NOTICE =
   + 'holder editing their own ledger before folding. Signing establishes integrity and continuity '
   + 'in transit and over time; it is not custody against the machine that produced the packet.';
 
+/** Every check a complete report contains, in the order a reader reads them. */
+const CHECK_SEQUENCE = [
+  'prior_continuation_present',
+  'prior_capsule_ref_self_consistent',
+  'prior_state_hash_self_consistent',
+  'prior_chain_valid',
+  'prior_continuation_refolds',
+  'prior_signature',
+  'current_chain_valid',
+  'current_declares_inheritance',
+  'inheritance_capsule_ref_matches',
+  'inheritance_state_hash_matches'
+];
+
+const NOT_RUN_DEFAULT = 'not run — an earlier check failed, so this could not be evaluated';
+
 function check(name, ok, detail) {
-  return { name, ok, detail };
+  return { name, status: ok ? 'PASS' : 'FAIL', ok, detail };
 }
 
-function readJsonFile(path) {
-  return JSON.parse(readFileSync(path, 'utf8'));
+/**
+ * A check that never ran. `ok` stays false so the verdict fails safe: an unknown is not a pass,
+ * even if a future caller reaches this state without an accompanying failure.
+ */
+function notRun(name, detail) {
+  return { name, status: 'NOT_RUN', ok: false, detail };
+}
+
+/**
+ * Emit the full sequence — recorded results in place, NOT RUN for everything that never got there —
+ * and decide the verdict. Only a PASS counts as a pass.
+ */
+function finalize(report, recorded) {
+  const remaining = [...recorded];
+  const take = (name) => {
+    const index = remaining.findIndex((item) => item.name === name);
+    return index === -1 ? null : remaining.splice(index, 1)[0];
+  };
+  report.checks = CHECK_SEQUENCE.map((name) => take(name) ?? notRun(name, NOT_RUN_DEFAULT));
+  // Anything left over is APPENDED, never dropped: a check recorded under a name the sequence does
+  // not know, or one recorded twice. Projecting the sequence onto the recorded results would have
+  // discarded those rows — including a FAIL — and a discarded FAIL reads as LINKED. The function
+  // whose whole job is that no row disappears must not be the thing that disappears one.
+  report.checks.push(...remaining);
+  report.ok = report.checks.every((item) => item.status === 'PASS');
+  return report;
+}
+
+/**
+ * Read a JSON object, REPORTING a file that is missing, empty, malformed, or not an object rather
+ * than throwing out of the checker. A one-byte truncation of a packet is exactly the tamper this
+ * tool exists to catch; it must produce a recorded FAIL, not a stack trace and no report at all.
+ */
+function readJsonObject(path) {
+  let raw;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (error) {
+    return { ok: false, detail: `cannot be read (${error.code ?? 'unknown error'})`, value: null };
+  }
+  if (!raw.trim()) return { ok: false, detail: 'is empty', value: null };
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { ok: false, detail: 'is not valid JSON', value: null };
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, detail: 'is not a JSON object', value: null };
+  }
+  return { ok: true, detail: 'read', value };
 }
 
 /**
@@ -59,6 +130,10 @@ export function verifyLedgerChain(directory) {
   const path = join(directory, 'events.jsonl');
   if (!existsSync(path)) return { ok: false, detail: 'events.jsonl is missing', events: [], tip: null };
   const lines = readFileSync(path, 'utf8').split('\n').filter((line) => line.trim());
+  // An emptied ledger is a destroyed chain, not a valid one of length zero. Reporting "0 event(s)
+  // chain-validated" as a PASS would let wholesale deletion read as intact — the same collapse this
+  // file exists to prevent, one level down. Every real packet opens with run_begun.
+  if (lines.length === 0) return { ok: false, detail: 'events.jsonl is empty — there is no chain to validate', events: [], tip: null };
   const events = [];
   let previous = ZERO_HASH;
   for (const [index, line] of lines.entries()) {
@@ -67,6 +142,9 @@ export function verifyLedgerChain(directory) {
       event = JSON.parse(line);
     } catch {
       return { ok: false, detail: `event ${index + 1} is not valid JSON`, events, tip: previous };
+    }
+    if (event === null || typeof event !== 'object' || Array.isArray(event)) {
+      return { ok: false, detail: `event ${index + 1} is not a JSON object`, events, tip: previous };
     }
     const claimed = event.event_hash;
     const withoutHash = { ...event };
@@ -84,8 +162,10 @@ export function verifyLedgerChain(directory) {
 /** Re-fold a packet's ledger into a continuation capsule, independent of whatever it published. */
 function refoldContinuation(directory, events) {
   const statePath = join(directory, 'state.json');
-  if (!existsSync(statePath)) return null;
-  return buildContinuation(readJsonFile(statePath), events);
+  if (!existsSync(statePath)) return { ok: false, detail: 'prior packet has no state.json to re-fold from', value: null };
+  const state = readJsonObject(statePath);
+  if (!state.ok) return { ok: false, detail: `prior packet's state.json ${state.detail}, so there is nothing to re-fold`, value: null };
+  return { ok: true, detail: 'read', value: buildContinuation(state.value, events) };
 }
 
 /**
@@ -109,9 +189,14 @@ export function verifyLineage(priorDirectory, currentDirectory) {
   const priorContinuationPath = join(priorDirectory, 'continuation.json');
   if (!existsSync(priorContinuationPath)) {
     checks.push(check('prior_continuation_present', false, 'prior packet has no continuation.json'));
-    return report;
+    return finalize(report, checks);
   }
-  const published = readJsonFile(priorContinuationPath);
+  const publishedRead = readJsonObject(priorContinuationPath);
+  if (!publishedRead.ok) {
+    checks.push(check('prior_continuation_present', false, `prior packet's continuation.json ${publishedRead.detail}`));
+    return finalize(report, checks);
+  }
+  const published = publishedRead.value;
   report.prior_capsule_ref = published.capsule_ref ?? null;
   checks.push(check('prior_continuation_present', true, `capsule_ref ${published.capsule_ref}`));
 
@@ -136,13 +221,13 @@ export function verifyLineage(priorDirectory, currentDirectory) {
   // 3. Non-circular value binding — re-derive rather than believe.
   if (priorChain.ok) {
     const refolded = refoldContinuation(priorDirectory, priorChain.events);
-    if (!refolded) {
-      checks.push(check('prior_continuation_refolds', false, 'prior packet has no state.json to re-fold from'));
+    if (!refolded.ok) {
+      checks.push(check('prior_continuation_refolds', false, refolded.detail));
     } else {
       // Compare WITHOUT the signature block: a fresh fold has no signature, and the signature is
       // checked separately below. Stripping it here keeps the re-fold a test of the CONTENT.
       const { signature: _publishedSignature, ...publishedCore } = published;
-      const { signature: _refoldedSignature, ...refoldedCore } = refolded;
+      const { signature: _refoldedSignature, ...refoldedCore } = refolded.value;
       const matches = canonicalJson(refoldedCore) === canonicalJson(publishedCore);
       checks.push(check(
         'prior_continuation_refolds',
@@ -150,6 +235,11 @@ export function verifyLineage(priorDirectory, currentDirectory) {
         matches ? 're-folding the prior ledger reproduces the published continuation exactly' : 'the published continuation does not match a fresh fold of its own ledger'
       ));
     }
+  } else {
+    checks.push(notRun(
+      'prior_continuation_refolds',
+      'not run — the prior ledger does not chain-validate, so there is no trustworthy fold to compare against'
+    ));
   }
 
   // Signature: who folded this, and has a byte changed since. An UNSIGNED capsule is reported as
@@ -172,6 +262,9 @@ export function verifyLineage(priorDirectory, currentDirectory) {
     const inherits = runBegun?.payload?.inherits || null;
     if (!inherits) {
       checks.push(check('current_declares_inheritance', false, 'the current packet\'s run_begun event declares no inherits edge'));
+      for (const name of ['inheritance_capsule_ref_matches', 'inheritance_state_hash_matches']) {
+        checks.push(notRun(name, 'not run — the current packet declares no inheritance edge to compare'));
+      }
     } else {
       checks.push(check('current_declares_inheritance', true, `declares capsule_ref ${inherits.capsule_ref}`));
       checks.push(check(
@@ -191,8 +284,7 @@ export function verifyLineage(priorDirectory, currentDirectory) {
     }
   }
 
-  report.ok = checks.every((item) => item.ok);
-  return report;
+  return finalize(report, checks);
 }
 
 /** Human-readable projection. Deterministic: a pure function of the report. */
@@ -209,7 +301,7 @@ export function renderLineageMarkdown(report) {
     '## Checks',
     ''
   ];
-  for (const item of report.checks) lines.push(`- ${item.ok ? 'PASS' : 'FAIL'} — \`${item.name}\`: ${item.detail}`);
+  for (const item of report.checks) lines.push(`- ${(item.status ?? (item.ok ? 'PASS' : 'FAIL')).replaceAll('_', ' ')} — \`${item.name}\`: ${item.detail}`);
   lines.push('', '## Trust boundary', '', report.trust_notice, '');
   lines.push('', 'A signature proves who folded a capsule and that it has not changed since. It does not', 'make the observations true.', '');
   return `${lines.join('\n')}\n`;

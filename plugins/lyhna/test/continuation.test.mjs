@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
@@ -20,7 +20,7 @@ import {
 } from '../src/store.mjs';
 import { buildContinuation, deriveCapsuleRef, labelClaims } from '../src/continuation.mjs';
 import { renderHandoffMarkdown } from '../src/handoff.mjs';
-import { verifyLineage, verifyLedgerChain } from '../src/lineage.mjs';
+import { renderLineageMarkdown, verifyLineage, verifyLedgerChain } from '../src/lineage.mjs';
 import { canonicalJson } from '../src/util.mjs';
 import { isolatedData, stableSnapshot } from './helpers.mjs';
 
@@ -196,6 +196,140 @@ test('lineage fails when a published continuation is edited after the fact', (t)
   assert.equal(report.ok, false);
   assert.equal(report.checks.find((item) => item.name === 'prior_capsule_ref_self_consistent').ok, true);
   assert.equal(report.checks.find((item) => item.name === 'prior_continuation_refolds').ok, false);
+});
+
+/**
+ * The row set, written out as literals on purpose. Comparing a report against a baseline built from
+ * the same CHECK_SEQUENCE only proves the two agree — delete a check from that constant and both
+ * sides lose it in step, silently, while the suite stays green. Only literals pin the set itself.
+ */
+const LINEAGE_CHECKS = [
+  'prior_continuation_present',
+  'prior_capsule_ref_self_consistent',
+  'prior_state_hash_self_consistent',
+  'prior_chain_valid',
+  'prior_continuation_refolds',
+  'prior_signature',
+  'current_chain_valid',
+  'current_declares_inheritance',
+  'inheritance_capsule_ref_matches',
+  'inheritance_state_hash_matches'
+];
+
+test('a check that could not run is reported NOT RUN, never dropped from the report', (t) => {
+  isolatedData(t);
+  const first = runWindow({ sessionId: 'notrun-1', objective: 'Original window.' });
+  const second = runWindow({
+    sessionId: 'notrun-2',
+    objective: 'Continues it.',
+    continuesFrom: first.sealed.capsule_ref
+  });
+
+  const clean = verifyLineage(first.directory, second.directory);
+  assert.equal(clean.ok, true, JSON.stringify(clean.checks, null, 2));
+
+  // Break the prior ledger itself: edit an event's content so it no longer hashes to its recorded
+  // event_hash. The re-fold now has no trustworthy input — but a reader must be told that, not left
+  // to notice a missing row.
+  const ledgerPath = join(first.directory, 'events.jsonl');
+  const lines = readFileSync(ledgerPath, 'utf8').split('\n').filter((line) => line.trim());
+  const opening = JSON.parse(lines[0]);
+  opening.payload = { ...opening.payload, mode: 'pr_only' };
+  lines[0] = JSON.stringify(opening);
+  writeFileSync(ledgerPath, `${lines.join('\n')}\n`);
+
+  const report = verifyLineage(first.directory, second.directory);
+  assert.equal(report.ok, false);
+  assert.equal(report.checks.find((item) => item.name === 'prior_chain_valid').status, 'FAIL');
+
+  const refolds = report.checks.find((item) => item.name === 'prior_continuation_refolds');
+  assert.equal(refolds.status, 'NOT_RUN');
+  assert.equal(refolds.ok, false, 'an unknown must never count as a pass');
+  assert.match(refolds.detail, /does not chain-validate/);
+
+  // Same rows, same order, whatever the outcome — a row must never vanish between two reports.
+  assert.deepEqual(
+    report.checks.map((item) => item.name),
+    clean.checks.map((item) => item.name)
+  );
+  assert.deepEqual(clean.checks.map((item) => item.name), LINEAGE_CHECKS);
+  assert.deepEqual(report.checks.map((item) => item.name), LINEAGE_CHECKS);
+  assert.match(renderLineageMarkdown(report), /NOT RUN — `prior_continuation_refolds`/);
+});
+
+test('a packet with nothing to check still reports every check it did not run', (t) => {
+  isolatedData(t);
+  const first = runWindow({ sessionId: 'empty-1', objective: 'Window with a deleted capsule.' });
+  const second = runWindow({
+    sessionId: 'empty-2',
+    objective: 'Continues it.',
+    continuesFrom: first.sealed.capsule_ref
+  });
+  const complete = verifyLineage(first.directory, second.directory).checks.map((item) => item.name);
+
+  rmSync(join(first.directory, 'continuation.json'));
+
+  const report = verifyLineage(first.directory, second.directory);
+  assert.equal(report.ok, false);
+  assert.equal(report.checks.find((item) => item.name === 'prior_continuation_present').status, 'FAIL');
+  assert.deepEqual(report.checks.map((item) => item.name), complete);
+  assert.deepEqual(report.checks.map((item) => item.name), LINEAGE_CHECKS);
+  for (const item of report.checks.slice(1)) {
+    assert.equal(item.status, 'NOT_RUN', `${item.name} should be NOT RUN, not omitted`);
+  }
+});
+
+test('a destroyed packet file is a recorded finding, not a thrown error', (t) => {
+  isolatedData(t);
+  const first = runWindow({ sessionId: 'broken-1', objective: 'Original window.' });
+  const second = runWindow({
+    sessionId: 'broken-2',
+    objective: 'Continues it.',
+    continuesFrom: first.sealed.capsule_ref
+  });
+  const continuationPath = join(first.directory, 'continuation.json');
+  const statePath = join(first.directory, 'state.json');
+  const ledgerPath = join(first.directory, 'events.jsonl');
+  const intact = {
+    continuation: readFileSync(continuationPath, 'utf8'),
+    state: readFileSync(statePath, 'utf8'),
+    ledger: readFileSync(ledgerPath, 'utf8')
+  };
+  const restore = () => {
+    writeFileSync(continuationPath, intact.continuation);
+    writeFileSync(statePath, intact.state);
+    writeFileSync(ledgerPath, intact.ledger);
+  };
+
+  // A one-byte truncation is the tamper this checker exists to catch. It must produce a report.
+  for (const [label, corrupt, failing] of [
+    ['emptied continuation.json', () => writeFileSync(continuationPath, ''), 'prior_continuation_present'],
+    ['truncated continuation.json', () => writeFileSync(continuationPath, intact.continuation.slice(0, 20)), 'prior_continuation_present'],
+    ['continuation.json holding JSON null', () => writeFileSync(continuationPath, 'null'), 'prior_continuation_present'],
+    ['emptied state.json', () => writeFileSync(statePath, ''), 'prior_continuation_refolds'],
+    ['malformed state.json', () => writeFileSync(statePath, '{oops'), 'prior_continuation_refolds'],
+    ['a ledger line holding JSON null', () => writeFileSync(ledgerPath, `null\n${intact.ledger}`), 'prior_chain_valid'],
+    ['emptied events.jsonl', () => writeFileSync(ledgerPath, ''), 'prior_chain_valid']
+  ]) {
+    restore();
+    corrupt();
+    const report = verifyLineage(first.directory, second.directory);
+    assert.deepEqual(report.checks.map((item) => item.name), LINEAGE_CHECKS, `${label}: full row set`);
+    assert.equal(report.ok, false, `${label}: must not be LINKED`);
+    assert.equal(report.checks.find((item) => item.name === failing).status, 'FAIL', `${label}: ${failing} should FAIL`);
+    assert.doesNotMatch(renderLineageMarkdown(report), /undefined/, `${label}: renders without holes`);
+  }
+  restore();
+});
+
+test('an emptied ledger is a destroyed chain, not a valid chain of length zero', (t) => {
+  isolatedData(t);
+  const first = runWindow({ sessionId: 'emptyledger-1', objective: 'Original window.' });
+  writeFileSync(join(first.directory, 'events.jsonl'), '');
+
+  const chain = verifyLedgerChain(first.directory);
+  assert.equal(chain.ok, false, 'deleting every event must never read as a passing chain');
+  assert.match(chain.detail, /empty/);
 });
 
 test('a predecessor this store cannot see is recorded as unresolved, not invented', (t) => {

@@ -22,6 +22,7 @@ import {
   verifySealedRun
 } from '../src/store.mjs';
 import { canonicalJson, sha256 } from '../src/util.mjs';
+import { ADAPTER_VERSION } from '../src/version.mjs';
 import { isolatedData, stableSnapshot } from './helpers.mjs';
 
 const HEAD_A = 'a'.repeat(40);
@@ -94,7 +95,7 @@ test('a plain checkpoint writes an anchor and receipts, and the face reads OPEN'
   const anchorEvent = events.at(-1);
   assert.equal(anchorEvent.type, 'checkpoint_anchor');
   assert.equal(anchorEvent.payload.covers_seq, events.length - 1);
-  assert.equal(anchorEvent.payload.receipt_renderer, '0.1.30');
+  assert.equal(anchorEvent.payload.receipt_renderer, ADAPTER_VERSION);
   assert.equal(anchorEvent.payload.receipt_json_hash, sha256(readFileSync(join(directory, 'receipt.json'), 'utf8')));
   assert.equal(anchorEvent.payload.receipt_markdown_hash, sha256(readFileSync(join(directory, 'RECEIPT.md'), 'utf8')));
   const anchor = readAnchor(directory);
@@ -102,7 +103,7 @@ test('a plain checkpoint writes an anchor and receipts, and the face reads OPEN'
   assert.equal(anchor.as_of_seq, events.length - 1);
   assert.equal(anchor.anchor_event_seq, anchorEvent.seq);
   assert.equal(anchor.tip_hash, events.at(-2).event_hash);
-  assert.equal(anchor.receipt_renderer, '0.1.30');
+  assert.equal(anchor.receipt_renderer, ADAPTER_VERSION);
   assert.equal(anchor.receipt_json_hash, anchorEvent.payload.receipt_json_hash);
   assert.equal(anchor.receipt_markdown_hash, anchorEvent.payload.receipt_markdown_hash);
 
@@ -115,7 +116,7 @@ test('a plain checkpoint writes an anchor and receipts, and the face reads OPEN'
   assert.match(markdown, /OPEN as of event \d+ — no close request observed\./);
   // The checkpoint event itself precedes its anchor in the ledger.
   assert.equal(events.at(-2).type, 'turn_checkpoint');
-  assert.equal(events.at(-2).payload.receipt_renderer, '0.1.30');
+  assert.equal(events.at(-2).payload.receipt_renderer, ADAPTER_VERSION);
   // Never an intent judgment.
   assert(!/abandon/i.test(markdown));
 });
@@ -151,7 +152,7 @@ test('a close-deferred checkpoint face states close-requested-not-sealed and lis
   assert(!/\b(approv|refus|block|escalat|certif)/i.test(receipt.lifecycle.statement));
   // The deferred close is itself a checkpoint: close_deferred, then its hash-chained anchor.
   assert.equal(events.at(-2).type, 'close_deferred');
-  assert.equal(events.at(-2).payload.receipt_renderer, '0.1.30');
+  assert.equal(events.at(-2).payload.receipt_renderer, ADAPTER_VERSION);
   assert.equal(events.at(-1).type, 'checkpoint_anchor');
 });
 
@@ -357,7 +358,7 @@ test('a re-deferred close after intervening events stays fully verifiable and fo
   assert.equal(events.filter((event) => event.type === 'close_deferred').length, 1);
   const anchors = events.filter((event) => event.type === 'checkpoint_anchor');
   assert.equal(anchors.length, 2);
-  assert.equal(anchors.at(-1).payload.receipt_renderer, '0.1.30');
+  assert.equal(anchors.at(-1).payload.receipt_renderer, ADAPTER_VERSION);
   const clean = verifyRun(run.id);
   assert.equal(clean.status, 'CHECKPOINT_VERIFIED');
   assert.equal(clean.ledger_advanced, false);
