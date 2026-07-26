@@ -80,6 +80,14 @@ Not a planned slice. It came out of the operator's own reading of where the loss
 
 > **Honesty note on the records above (2026-07-26).** The #6–#9 records were compiled after the fact from commits, diffs, and PR bodies — not written at build time by the sessions that did the work, as every record above this point was. Test counts and file statistics were re-verified by checking out each commit and running the suite. What is **not** attested is the hosted-review detail the earlier slices record round by round: this session did not witness those rounds and has not invented them. Where a PR ran review, its body is the primary record. The distinction is the point — a record that reads uniformly with the ones above it while resting on weaker evidence would be the overclaim this plan exists to prevent.
 
+### Slice B2 — RETIRED (Adam, 2026-07-26)
+
+Specced but never built. Operator-directed on 2026-07-18 after the CZ-13 escalation: mechanized close-time refresh, close intent reduced to one zero-narration gesture, and the sealed packet auto-arriving one gesture away. It never reached this plan, and CZ-14 shipped a different answer to the same problem — a checkpoint anchor at every Stop makes any run a verifiable packet at its last checkpoint, which removes the pressure that made B2 urgent.
+
+**Adam's call, 2026-07-26: the work moved past it. B2 is retired, not deferred.** The ladder runs Slice B's field gate → Slice C.
+
+The spec text survives in `HANDOFF-2026-07-18.md` §1 and §4 because that directory preserves superseded handoffs verbatim. **Read it as history. Do not revive a build from it.** If the underlying need returns — the operator hunting for files or an extraction errand landing in a working agent's task stream — that is new evidence for a new slice, specced fresh against the state of the code then, not resumed from here.
+
 ### Slice C — Full Vision (stop discarding the fuel)
 Roadmap Step 1 + CZ-5 + CZ-6. Rich Tier-0 local capture (payloads, claims, evaluator findings — readable), hash-bound to the sealed receipt; tiered projection at every export boundary (structural spine + argument commitments + sidecar by explicit choice, validator-enforced); structural-identity fields on every consequential event; the value-free sensitive-output observation.
 **Field gate:** a receipt reads end-to-end for human and agent; structural fields on 100% of consequential events; zero raw content in boundary exports.

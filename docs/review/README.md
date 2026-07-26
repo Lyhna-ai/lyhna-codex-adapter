@@ -44,7 +44,7 @@ Superseded handoffs are preserved verbatim rather than rewritten — the directo
 
 - **The Slice B and CZ-14 blind-reader field gates**, both Adam-paced. They run when he next uses the witness and a packet exists — a sealed packet for Slice B, a cold open packet for CZ-14. Acceptance criteria are in `HANDOFF-2026-07-23.md` §2 and the build plan. Per *one live edge at a time*, **Slice C does not start until Slice B's gate passes.** Do not manufacture a run to force a gate, and do not route witness errands through Adam's working agents (CZ-13).
 - **Nothing is in flight.** No open PR, no build started. The next build is Slice C, and it is gated on Slice B's field gate above.
-- **The Slice B2 spec has never reached the build plan.** It was operator-directed on 2026-07-18 (mechanized close-time refresh; the sealed packet one gesture away) and survives only inside `HANDOFF-2026-07-18.md` §1 and §4. CZ-14 shipped down a different path afterward, and the 07-23 forward plan goes straight from the Slice B gate to Slice C without mentioning it. Whether B2 is still on the ladder is Adam's scope call, not something to infer from a closed branch.
+- **Slice B2 is retired — not owed.** Adam's call, 2026-07-26: the work moved past it. The spec still appears in `HANDOFF-2026-07-18.md` §1 and §4 because that document is preserved verbatim; read it as history, not as a build. Do not revive it from there. The retirement is recorded in `BUILD-PLAN-2026-07-16.md`.
 
 Two gaps named here on 2026-07-26 were closed the same day: the missing PR #6–#10 build records are now in `BUILD-PLAN-2026-07-16.md` (compiled after the fact, and labeled as such), and the cold-install proof of the published bundle is recorded in `FIELD-EVIDENCE-2026-07-17.md`.
 
