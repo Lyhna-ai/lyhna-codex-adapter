@@ -36,7 +36,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { canonicalJson, sha256 } from './util.mjs';
-import { buildContinuation, buildCarryForward, deriveCapsuleRef } from './continuation.mjs';
+import { buildContinuation, buildCarryForward, deriveCapsuleRef, CURRENT_FOLD_VERSION, KNOWN_FOLD_VERSIONS } from './continuation.mjs';
 import { verifyCapsuleSignature } from './signing.mjs';
 
 const ZERO_HASH = '0'.repeat(64);
@@ -160,12 +160,43 @@ export function verifyLedgerChain(directory) {
 }
 
 /** Re-fold a packet's ledger into a continuation capsule, independent of whatever it published. */
-function refoldContinuation(directory, events) {
+function refoldContinuation(directory, events, foldVersion) {
   const statePath = join(directory, 'state.json');
   if (!existsSync(statePath)) return { ok: false, detail: 'prior packet has no state.json to re-fold from', value: null };
   const state = readJsonObject(statePath);
   if (!state.ok) return { ok: false, detail: `prior packet's state.json ${state.detail}, so there is nothing to re-fold`, value: null };
-  return { ok: true, detail: 'read', value: buildContinuation(state.value, events) };
+  return { ok: true, detail: 'read', value: buildContinuation(state.value, events, foldVersion) };
+}
+
+/**
+ * Which fold generation wrote this packet.
+ *
+ * Read from the HASH-CHAINED anchor (`run_sealed`, else the latest `checkpoint_anchor`), never from
+ * the capsule. The capsule is deliberately unanchored, so a `continuation_fold_version` field read
+ * from it would let a forged packet select the reducer under which it verifies — the same
+ * cache-selects-a-weaker-path defect this codebase has closed twice elsewhere.
+ *
+ * An adapter version we have no reducer for is reported, never guessed at with current code.
+ */
+function foldVersionForPacket(events) {
+  const sealed = events.find((event) => event.type === 'run_sealed');
+  const anchor = sealed || [...events].reverse().find((event) => event.type === 'checkpoint_anchor');
+  const renderer = anchor?.payload?.receipt_renderer ?? null;
+  if (!renderer) return { ok: false, version: null, renderer: null, detail: 'the prior ledger commits to no renderer version, so its fold generation is unknown' };
+  // Strict, whole-string match. parseInt is far too permissive here — it reads "9.9.9-experimental"
+  // as 9.9.9 and would place a renderer this checker knows nothing about onto the current reducer,
+  // which is the one outcome that must never happen: an unknown fold is reported, never guessed.
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(renderer));
+  if (!match) {
+    return { ok: false, version: null, renderer, detail: `the prior ledger commits to renderer "${renderer}", which is not a version this checker can place` };
+  }
+  const [major, minor, patch] = match.slice(1).map((part) => Number.parseInt(part, 10));
+  const before0132 = major === 0 && (minor < 1 || (minor === 1 && patch < 32));
+  const version = before0132 ? 'v0' : 'v1';
+  if (!KNOWN_FOLD_VERSIONS.includes(version)) {
+    return { ok: false, version: null, renderer, detail: `renderer "${renderer}" uses fold generation ${version}, which this checker does not implement` };
+  }
+  return { ok: true, version, renderer, detail: `renderer ${renderer} → fold ${version}` };
 }
 
 /**
@@ -181,6 +212,9 @@ export function verifyLineage(priorDirectory, currentDirectory) {
     current_packet: currentDirectory,
     prior_capsule_ref: null,
     prior_signed_by: null,
+    prior_fold_version: null,
+    prior_renderer: null,
+    prior_claim_semantics: null,
     current_run_id: null,
     checks,
     trust_notice: LINEAGE_TRUST_NOTICE
@@ -219,8 +253,19 @@ export function verifyLineage(priorDirectory, currentDirectory) {
   checks.push(check('prior_chain_valid', priorChain.ok, priorChain.detail));
 
   // 3. Non-circular value binding — re-derive rather than believe.
-  if (priorChain.ok) {
-    const refolded = refoldContinuation(priorDirectory, priorChain.events);
+  //
+  // Two separate questions, deliberately not conflated: does this packet reproduce the fold it
+  // declared (historical integrity), and do its claim labels still mean what today's rules mean
+  // (current-policy trust)? A packet written by an older fold can be perfectly intact and still
+  // carry labels this build would not issue. Only the first gates the verdict.
+  const fold = foldVersionForPacket(priorChain.events);
+  report.prior_fold_version = fold.version;
+  report.prior_renderer = fold.renderer;
+  report.prior_claim_semantics = fold.version === null ? null : fold.version === CURRENT_FOLD_VERSION ? 'CURRENT' : 'SUPERSEDED';
+  if (priorChain.ok && !fold.ok) {
+    checks.push(notRun('prior_continuation_refolds', `not run — ${fold.detail}`));
+  } else if (priorChain.ok) {
+    const refolded = refoldContinuation(priorDirectory, priorChain.events, fold.version);
     if (!refolded.ok) {
       checks.push(check('prior_continuation_refolds', false, refolded.detail));
     } else {
@@ -297,6 +342,14 @@ export function renderLineageMarkdown(report) {
     `- Current packet: \`${report.current_packet}\``,
     `- Prior capsule ref: \`${report.prior_capsule_ref ?? 'none'}\``,
     `- Signed by: ${report.prior_signed_by ? `\`${report.prior_signed_by}\`` : '_unsigned_'}`,
+    `- Prior fold: ${report.prior_fold_version ? `\`${report.prior_fold_version}\` (renderer ${report.prior_renderer})` : '_unknown_'}`,
+    ...(report.prior_claim_semantics === 'SUPERSEDED'
+      ? ['', '> **Claim labels in the prior packet were written under superseded semantics.** That packet'
+          + ' is re-folded and verified under the rules it was written by, so a LINKED result here is a'
+          + ' statement about its integrity, not an endorsement of its labels. Under current rules a cited'
+          + ' reference is only ever reported as resolving, never as supporting a claim, and no builder'
+          + ' claim is promoted into `settled`. Re-read those claims before relying on them.']
+      : []),
     '',
     '## Checks',
     ''

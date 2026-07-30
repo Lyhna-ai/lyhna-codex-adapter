@@ -21,7 +21,7 @@ import {
 import { buildContinuation, deriveCapsuleRef, labelClaims } from '../src/continuation.mjs';
 import { renderHandoffMarkdown } from '../src/handoff.mjs';
 import { renderLineageMarkdown, verifyLineage, verifyLedgerChain } from '../src/lineage.mjs';
-import { canonicalJson } from '../src/util.mjs';
+import { canonicalJson, sha256 } from '../src/util.mjs';
 import { isolatedData, stableSnapshot } from './helpers.mjs';
 
 /** The closeout ceremony a full run requires before it may seal. */
@@ -92,7 +92,11 @@ test('claims are labeled against witnessed evidence, not accepted as narration',
 
   assert.equal(labeled.length, 3);
   assert.ok(bySupport.UNSUPPORTED, 'a claim citing no evidence is UNSUPPORTED');
-  assert.ok(bySupport.SUPPORTED, 'a claim citing a witnessed event is SUPPORTED');
+  assert.ok(
+    bySupport.REFERENCES_RESOLVE,
+    'a claim citing a witnessed event is REFERENCES_RESOLVE — the reference resolves, which is not the same as support'
+  );
+  assert.equal(bySupport.SUPPORTED, undefined, 'the current fold never issues SUPPORTED');
   assert.ok(bySupport.UNRESOLVED_EVIDENCE, 'a claim citing an unknown ref is UNRESOLVED_EVIDENCE, not UNSUPPORTED');
 
   // The laundering path itself: an agent's own assertion is not evidence for another assertion.
@@ -194,6 +198,86 @@ test('a crash between the capsule and its index is repaired by the replayed Stop
     'RESOLVED_LOCAL_PACKET',
     'a repaired index must let the successor resolve the capsule it names'
   );
+});
+
+test('a resolving reference is never reported as supporting the claim', (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'semantic' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Something unrelated.' });
+  const begun = getRunForTesting(run.id).events.find((event) => event.type === 'run_begun');
+
+  // The reference resolves perfectly and proves only that the run began. Hash resolution is not
+  // semantic support, and no allowlist fixes that — an unrelated but legitimate tool return would
+  // prove the wrong action just as well.
+  recordClaim(parent, 'I deployed production.', [`sha256:${begun.event_hash}`]);
+
+  const { state, events } = getRunForTesting(run.id);
+  const claim = labelClaims(events).at(-1);
+  assert.equal(claim.support, 'REFERENCES_RESOLVE');
+  assert.notEqual(claim.support, 'SUPPORTED', 'the current fold must never issue SUPPORTED');
+
+  const capsule = buildContinuation(state, events);
+  assert.equal(capsule.continuation_fold_version, 'v1');
+  assert.deepEqual(capsule.settled, [], 'no builder claim is ever promoted into settled');
+});
+
+test('a packet folded by an earlier build still verifies, under the rules it was written by', (t) => {
+  isolatedData(t);
+  // v0 is the fold as it shipped through 0.1.31: any event could support any claim, and a
+  // SUPPORTED claim was promoted into settled. That is a historical fact such a packet is entitled
+  // to reproduce, so the v0 reducer must stay verbatim — re-folding it with current rules would
+  // report an untampered packet as though someone had edited it.
+  const parent = mintSession({ sessionId: 'legacy-fold' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Legacy window.' });
+  const first = recordClaim(parent, 'I deployed production.', []);
+  recordClaim(parent, 'I deployed production.', [`sha256:${first.event_hash}`]);
+  const { state, events } = getRunForTesting(run.id);
+
+  const legacy = buildContinuation(state, events, 'v0');
+  assert.equal(labelClaims(events, 'verified_context', 'v0').at(-1).support, 'SUPPORTED');
+  assert.match(JSON.stringify(legacy.settled), /deployed production/, 'v0 promoted it, and must still');
+  assert.equal(legacy.continuation_fold_version, undefined, 'v0 capsules declare no fold version');
+
+  // The same ledger under current rules reaches the opposite conclusion — which is the point of
+  // keeping the two apart rather than letting one silently rewrite the other.
+  const current = buildContinuation(state, events);
+  assert.deepEqual(current.settled, []);
+  assert.notEqual(legacy.capsule_ref, current.capsule_ref);
+});
+
+test('a renderer this checker cannot place is reported, never folded with current rules', (t) => {
+  isolatedData(t);
+  const first = runWindow({ sessionId: 'unk-1', objective: 'First window.' });
+  const second = runWindow({
+    sessionId: 'unk-2',
+    objective: 'Second window.',
+    continuesFrom: first.sealed.capsule_ref
+  });
+  assert.ok(verifyLineage(first.directory, second.directory).ok, 'baseline must link');
+
+  // Commit an unplaceable renderer and RE-CHAIN, so the ledger stays structurally valid and the
+  // fold-version decision is what is actually under test. The trailing suffix matters: a lenient
+  // parser reads "9.9.9-experimental" as 9.9.9 and silently selects the current reducer, which is
+  // the one outcome this must never produce.
+  const ledgerPath = join(first.directory, 'events.jsonl');
+  const events = readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  let previous = '0'.repeat(64);
+  for (const event of events) {
+    if (event.payload?.receipt_renderer) event.payload.receipt_renderer = '9.9.9-experimental';
+    event.prev_hash = previous;
+    const { event_hash: _drop, ...rest } = event;
+    event.event_hash = sha256(canonicalJson(rest));
+    previous = event.event_hash;
+  }
+  writeFileSync(ledgerPath, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`);
+
+  const report = verifyLineage(first.directory, second.directory);
+  assert.equal(report.checks.find((item) => item.name === 'prior_chain_valid').status, 'PASS');
+  assert.equal(report.prior_fold_version, null);
+  const refolds = report.checks.find((item) => item.name === 'prior_continuation_refolds');
+  assert.equal(refolds.status, 'NOT_RUN', 'an unknown fold generation is reported, not guessed');
+  assert.match(refolds.detail, /not a version this checker can place/);
+  assert.equal(report.ok, false, 'an unknown fold must fail safe');
 });
 
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {

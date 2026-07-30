@@ -11,11 +11,20 @@
 //
 // Deterministic by construction: the capsule is deterministic and this is a pure projection of it.
 
+// REFERENCES RESOLVE is deliberately not a tick. It says the cited reference points at something
+// this run witnessed — nothing about whether that something bears on the statement. SUPPORTED is
+// retained only for packets folded by 0.1.31 and earlier, which issued it.
 const SUPPORT_MARK = {
-  SUPPORTED: 'SUPPORTED',
+  REFERENCES_RESOLVE: 'REFERENCES RESOLVE',
+  SUPPORTED: 'SUPPORTED (legacy fold)',
   UNSUPPORTED: 'UNSUPPORTED',
   UNRESOLVED_EVIDENCE: 'UNRESOLVED EVIDENCE'
 };
+
+/** A claim whose references at least resolve, under either fold generation. */
+function resolves(claim) {
+  return claim.support === 'REFERENCES_RESOLVE' || claim.support === 'SUPPORTED';
+}
 
 /**
  * The prompt a human pastes into the next window. It deliberately points the next agent at the
@@ -23,7 +32,7 @@ const SUPPORT_MARK = {
  * as unverified is the whole point of the artifact.
  */
 export function buildHandoffPrompt(capsule) {
-  const unsupported = capsule.claims.filter((claim) => claim.support !== 'SUPPORTED').length;
+  const unsupported = capsule.claims.filter((claim) => !resolves(claim)).length;
   const lines = [
     `You are continuing run ${capsule.run_id}.`,
     `Start from this capsule, not from a transcript or a summary: continuation.json (capsule_ref ${capsule.capsule_ref}).`,

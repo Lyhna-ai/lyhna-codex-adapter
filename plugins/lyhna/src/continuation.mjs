@@ -38,25 +38,47 @@ function countBy(items, key) {
 }
 
 /**
+ * Fold versions. The continuation capsule is not hash-anchored — the lineage checker re-FOLDS it
+ * from the ledger instead of comparing a stored hash, which catches a file regenerated wholesale.
+ * The cost is that changing the fold silently invalidates every packet an earlier build wrote, so
+ * each fold generation is kept and selected explicitly.
+ *
+ *   v0  the fold as it shipped through 0.1.31. KNOWN WRONG: any event could support any claim, so
+ *       a claim citing another claim — or citing an unrelated `run_begun` — rendered SUPPORTED and
+ *       was promoted into `settled`. Preserved verbatim, never used for new packets, so a v0 packet
+ *       still re-folds to its own published bytes and stays historically verifiable.
+ *   v1  0.1.32 onward. A cited reference is only ever reported as RESOLVING, never as supporting,
+ *       and builder claims are never promoted into `settled`.
+ *
+ * Dispatch reads the adapter version from the hash-chained `run_sealed` / `checkpoint_anchor`
+ * event, never from the capsule: the capsule is unanchored, so a `continuation_fold_version` field
+ * read from it would let a forged packet choose the reducer that makes it verify.
+ */
+export const CURRENT_FOLD_VERSION = 'v1';
+export const KNOWN_FOLD_VERSIONS = ['v0', 'v1'];
+
+/**
  * Claimed-vs-actual, at the handoff layer.
  *
- * A builder claim is agent-reported by construction. Support is decided here, structurally, by
- * asking whether the claim's cited evidence resolves to an event hash in THIS run's ledger:
+ * A builder claim is agent-reported by construction. What this system can establish about it is
+ * narrow and worth stating exactly:
  *
- *   SUPPORTED           every cited reference resolves to a witnessed event in this run
- *   UNSUPPORTED         the claim cites no evidence at all
+ *   REFERENCES_RESOLVE  every cited reference resolves to an event this run witnessed
+ *   UNSUPPORTED         nothing is cited, or everything cited is the agent's own narration
  *   UNRESOLVED_EVIDENCE at least one cited reference does not resolve within configured coverage
  *
- * UNRESOLVED_EVIDENCE is deliberately distinct from UNSUPPORTED: a reference this run cannot
- * resolve may still be valid elsewhere (another run, another surface). Calling that "unsupported"
- * would be the overclaim this system exists to prevent.
+ * REFERENCES_RESOLVE deliberately does NOT say the claim is supported. Hash resolution is not
+ * semantic support: "I deployed production" citing `run_begun` resolves perfectly and proves only
+ * that the run began. No allowlist fixes this either — an unrelated but legitimate tool return
+ * still proves the wrong action. The honest ceiling is that the reference points at something real,
+ * and the reader decides whether it bears on the statement.
+ *
+ * UNRESOLVED_EVIDENCE stays distinct from UNSUPPORTED: a reference this run cannot resolve may be
+ * valid elsewhere, and calling that unsupported would be its own overclaim.
  */
-export function labelClaims(events, privacyMode = 'verified_context') {
-  // An agent's own assertion is NEVER evidence for another of its assertions. The ledger witnesses
-  // that a claim was MADE; it does not witness that it was TRUE. Resolving refs against every event
-  // let a claim cite an earlier claim's event hash, render SUPPORTED, and get promoted into
-  // `settled` — which SPEC requires never to be agent narration. Two identical claims, the second
-  // citing the first, were enough to launder narration into witnessed evidence.
+function labelClaimsV1(events, privacyMode) {
+  // An agent's own assertion is never evidence for another of its assertions. The ledger witnesses
+  // that a claim was MADE; it never witnesses that it was TRUE.
   const authored = new Set(
     events.filter((event) => event.origin === 'agent_reported').map((event) => `sha256:${event.event_hash}`)
   );
@@ -70,35 +92,61 @@ export function labelClaims(events, privacyMode = 'verified_context') {
       // Resolves to nothing at all. Kept distinct from narration: a ref this run cannot see may be
       // valid elsewhere, while a ref to narration resolves perfectly well and still is not evidence.
       const unresolved = refs.filter((ref) => !witnessedRefs.has(ref) && !authored.has(ref)).sort(codepointCompare);
-      const evidence = refs.filter((ref) => witnessedRefs.has(ref));
+      const resolving = refs.filter((ref) => witnessedRefs.has(ref));
       // Citing only narration is evidentially identical to citing nothing, so it lands on
       // UNSUPPORTED rather than UNRESOLVED_EVIDENCE — the ref did resolve, and saying otherwise
       // would be its own small overclaim.
       const support = unresolved.length > 0
         ? 'UNRESOLVED_EVIDENCE'
-        : evidence.length === 0 ? 'UNSUPPORTED' : 'SUPPORTED';
-      // Verified Context is the default because the owner reading their own machine should see
-      // their own claim. Proof Mode projects the text away for a packet that leaves the machine —
-      // the support label and its evidence refs survive either way, so a content-blind packet is
-      // still auditable, just not readable.
-      const claim = {
-        seq: event.seq,
-        ref: `sha256:${event.event_hash}`,
-        statement: event.payload?.statement ?? '',
-        statement_ref: event.payload?.statement_ref ?? null,
-        evidence_refs: [...refs].sort(codepointCompare),
-        unresolved_refs: unresolved,
-        support
-      };
-      if (privacyMode !== 'proof' && event.payload?.statement_text) {
-        claim.statement_text = event.payload.statement_text;
-      }
-      return claim;
+        : resolving.length === 0 ? 'UNSUPPORTED' : 'REFERENCES_RESOLVE';
+      return finishClaim(event, refs, unresolved, support, privacyMode);
     })
     .sort((a, b) => a.seq - b.seq);
 }
 
-/** What a human should read for this claim: the words when retained, the shape when projected away. */
+/**
+ * The 0.1.31 fold, preserved so packets written by that build still verify against themselves.
+ * Do not "fix" it — its wrongness is the historical fact a v0 packet is entitled to reproduce.
+ */
+function labelClaimsV0(events, privacyMode) {
+  const witnessedRefs = new Set(events.map((event) => `sha256:${event.event_hash}`));
+  return events
+    .filter((event) => event.type === 'builder_claim')
+    .map((event) => {
+      const refs = event.payload?.evidence_refs || [];
+      const unresolved = refs.filter((ref) => !witnessedRefs.has(ref)).sort(codepointCompare);
+      const support = refs.length === 0
+        ? 'UNSUPPORTED'
+        : unresolved.length > 0 ? 'UNRESOLVED_EVIDENCE' : 'SUPPORTED';
+      return finishClaim(event, refs, unresolved, support, privacyMode);
+    })
+    .sort((a, b) => a.seq - b.seq);
+}
+
+/** Shared claim shape. Identical across folds — only the support decision differs. */
+function finishClaim(event, refs, unresolved, support, privacyMode) {
+  // Verified Context is the default because the owner reading their own machine should see their
+  // own claim. Proof Mode projects the text away for a packet that leaves the machine — the support
+  // label and its evidence refs survive either way, so a content-blind packet is still auditable.
+  const claim = {
+    seq: event.seq,
+    ref: `sha256:${event.event_hash}`,
+    statement: event.payload?.statement ?? '',
+    statement_ref: event.payload?.statement_ref ?? null,
+    evidence_refs: [...refs].sort(codepointCompare),
+    unresolved_refs: unresolved,
+    support
+  };
+  if (privacyMode !== 'proof' && event.payload?.statement_text) {
+    claim.statement_text = event.payload.statement_text;
+  }
+  return claim;
+}
+
+export function labelClaims(events, privacyMode = 'verified_context', foldVersion = CURRENT_FOLD_VERSION) {
+  return foldVersion === 'v0' ? labelClaimsV0(events, privacyMode) : labelClaimsV1(events, privacyMode);
+}
+
 export function claimText(claim) {
   return claim.statement_text || claim.statement;
 }
@@ -130,7 +178,7 @@ function entry(statement, ref) {
  * SETTLED — terminal, witnessed facts the next window may rely on without redoing the work.
  * Every line is derived from a structural fact already in the ledger or sealed state.
  */
-function buildSettled(state, events, claims) {
+function buildSettled(state, events, claims, foldVersion) {
   const settled = [];
   const sealEvent = events.find((event) => event.type === 'run_sealed');
   if (state.sealed && sealEvent) {
@@ -150,9 +198,16 @@ function buildSettled(state, events, claims) {
       evaluation.id
     ));
   }
-  for (const claim of claims) {
-    if (claim.support !== 'SUPPORTED') continue;
-    settled.push(entry(`Builder claim supported by witnessed evidence: ${claimText(claim)}`, claim.ref));
+  // v1 promotes NO builder claim into settled. Settled means terminal, witnessed facts a successor
+  // may rely on without redoing the work, and no structural check can establish that an agent's
+  // statement is true — only that a reference it cited points at something real. The claims list
+  // carries every claim with its label; that is where a reader judges them. Under v0 the promotion
+  // is reproduced exactly as it happened, because a v0 packet is entitled to re-fold to its own bytes.
+  if (foldVersion === 'v0') {
+    for (const claim of claims) {
+      if (claim.support !== 'SUPPORTED') continue;
+      settled.push(entry(`Builder claim supported by witnessed evidence: ${claimText(claim)}`, claim.ref));
+    }
   }
   return settled;
 }
@@ -193,7 +248,7 @@ function buildOpen(state, events, claims) {
     open.push(entry(`PR snapshot ${snapshot.id} is ${snapshot.status}; its head was not observed consistent.`, snapshot.id));
   }
   for (const claim of claims) {
-    if (claim.support === 'SUPPORTED') continue;
+    if (claim.support === 'SUPPORTED' || claim.support === 'REFERENCES_RESOLVE') continue;
     open.push(entry(`Builder claim is ${claim.support} within configured coverage: ${claimText(claim)}`, claim.ref));
   }
   return open;
@@ -262,12 +317,16 @@ export function deriveCapsuleRef(capsule) {
   return sha256(canonicalJson(rest));
 }
 
-export function buildContinuation(state, events) {
+export function buildContinuation(state, events, foldVersion = CURRENT_FOLD_VERSION) {
   const privacyMode = state.privacy_mode || 'verified_context';
-  const claims = labelClaims(events, privacyMode);
+  const claims = labelClaims(events, privacyMode, foldVersion);
   const open = buildOpen(state, events, claims);
   const capsule = {
     schema: CONTINUATION_VERSION,
+    // Declared for a reader's benefit only. Verification NEVER dispatches on this field — the
+    // capsule is unanchored, so trusting it would let a forged packet pick the reducer that makes
+    // it verify. The checker reads the renderer from the hash-chained anchor and cross-checks.
+    ...(foldVersion === 'v0' ? {} : { continuation_fold_version: foldVersion }),
     run_id: state.id,
     mode: state.mode,
     privacy_mode: privacyMode,
@@ -280,7 +339,7 @@ export function buildContinuation(state, events) {
     inherits: state.inherits || null,
     witnessed: buildWitnessed(state, events),
     claims,
-    settled: buildSettled(state, events, claims),
+    settled: buildSettled(state, events, claims, foldVersion),
     open,
     next: buildNext(open),
     limitations: [
