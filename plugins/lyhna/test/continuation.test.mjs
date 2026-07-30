@@ -77,9 +77,13 @@ test('claims are labeled against witnessed evidence, not accepted as narration',
   isolatedData(t);
   const parent = mintSession({ sessionId: 'claims' });
   const run = beginRun(parent, { mode: 'full', objective: 'Check claims.' });
-  const anchor = recordClaim(parent, 'First observable step completed.', []);
+  // The witnessed event to cite is run_begun (origin mcp_routed) — something the witness observed,
+  // not something the agent asserted. An earlier revision of this test cited another recordClaim
+  // here and asserted SUPPORTED, which encoded the very laundering the test is named for.
+  const witnessed = getRunForTesting(run.id).events.find((event) => event.type === 'run_begun');
+  const narration = recordClaim(parent, 'First observable step completed.', []);
 
-  recordClaim(parent, 'Backed by a real event in this run.', [`sha256:${anchor.event_hash}`]);
+  recordClaim(parent, 'Backed by a real event in this run.', [`sha256:${witnessed.event_hash}`]);
   recordClaim(parent, 'Backed by something this run never saw.', [`sha256:${'e'.repeat(64)}`]);
 
   const { events } = getRunForTesting(run.id);
@@ -90,6 +94,76 @@ test('claims are labeled against witnessed evidence, not accepted as narration',
   assert.ok(bySupport.UNSUPPORTED, 'a claim citing no evidence is UNSUPPORTED');
   assert.ok(bySupport.SUPPORTED, 'a claim citing a witnessed event is SUPPORTED');
   assert.ok(bySupport.UNRESOLVED_EVIDENCE, 'a claim citing an unknown ref is UNRESOLVED_EVIDENCE, not UNSUPPORTED');
+
+  // The laundering path itself: an agent's own assertion is not evidence for another assertion.
+  // Citing narration resolves perfectly well and is still worth nothing, so it lands on
+  // UNSUPPORTED — not UNRESOLVED_EVIDENCE, which would wrongly say the reference did not resolve.
+  recordClaim(parent, 'I deployed production.', [`sha256:${narration.event_hash}`]);
+  const laundered = labelClaims(getRunForTesting(run.id).events).at(-1);
+  assert.equal(laundered.support, 'UNSUPPORTED', 'a claim citing another claim must never be SUPPORTED');
+  assert.deepEqual(laundered.unresolved_refs, [], 'the cited claim does resolve — it is simply not evidence');
+});
+
+test('narration cited as evidence never reaches the settled section', (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'launder' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Deploy something.' });
+
+  // Two identical claims. The only difference is that the second cites the first. If a claim can
+  // be its own evidence, the second renders SUPPORTED and is promoted into `settled` — the section
+  // a successor window is told it may rely on without redoing the work. SPEC is explicit that
+  // settled is never agent narration.
+  const first = recordClaim(parent, 'I deployed production.', []);
+  recordClaim(parent, 'I deployed production.', [`sha256:${first.event_hash}`]);
+
+  const { state, events } = getRunForTesting(run.id);
+  const claims = labelClaims(events);
+  assert.deepEqual(
+    claims.map((claim) => claim.support),
+    ['UNSUPPORTED', 'UNSUPPORTED'],
+    'citing narration must not upgrade an identical claim'
+  );
+
+  const capsule = buildContinuation(state, events);
+  const settledText = JSON.stringify(capsule.settled);
+  assert.doesNotMatch(settledText, /deployed production/, 'narration must never be promoted to settled');
+});
+
+test('an abandoned window hands off a continuation that actually verifies', (t) => {
+  isolatedData(t);
+  // The open-to-open path: the window got expensive and was never closed, which is the exact case
+  // the checkpoint handoff exists to serve. Sealed lineage and open handoff rendering were each
+  // covered before; the path connecting them was not.
+  const first = mintSession({ sessionId: 'open-1' });
+  const firstRun = beginRun(first, { mode: 'full', objective: 'Expensive window, never closed.' });
+  recordClaim(first, 'Some work happened.', []);
+  const stop = checkpointOrSeal(first, 'open-1-stop');
+  assert.equal(stop.status, 'CHECKPOINTED', 'no close was requested, so this must not seal');
+
+  const firstDir = getRunForTesting(firstRun.id).directory;
+  const capsule = JSON.parse(readFileSync(join(firstDir, 'continuation.json'), 'utf8'));
+  assert.equal(capsule.status, 'OPEN');
+
+  const second = mintSession({ sessionId: 'open-2' });
+  const secondRun = beginRun(second, {
+    mode: 'full',
+    objective: 'Successor window.',
+    continuesFrom: capsule.capsule_ref
+  });
+  // An OPEN capsule must be resolvable, or the successor commits a null state hash it can never match.
+  assert.equal(
+    getRunForTesting(secondRun.id).state.inherits.resolution,
+    'RESOLVED_LOCAL_PACKET',
+    'an open capsule must be indexed, not left UNRESOLVED_LOCALLY'
+  );
+  checkpointOrSeal(second, 'open-2-stop');
+
+  const report = verifyLineage(firstDir, getRunForTesting(secondRun.id).directory);
+  assert.deepEqual(report.checks.map((item) => item.name), LINEAGE_CHECKS);
+  assert.ok(
+    report.ok,
+    `open-to-open must verify:\n${report.checks.filter((c) => c.status !== 'PASS').map((c) => `${c.status} ${c.name}: ${c.detail}`).join('\n')}`
+  );
 });
 
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {

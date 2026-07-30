@@ -52,15 +52,31 @@ function countBy(items, key) {
  * would be the overclaim this system exists to prevent.
  */
 export function labelClaims(events, privacyMode = 'verified_context') {
-  const witnessedRefs = new Set(events.map((event) => `sha256:${event.event_hash}`));
+  // An agent's own assertion is NEVER evidence for another of its assertions. The ledger witnesses
+  // that a claim was MADE; it does not witness that it was TRUE. Resolving refs against every event
+  // let a claim cite an earlier claim's event hash, render SUPPORTED, and get promoted into
+  // `settled` — which SPEC requires never to be agent narration. Two identical claims, the second
+  // citing the first, were enough to launder narration into witnessed evidence.
+  const authored = new Set(
+    events.filter((event) => event.origin === 'agent_reported').map((event) => `sha256:${event.event_hash}`)
+  );
+  const witnessedRefs = new Set(
+    events.filter((event) => event.origin !== 'agent_reported').map((event) => `sha256:${event.event_hash}`)
+  );
   return events
     .filter((event) => event.type === 'builder_claim')
     .map((event) => {
       const refs = event.payload?.evidence_refs || [];
-      const unresolved = refs.filter((ref) => !witnessedRefs.has(ref)).sort(codepointCompare);
-      const support = refs.length === 0
-        ? 'UNSUPPORTED'
-        : unresolved.length > 0 ? 'UNRESOLVED_EVIDENCE' : 'SUPPORTED';
+      // Resolves to nothing at all. Kept distinct from narration: a ref this run cannot see may be
+      // valid elsewhere, while a ref to narration resolves perfectly well and still is not evidence.
+      const unresolved = refs.filter((ref) => !witnessedRefs.has(ref) && !authored.has(ref)).sort(codepointCompare);
+      const evidence = refs.filter((ref) => witnessedRefs.has(ref));
+      // Citing only narration is evidentially identical to citing nothing, so it lands on
+      // UNSUPPORTED rather than UNRESOLVED_EVIDENCE — the ref did resolve, and saying otherwise
+      // would be its own small overclaim.
+      const support = unresolved.length > 0
+        ? 'UNRESOLVED_EVIDENCE'
+        : evidence.length === 0 ? 'UNSUPPORTED' : 'SUPPORTED';
       // Verified Context is the default because the owner reading their own machine should see
       // their own claim. Proof Mode projects the text away for a packet that leaves the machine —
       // the support label and its evidence refs survive either way, so a content-blind packet is

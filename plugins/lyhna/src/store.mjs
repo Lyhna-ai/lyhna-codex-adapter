@@ -123,6 +123,12 @@ function writeContinuationArtifacts(runId, state, events) {
   }
   atomicWriteText(join(runDir(runId), 'continuation.json'), canonicalJson(published, true));
   atomicWriteText(join(runDir(runId), 'HANDOFF.md'), renderHandoffMarkdown(published));
+  // Index here, at the single choke point that writes a capsule, rather than only at the seal.
+  // Indexing on seal alone made every OPEN capsule unresolvable: a successor handed the exact
+  // capsule_ref recorded UNRESOLVED_LOCALLY with a null state_hash, so its inheritance commitment
+  // could never match and the chain read NOT LINKED. The abandoned window is precisely the case
+  // the checkpoint path exists to serve, so it is the one that must resolve.
+  atomicWriteJson(capsuleIndexPath(published.capsule_ref), { run_id: runId, capsule_ref: published.capsule_ref });
   return published;
 }
 
@@ -1344,7 +1350,14 @@ function writeCheckpointArtifacts(runId, state) {
   // Every Stop refreshes the handoff, so a window that is abandoned rather than closed still leaves
   // a current continuation for the next one. This is the case that matters most in practice: the
   // human switches windows because the window got expensive, not because the work reached a close.
-  writeContinuationArtifacts(runId, state, events);
+  //
+  // Fold from the ledger AS IT NOW STANDS, including the anchor event just appended. `events` above
+  // was parsed before that append while `state` has since advanced past it, and folding the two
+  // together produced a capsule that could not be re-folded from the packet: the checker reads
+  // state.json (post-anchor) and the full ledger (post-anchor), so a pre-anchor fold never matched
+  // and `prior_continuation_refolds` failed on every open window.
+  const { events: anchoredEvents } = parseLedger(runId);
+  writeContinuationArtifacts(runId, state, anchoredEvents);
   atomicWriteJson(checkpointAnchorPath(runId), {
     run_id: runId,
     as_of_seq: coversSeq,
