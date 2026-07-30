@@ -166,6 +166,36 @@ test('an abandoned window hands off a continuation that actually verifies', (t) 
   );
 });
 
+test('a crash between the capsule and its index is repaired by the replayed Stop', (t) => {
+  const root = isolatedData(t);
+  const parent = mintSession({ sessionId: 'crash-index' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Crashes mid artifact write.' });
+  recordClaim(parent, 'Some work happened.', []);
+  checkpointOrSeal(parent, 'crash-index-stop');
+
+  // Artifacts are written continuation -> handoff -> index. Model a crash in that tail: the capsule
+  // persisted, its index entry did not. The anchor event is already in the ledger, so the replayed
+  // Stop considers the packet complete and would never revisit it.
+  const indexDir = join(root, 'capsule-index');
+  rmSync(indexDir, { recursive: true, force: true });
+
+  checkpointOrSeal(parent, 'crash-index-stop');
+  assert.ok(existsSync(indexDir), 'the replayed Stop must reconcile the missing index');
+
+  const capsule = JSON.parse(readFileSync(join(getRunForTesting(run.id).directory, 'continuation.json'), 'utf8'));
+  const next = mintSession({ sessionId: 'crash-index-next' });
+  const successor = beginRun(next, {
+    mode: 'full',
+    objective: 'Successor.',
+    continuesFrom: capsule.capsule_ref
+  });
+  assert.equal(
+    getRunForTesting(successor.id).state.inherits.resolution,
+    'RESOLVED_LOCAL_PACKET',
+    'a repaired index must let the successor resolve the capsule it names'
+  );
+});
+
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {
   isolatedData(t);
   const { run, sealed, directory } = runWindow({

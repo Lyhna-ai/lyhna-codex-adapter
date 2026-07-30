@@ -132,6 +132,20 @@ function writeContinuationArtifacts(runId, state, events) {
   return published;
 }
 
+/**
+ * Re-assert the index entry for a capsule already on disk. The index is a derived cache of a fact
+ * the packet already states, so rebuilding it is always safe and never invents a link: the ref is
+ * read from the capsule itself. Called on the replayed-Stop path, where a crash between writing the
+ * capsule and writing its index would otherwise be permanent — the anchor event makes the packet
+ * look complete, so nothing else would ever repair it.
+ */
+function ensureCapsuleIndexed(runId) {
+  const published = readJson(join(runDir(runId), 'continuation.json'), null);
+  const ref = published?.capsule_ref;
+  if (!ref || readJson(capsuleIndexPath(ref), null)) return;
+  atomicWriteJson(capsuleIndexPath(ref), { run_id: runId, capsule_ref: ref });
+}
+
 // A capsule_ref -> run_id index, so a run started in a LATER session (a new window is a new
 // session_id) can resolve the predecessor it names. Mirrors the receipt index.
 function capsuleIndexPath(capsuleRef) {
@@ -1198,6 +1212,12 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       // activity into a fresh anchor for a repeated hook). Never re-seal or re-defer.
       const packetComplete = preEvents.some((event) => event.type === 'checkpoint_anchor' && event.seq > priorCheckpoint.seq);
       if (!packetComplete) writeCheckpointArtifacts(runId, current);
+      // An anchor proves the packet was anchored, NOT that every derived artifact landed. Artifact
+      // writes run continuation → handoff → index, so a crash in that tail leaves an anchored packet
+      // whose capsule no successor can resolve — and the anchor is exactly what makes this branch
+      // skip the repair. Reconcile the index from the capsule already on disk; it restates a fact
+      // the packet holds, so it can never invent a link.
+      else ensureCapsuleIndexed(runId);
       return { status: current.close_requested ? 'CLOSE_DEFERRED' : 'CHECKPOINTED', run_id: runId, replayed_delivery: true };
     }
     appendEventUnlocked(runId, current, {
@@ -1312,8 +1332,14 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
 function writeCheckpointArtifacts(runId, state) {
   const { events, tip } = parseLedger(runId);
   // Nothing happened since the previous anchor (e.g. a redelivered Stop deduped its checkpoint
-  // event): the ledger tip IS the anchor; re-anchoring would anchor the anchor. Idempotent no-op.
-  if (events.at(-1)?.type === 'checkpoint_anchor') return;
+  // event): the ledger tip IS the anchor; re-anchoring would anchor the anchor. Idempotent no-op —
+  // except that the index must still be reconciled. Artifact writes are ordered continuation →
+  // handoff → index, so a crash between the capsule and its index leaves a packet whose capsule the
+  // successor cannot resolve, and the replayed Stop would otherwise return here and never repair it.
+  if (events.at(-1)?.type === 'checkpoint_anchor') {
+    ensureCapsuleIndexed(runId);
+    return;
+  }
   // Recover the state prefix before hashing: on a replayed Stop whose original delivery crashed after
   // appending turn_checkpoint/close_deferred but before saveState, the cached state lags the ledger.
   // Those events do not mutate semantic state, so advancing ledger_count/ledger_tip (after asserting
