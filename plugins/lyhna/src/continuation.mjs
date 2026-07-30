@@ -58,6 +58,24 @@ export const CURRENT_FOLD_VERSION = 'v1';
 export const KNOWN_FOLD_VERSIONS = ['v0', 'v1'];
 
 /**
+ * Which fold generation a HISTORICAL renderer used — packets from builds that predate the
+ * chained `continuation_fold_version` field. A closed whitelist, deliberately: inferring a fold
+ * from an open-ended version range means a renderer from the future silently gets folded with
+ * current rules, which is exactly the "never guess an unknown fold" requirement inverted. A
+ * renderer not in this list, with no chained fold declaration, is unknown and must be reported.
+ */
+const HISTORICAL_RENDERER_FOLDS = {
+  '0.1.28': 'v0',
+  '0.1.29': 'v0',
+  '0.1.30': 'v0',
+  '0.1.31': 'v0'
+};
+
+export function foldVersionForRenderer(renderer) {
+  return HISTORICAL_RENDERER_FOLDS[String(renderer ?? '')] ?? null;
+}
+
+/**
  * Claimed-vs-actual, at the handoff layer.
  *
  * A builder claim is agent-reported by construction. What this system can establish about it is
@@ -248,7 +266,14 @@ function buildOpen(state, events, claims) {
     open.push(entry(`PR snapshot ${snapshot.id} is ${snapshot.status}; its head was not observed consistent.`, snapshot.id));
   }
   for (const claim of claims) {
-    if (claim.support === 'SUPPORTED' || claim.support === 'REFERENCES_RESOLVE') continue;
+    if (claim.support === 'SUPPORTED') continue;
+    if (claim.support === 'REFERENCES_RESOLVE') {
+      // Not settled, and not silent either. The references point at real witnessed events; whether
+      // they bear on the statement was never evaluated, and the successor must be told so rather
+      // than left to read absence-from-open as cleared.
+      open.push(entry(`Builder claim cites references that resolve, but their relevance to the claim was never evaluated: ${claimText(claim)}`, claim.ref));
+      continue;
+    }
     open.push(entry(`Builder claim is ${claim.support} within configured coverage: ${claimText(claim)}`, claim.ref));
   }
   return open;

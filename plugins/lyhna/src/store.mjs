@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { atomicWriteJson, atomicWriteText, assert, canonicalJson, dataRoot, ORIGINS, readJson, sha256, withLock } from './util.mjs';
 import { boundedText, objectiveText, promptSynopsis, reference, sanitizeClaim, structuralSummary } from './redact.mjs';
 import { renderReceiptJson, renderReceiptMarkdown } from './receipt.mjs';
-import { buildContinuation, renderContinuationJson } from './continuation.mjs';
+import { buildContinuation, renderContinuationJson, CURRENT_FOLD_VERSION, KNOWN_FOLD_VERSIONS, foldVersionForRenderer } from './continuation.mjs';
 import { renderHandoffMarkdown } from './handoff.mjs';
 import { loadOrCreateKeypair, signCapsule } from './signing.mjs';
 import { ADAPTER_VERSION } from './version.mjs';
@@ -110,8 +110,8 @@ function receiptIndexPath(receiptId) {
 // edited file, while a re-fold also catches a file regenerated wholesale with a matching hash.
 // Keeping them out of the anchor payload also preserves read-compat with packets sealed by an
 // earlier renderer, whose anchors have no such fields.
-function writeContinuationArtifacts(runId, state, events) {
-  const capsule = buildContinuation(state, events);
+function writeContinuationArtifacts(runId, state, events, foldVersion = CURRENT_FOLD_VERSION) {
+  const capsule = buildContinuation(state, events, foldVersion);
   // Signing is best-effort at the artifact layer: a machine that cannot mint or read a key still
   // gets a complete, verifiable-by-hash packet. An UNSIGNED capsule is honest; a packet that
   // silently failed to write would not be.
@@ -133,14 +133,32 @@ function writeContinuationArtifacts(runId, state, events) {
 }
 
 /**
- * Re-assert the index entry for a capsule already on disk. The index is a derived cache of a fact
- * the packet already states, so rebuilding it is always safe and never invents a link: the ref is
- * read from the capsule itself. Called on the replayed-Stop path, where a crash between writing the
- * capsule and writing its index would otherwise be permanent — the anchor event makes the packet
- * look complete, so nothing else would ever repair it.
+ * Repair the Stop artifact tail on a replayed delivery. The anchor event proves the packet was
+ * anchored — not that the artifacts after it landed. Writes run continuation → handoff → index, so
+ * a crash anywhere in that tail leaves a packet the anchor declares complete and nothing else would
+ * ever repair: a missing index strands the successor at UNRESOLVED_LOCALLY, and a missing capsule
+ * or handoff breaks the SPEC promise that every observed Stop leaves a verifiable handoff.
+ *
+ * Regeneration folds under the generation the CHAIN commits to, never blindly with current code —
+ * repairing a packet whose anchor names an older fold with today's reducer would republish a
+ * capsule its own ledger no longer refolds to. A fold this build cannot place is left alone: a
+ * wrong repair is worse than a missing file, which at least reports honestly.
  */
-function ensureCapsuleIndexed(runId) {
-  const published = readJson(join(runDir(runId), 'continuation.json'), null);
+function ensureStopArtifacts(runId, state) {
+  const dir = runDir(runId);
+  const capsulePath = join(dir, 'continuation.json');
+  const handoffPath = join(dir, 'HANDOFF.md');
+  if (!existsSync(capsulePath) || !existsSync(handoffPath)) {
+    const { events } = parseLedger(runId);
+    const anchor = events.find((event) => event.type === 'run_sealed')
+      ?? [...events].reverse().find((event) => event.type === 'checkpoint_anchor');
+    const fold = anchor?.payload?.continuation_fold_version
+      ?? foldVersionForRenderer(anchor?.payload?.receipt_renderer);
+    if (!KNOWN_FOLD_VERSIONS.includes(fold)) return;
+    writeContinuationArtifacts(runId, state, events, fold);
+    return;
+  }
+  const published = readJson(capsulePath, null);
   const ref = published?.capsule_ref;
   if (!ref || readJson(capsuleIndexPath(ref), null)) return;
   atomicWriteJson(capsuleIndexPath(ref), { run_id: runId, capsule_ref: ref });
@@ -1217,7 +1235,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       // whose capsule no successor can resolve — and the anchor is exactly what makes this branch
       // skip the repair. Reconcile the index from the capsule already on disk; it restates a fact
       // the packet holds, so it can never invent a link.
-      else ensureCapsuleIndexed(runId);
+      else ensureStopArtifacts(runId, current);
       return { status: current.close_requested ? 'CLOSE_DEFERRED' : 'CHECKPOINTED', run_id: runId, replayed_delivery: true };
     }
     appendEventUnlocked(runId, current, {
@@ -1283,7 +1301,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       origin: 'runtime_hook',
       // The renderer version lives in the hash-chained ledger, not only in the mutable
       // anchor file, so verification's renderer gate cannot be downgraded by editing the anchor.
-      payload: { status: 'SEALED', receipt_renderer: ADAPTER_VERSION },
+      payload: { status: 'SEALED', receipt_renderer: ADAPTER_VERSION, continuation_fold_version: CURRENT_FOLD_VERSION },
       idempotencyKey: `seal:${runId}`
     });
     const { events, tip } = parseLedger(runId);
@@ -1337,7 +1355,7 @@ function writeCheckpointArtifacts(runId, state) {
   // handoff → index, so a crash between the capsule and its index leaves a packet whose capsule the
   // successor cannot resolve, and the replayed Stop would otherwise return here and never repair it.
   if (events.at(-1)?.type === 'checkpoint_anchor') {
-    ensureCapsuleIndexed(runId);
+    ensureStopArtifacts(runId, state);
     return;
   }
   // Recover the state prefix before hashing: on a replayed Stop whose original delivery crashed after
@@ -1366,7 +1384,11 @@ function writeCheckpointArtifacts(runId, state) {
       state_hash: stateHash,
       receipt_json_hash: receiptJsonHash,
       receipt_markdown_hash: receiptMarkdownHash,
-      receipt_renderer: ADAPTER_VERSION
+      receipt_renderer: ADAPTER_VERSION,
+      // The fold generation, committed in the chain so the lineage checker can dispatch on it.
+      // The capsule also declares it, but the capsule is unanchored — a forged packet could set
+      // that copy to whichever reducer verifies. This one it cannot touch.
+      continuation_fold_version: CURRENT_FOLD_VERSION
     },
     idempotencyKey: `checkpoint-anchor:${coversSeq}`
   });

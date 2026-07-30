@@ -21,18 +21,18 @@ const SUPPORT_MARK = {
   UNRESOLVED_EVIDENCE: 'UNRESOLVED EVIDENCE'
 };
 
-/** A claim whose references at least resolve, under either fold generation. */
-function resolves(claim) {
-  return claim.support === 'REFERENCES_RESOLVE' || claim.support === 'SUPPORTED';
-}
-
 /**
  * The prompt a human pastes into the next window. It deliberately points the next agent at the
- * capsule rather than at prose: prose is what drifts. The instruction to treat unsupported claims
- * as unverified is the whole point of the artifact.
+ * capsule rather than at prose: prose is what drifts. The instruction to treat unverified claims
+ * as unverified is the whole point of the artifact — and REFERENCES_RESOLVE is unverified too. Its
+ * references point at real events; whether they bear on the statement was never evaluated, and a
+ * prompt that stays silent about that treats "cites something real" as "cleared", which is the
+ * laundering defect moved from the reducer onto the human surface.
  */
 export function buildHandoffPrompt(capsule) {
-  const unsupported = capsule.claims.filter((claim) => !resolves(claim)).length;
+  const unsupported = capsule.claims.filter((claim) => claim.support === 'UNSUPPORTED' || claim.support === 'UNRESOLVED_EVIDENCE').length;
+  const unevaluated = capsule.claims.filter((claim) => claim.support === 'REFERENCES_RESOLVE').length;
+  const legacy = capsule.claims.filter((claim) => claim.support === 'SUPPORTED').length;
   const lines = [
     `You are continuing run ${capsule.run_id}.`,
     `Start from this capsule, not from a transcript or a summary: continuation.json (capsule_ref ${capsule.capsule_ref}).`,
@@ -41,6 +41,12 @@ export function buildHandoffPrompt(capsule) {
   ];
   if (unsupported > 0) {
     lines.push(`${unsupported} claim(s) from the previous window have no witnessed support in that run — treat them as unverified until you check them yourself.`);
+  }
+  if (unevaluated > 0) {
+    lines.push(`${unevaluated} claim(s) cite references that resolve to witnessed events, but whether those events actually bear on the claims was never evaluated — a resolving reference is not verification, so re-check these too before relying on them.`);
+  }
+  if (legacy > 0) {
+    lines.push(`${legacy} claim(s) carry the legacy SUPPORTED label from an earlier fold; under current rules that label only meant the cited references resolved — treat them exactly like unevaluated claims.`);
   }
   if (capsule.inherits) {
     lines.push(`This run itself continued from capsule ${capsule.inherits.capsule_ref}; the chain is verifiable with verify-lineage.`);
@@ -97,7 +103,10 @@ export function renderHandoffMarkdown(capsule) {
   if (!capsule.claims.length) {
     lines.push('- No builder claims were recorded in this run.', '');
   } else {
-    lines.push('| Support | Claim | Evidence |', '| --- | --- | --- |');
+    // "Reference check", not "Support": the column reports whether cited references resolve to
+    // witnessed events, and nothing else. A column named Support would claim the judgment this
+    // system deliberately does not make.
+    lines.push('| Reference check | Claim | Evidence cited |', '| --- | --- | --- |');
     for (const claim of capsule.claims) {
       const evidence = claim.evidence_refs.length ? claim.evidence_refs.join('<br>') : '_none cited_';
       const text = (claim.statement_text || claim.statement).replaceAll('|', '\\|');

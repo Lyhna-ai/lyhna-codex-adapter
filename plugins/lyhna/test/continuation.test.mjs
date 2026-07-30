@@ -181,10 +181,29 @@ test('a crash between the capsule and its index is repaired by the replayed Stop
   // persisted, its index entry did not. The anchor event is already in the ledger, so the replayed
   // Stop considers the packet complete and would never revisit it.
   const indexDir = join(root, 'capsule-index');
+  const runDirectory = getRunForTesting(run.id).directory;
   rmSync(indexDir, { recursive: true, force: true });
 
   checkpointOrSeal(parent, 'crash-index-stop');
   assert.ok(existsSync(indexDir), 'the replayed Stop must reconcile the missing index');
+
+  // The wider crash window: the anchor landed but NOTHING after it did. The anchor is exactly what
+  // makes the replay declare the packet complete, so without explicit repair these files stay
+  // missing forever and the SPEC promise — every observed Stop leaves a verifiable handoff — fails.
+  const intactCapsule = readFileSync(join(runDirectory, 'continuation.json'), 'utf8');
+  rmSync(join(runDirectory, 'continuation.json'));
+  rmSync(join(runDirectory, 'HANDOFF.md'));
+  rmSync(indexDir, { recursive: true, force: true });
+
+  checkpointOrSeal(parent, 'crash-index-stop');
+  assert.ok(existsSync(join(runDirectory, 'continuation.json')), 'the replayed Stop must restore the capsule');
+  assert.ok(existsSync(join(runDirectory, 'HANDOFF.md')), 'the replayed Stop must restore the handoff');
+  assert.ok(existsSync(indexDir), 'and the index with them');
+  assert.equal(
+    readFileSync(join(runDirectory, 'continuation.json'), 'utf8'),
+    intactCapsule,
+    'the restored capsule is byte-identical — a repair is a re-fold, never new content'
+  );
 
   const capsule = JSON.parse(readFileSync(join(getRunForTesting(run.id).directory, 'continuation.json'), 'utf8'));
   const next = mintSession({ sessionId: 'crash-index-next' });
@@ -260,24 +279,67 @@ test('a renderer this checker cannot place is reported, never folded with curren
   // parser reads "9.9.9-experimental" as 9.9.9 and silently selects the current reducer, which is
   // the one outcome this must never produce.
   const ledgerPath = join(first.directory, 'events.jsonl');
-  const events = readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
-  let previous = '0'.repeat(64);
-  for (const event of events) {
-    if (event.payload?.receipt_renderer) event.payload.receipt_renderer = '9.9.9-experimental';
-    event.prev_hash = previous;
-    const { event_hash: _drop, ...rest } = event;
-    event.event_hash = sha256(canonicalJson(rest));
-    previous = event.event_hash;
-  }
-  writeFileSync(ledgerPath, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`);
+  const rechain = (mutate) => {
+    const events = readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    let previous = '0'.repeat(64);
+    for (const event of events) {
+      mutate(event);
+      event.prev_hash = previous;
+      const { event_hash: _drop, ...rest } = event;
+      event.event_hash = sha256(canonicalJson(rest));
+      previous = event.event_hash;
+    }
+    writeFileSync(ledgerPath, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`);
+  };
 
-  const report = verifyLineage(first.directory, second.directory);
+  // A historical/foreign packet: VALID semver the whitelist has never heard of, and no chained
+  // fold declaration. "9.9.9" parses cleanly — an open-ended version range would map it onto the
+  // current reducer and verify a fold this checker knows nothing about. The whitelist must not.
+  rechain((event) => {
+    if (event.payload?.receipt_renderer) event.payload.receipt_renderer = '9.9.9';
+    if (event.payload?.continuation_fold_version) delete event.payload.continuation_fold_version;
+  });
+  let report = verifyLineage(first.directory, second.directory);
   assert.equal(report.checks.find((item) => item.name === 'prior_chain_valid').status, 'PASS');
   assert.equal(report.prior_fold_version, null);
-  const refolds = report.checks.find((item) => item.name === 'prior_continuation_refolds');
-  assert.equal(refolds.status, 'NOT_RUN', 'an unknown fold generation is reported, not guessed');
-  assert.match(refolds.detail, /not a version this checker can place/);
+  let refolds = report.checks.find((item) => item.name === 'prior_continuation_refolds');
+  assert.equal(refolds.status, 'NOT_RUN', 'a whitelisted-unknown renderer is reported, not folded with current rules');
+  assert.match(refolds.detail, /cannot place/);
   assert.equal(report.ok, false, 'an unknown fold must fail safe');
+
+  // A chained fold declaration this build does not implement. Same rule, other path. The prior
+  // rechain stripped the field, so re-declare it on the anchor events themselves.
+  rechain((event) => {
+    if (event.type === 'checkpoint_anchor' || event.type === 'run_sealed') event.payload.continuation_fold_version = 'v99';
+  });
+  report = verifyLineage(first.directory, second.directory);
+  refolds = report.checks.find((item) => item.name === 'prior_continuation_refolds');
+  assert.equal(refolds.status, 'NOT_RUN', 'a declared-but-unimplemented fold generation is reported');
+  assert.match(refolds.detail, /does not implement/);
+  assert.equal(report.ok, false);
+});
+
+test('the handoff never presents a resolving reference as cleared', (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'surface' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Something unrelated.' });
+  const begun = getRunForTesting(run.id).events.find((event) => event.type === 'run_begun');
+  recordClaim(parent, 'I deployed production.', [`sha256:${begun.event_hash}`]);
+
+  const { state, events } = getRunForTesting(run.id);
+  const capsule = buildContinuation(state, events);
+
+  // The reducer keeps it out of settled; the surface must not quietly clear it either. It is open
+  // work, the pasted prompt says relevance was never evaluated, and the table column claims only
+  // what the system checked.
+  assert.ok(
+    capsule.open.some((item) => /relevance to the claim was never evaluated/.test(item.statement)),
+    'a REFERENCES_RESOLVE claim is open work, not silence'
+  );
+  const markdown = renderHandoffMarkdown(capsule);
+  assert.match(markdown, /never evaluated — a resolving reference is not verification/);
+  assert.match(markdown, /\| Reference check \| Claim \| Evidence cited \|/);
+  assert.doesNotMatch(markdown, /\| Support \|/, 'the column must not claim a judgment the system does not make');
 });
 
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {

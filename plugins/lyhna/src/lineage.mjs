@@ -36,7 +36,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { canonicalJson, sha256 } from './util.mjs';
-import { buildContinuation, buildCarryForward, deriveCapsuleRef, CURRENT_FOLD_VERSION, KNOWN_FOLD_VERSIONS } from './continuation.mjs';
+import { buildContinuation, buildCarryForward, deriveCapsuleRef, CURRENT_FOLD_VERSION, KNOWN_FOLD_VERSIONS, foldVersionForRenderer } from './continuation.mjs';
 import { verifyCapsuleSignature } from './signing.mjs';
 
 const ZERO_HASH = '0'.repeat(64);
@@ -181,20 +181,25 @@ function refoldContinuation(directory, events, foldVersion) {
 function foldVersionForPacket(events) {
   const sealed = events.find((event) => event.type === 'run_sealed');
   const anchor = sealed || [...events].reverse().find((event) => event.type === 'checkpoint_anchor');
-  const renderer = anchor?.payload?.receipt_renderer ?? null;
-  if (!renderer) return { ok: false, version: null, renderer: null, detail: 'the prior ledger commits to no renderer version, so its fold generation is unknown' };
-  // Strict, whole-string match. parseInt is far too permissive here — it reads "9.9.9-experimental"
-  // as 9.9.9 and would place a renderer this checker knows nothing about onto the current reducer,
-  // which is the one outcome that must never happen: an unknown fold is reported, never guessed.
-  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(renderer));
-  if (!match) {
-    return { ok: false, version: null, renderer, detail: `the prior ledger commits to renderer "${renderer}", which is not a version this checker can place` };
+  if (!anchor) return { ok: false, version: null, renderer: null, detail: 'the prior ledger commits to no anchor, so its fold generation is unknown' };
+  const renderer = anchor.payload?.receipt_renderer ?? null;
+  // First choice: the fold generation the chain itself commits to (0.1.32 onward writes it into
+  // the anchor payload). A declared generation this checker does not implement is reported, never
+  // approximated with current code.
+  const declared = anchor.payload?.continuation_fold_version;
+  if (declared !== undefined) {
+    if (!KNOWN_FOLD_VERSIONS.includes(declared)) {
+      return { ok: false, version: null, renderer, detail: `the prior ledger commits to fold generation "${declared}", which this checker does not implement` };
+    }
+    return { ok: true, version: declared, renderer, detail: `chained fold ${declared}` };
   }
-  const [major, minor, patch] = match.slice(1).map((part) => Number.parseInt(part, 10));
-  const before0132 = major === 0 && (minor < 1 || (minor === 1 && patch < 32));
-  const version = before0132 ? 'v0' : 'v1';
-  if (!KNOWN_FOLD_VERSIONS.includes(version)) {
-    return { ok: false, version: null, renderer, detail: `renderer "${renderer}" uses fold generation ${version}, which this checker does not implement` };
+  // No chained declaration: a historical packet. Dispatch ONLY off the closed whitelist of
+  // renderers that actually shipped before the field existed. No range inference — an open-ended
+  // "anything below X is v0, anything else is current" rule silently folds a renderer from the
+  // future with today's reducer, which is the one outcome that must never happen.
+  const version = foldVersionForRenderer(renderer);
+  if (!version) {
+    return { ok: false, version: null, renderer, detail: `the prior ledger commits to renderer "${renderer ?? 'none'}" with no fold declaration, which this checker cannot place` };
   }
   return { ok: true, version, renderer, detail: `renderer ${renderer} → fold ${version}` };
 }
