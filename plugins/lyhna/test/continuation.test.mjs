@@ -942,6 +942,36 @@ test('a stale face left by a crashed later Stop is replaced, and its fold preser
   assert.ok(report.ok, `the repaired packet must verify:\n${report.checks.filter((c) => c.status !== 'PASS').map((c) => `${c.status} ${c.name}: ${c.detail}`).join('\n')}`);
 });
 
+test('an issued handoff is not invalidated by activity after its Stop', (t) => {
+  isolatedData(t);
+  // Checkpoint, successor inherits the face, prior run records one more event and never Stops
+  // again — the abandoned-window case with a straggler event. The face's committed boundary is a
+  // genuine anchored prefix of the ledger, so it verifies against that prefix exactly as its
+  // archived copy would; a single post-Stop event must not flip refolds on an untouched packet.
+  const parent = mintSession({ sessionId: 'straggler' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Handoff, then a little more work.' });
+  recordClaim(parent, 'work', []);
+  checkpointOrSeal(parent, 'straggler-stop');
+  const directory = getRunForTesting(run.id).directory;
+  const ref = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8')).capsule_ref;
+
+  const next = mintSession({ sessionId: 'straggler-next' });
+  const successor = beginRun(next, { mode: 'full', objective: 'Successor.', continuesFrom: ref });
+  checkpointOrSeal(next, 'straggler-next-stop');
+
+  recordClaim(parent, 'a little more work after the handoff', []);
+
+  const report = verifyLineage(directory, getRunForTesting(successor.id).directory);
+  assert.ok(report.ok, `later activity must not invalidate the issued handoff:\n${report.checks.filter((c) => c.status !== 'PASS').map((c) => `${c.status} ${c.name}: ${c.detail}`).join('\n')}`);
+
+  // A tampered face must still fail: currency at a prefix is earned by refolding, not presumed.
+  const capsulePath = join(directory, 'continuation.json');
+  const face = JSON.parse(readFileSync(capsulePath, 'utf8'));
+  face.objective = 'edited after the fact';
+  writeFileSync(capsulePath, canonicalJson(face, true));
+  assert.equal(verifyLineage(directory, getRunForTesting(successor.id).directory).ok, false);
+});
+
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {
   isolatedData(t);
   const { run, sealed, directory } = runWindow({

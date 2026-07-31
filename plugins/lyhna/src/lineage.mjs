@@ -390,19 +390,45 @@ export function verifyLineage(priorDirectory, currentDirectory) {
   // disagree about which generation they judged the packet under.
   let matchedFold = null;
   let refoldOutcome = null;
+  let faceFold = fold;
   if (priorChain.ok && fold.ok) {
-    for (const candidate of fold.candidates) {
-      const refolded = refoldContinuation(priorDirectory, priorChain.events, candidate);
-      if (!refolded.ok) { refoldOutcome = refolded; break; }
-      const { signature: _publishedSignature, ...publishedCore } = published;
-      const { signature: _refoldedSignature, ...refoldedCore } = refolded.value;
-      if (canonicalJson(refoldedCore) === canonicalJson(publishedCore)) {
-        matchedFold = candidate;
-        break;
+    // A handoff already issued must not be invalidated by later activity. A face whose committed
+    // boundary is a genuine anchored PREFIX of the ledger — its tip sits at exactly the position it
+    // names, before the current tip — is the fold of that earlier Stop, byte-identical to its own
+    // archive: a single post-Stop event would otherwise flip prior_continuation_refolds on a packet
+    // nobody touched. Verify such a face against its own prefix, exactly as its archived copy is.
+    // The boundary must land on the chain (position-checked hash), so a forged count cannot select
+    // an arbitrary prefix; anything that is not a genuine prefix still folds against the full
+    // ledger and fails honestly.
+    const faceCount = published.witnessed?.event_count;
+    const facePrefix = Number.isInteger(faceCount)
+      && faceCount >= 1
+      && faceCount < priorChain.events.length
+      && priorChain.events[faceCount - 1]?.event_hash === published.witnessed?.ledger_tip
+      ? priorChain.events.slice(0, faceCount)
+      : null;
+    const foldEvents = facePrefix ?? priorChain.events;
+    if (facePrefix) {
+      faceFold = foldVersionForPacket(facePrefix);
+    }
+    if (!faceFold.ok) {
+      refoldOutcome = { ok: false, detail: `the face's own Stop prefix cannot be classified — ${faceFold.detail}` };
+    } else {
+      for (const candidate of faceFold.candidates) {
+        const refolded = facePrefix
+          ? { ok: true, value: refoldArchivedContinuation(published, facePrefix, candidate) }
+          : refoldContinuation(priorDirectory, priorChain.events, candidate);
+        if (!refolded.ok) { refoldOutcome = refolded; break; }
+        const { signature: _publishedSignature, ...publishedCore } = published;
+        const { signature: _refoldedSignature, ...refoldedCore } = refolded.value;
+        if (canonicalJson(refoldedCore) === canonicalJson(publishedCore)) {
+          matchedFold = candidate;
+          break;
+        }
       }
     }
   }
-  const judgedFold = matchedFold ?? fold.candidates?.[0] ?? null;
+  const judgedFold = matchedFold ?? faceFold.candidates?.[0] ?? fold.candidates?.[0] ?? null;
   report.prior_fold_version = matchedFold ?? (fold.ok ? fold.candidates.join('|') : null);
   report.prior_renderer = fold.renderer;
   report.prior_claim_semantics = judgedFold === null ? null : judgedFold === CURRENT_FOLD_VERSION ? 'CURRENT' : 'SUPERSEDED';
