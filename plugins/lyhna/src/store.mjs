@@ -12,7 +12,14 @@ import { join } from 'node:path';
 import { atomicWriteJson, atomicWriteText, assert, canonicalJson, dataRoot, ORIGINS, readJson, sha256, withLock } from './util.mjs';
 import { boundedText, objectiveText, promptSynopsis, reference, sanitizeClaim, structuralSummary } from './redact.mjs';
 import { renderReceiptJson, renderReceiptMarkdown } from './receipt.mjs';
-import { buildContinuation, renderContinuationJson, CURRENT_FOLD_VERSION, KNOWN_FOLD_VERSIONS, foldVersionForRenderer } from './continuation.mjs';
+import {
+  buildContinuation,
+  deriveCapsuleRef,
+  renderContinuationJson,
+  CURRENT_FOLD_VERSION,
+  KNOWN_FOLD_VERSIONS,
+  foldVersionForRenderer
+} from './continuation.mjs';
 import { renderHandoffMarkdown } from './handoff.mjs';
 import { loadOrCreateKeypair, signCapsule } from './signing.mjs';
 import { ADAPTER_VERSION } from './version.mjs';
@@ -199,7 +206,7 @@ function resolveContinuesFrom(capsuleRef) {
   const indexed = readJson(capsuleIndexPath(ref), null);
   const priorRunId = indexed?.run_id;
   const published = priorRunId ? readJson(join(runDir(priorRunId), 'continuation.json'), null) : null;
-  if (published && published.capsule_ref === ref) {
+  if (published && published.capsule_ref === ref && deriveCapsuleRef(published) === ref) {
     return {
       capsule_ref: ref,
       run_id: priorRunId,
@@ -212,7 +219,7 @@ function resolveContinuesFrom(capsuleRef) {
   // name IS that capsule — resolving from the archive invents nothing, and refusing to would strand
   // every handoff taken before a run's final Stop.
   const archived = priorRunId ? readJson(capsuleArchivePath(priorRunId, ref), null) : null;
-  if (archived && archived.capsule_ref === ref) {
+  if (archived && archived.capsule_ref === ref && deriveCapsuleRef(archived) === ref) {
     return {
       capsule_ref: ref,
       run_id: priorRunId,

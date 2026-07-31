@@ -477,6 +477,61 @@ test('a handoff taken before the run\'s final Stop still resolves and verifies',
   );
 });
 
+test('an archived fold must hash to its own name before a successor may inherit it', (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'archive-integrity' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Produce two folds.' });
+  checkpointOrSeal(parent, 'archive-integrity-stop-1');
+  const directory = getRunForTesting(run.id).directory;
+  const first = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8'));
+
+  recordClaim(parent, 'Move the current face past the archived fold.', []);
+  checkpointOrSeal(parent, 'archive-integrity-stop-2');
+
+  const archivePath = join(directory, 'capsules', `${first.capsule_ref}.json`);
+  const tampered = JSON.parse(readFileSync(archivePath, 'utf8'));
+  tampered.state_hash = 'f'.repeat(64);
+  writeFileSync(archivePath, canonicalJson(tampered, true));
+
+  const next = mintSession({ sessionId: 'archive-integrity-next' });
+  const successor = beginRun(next, {
+    mode: 'full',
+    objective: 'Must not inherit a forged archive.',
+    continuesFrom: first.capsule_ref
+  });
+  assert.equal(
+    getRunForTesting(successor.id).state.inherits.resolution,
+    'UNRESOLVED_LOCALLY',
+    'matching the capsule_ref field is insufficient; the archived bytes must recompute to that ref'
+  );
+});
+
+test('the current continuation must hash to its own ref before a successor may inherit it', (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'current-integrity' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Produce one fold.' });
+  checkpointOrSeal(parent, 'current-integrity-stop');
+  const directory = getRunForTesting(run.id).directory;
+  const continuationPath = join(directory, 'continuation.json');
+  const tampered = JSON.parse(readFileSync(continuationPath, 'utf8'));
+  const committedRef = tampered.capsule_ref;
+  tampered.state_hash = 'e'.repeat(64);
+  writeFileSync(continuationPath, canonicalJson(tampered, true));
+  rmSync(join(directory, 'capsules', `${committedRef}.json`));
+
+  const next = mintSession({ sessionId: 'current-integrity-next' });
+  const successor = beginRun(next, {
+    mode: 'full',
+    objective: 'Must not inherit an edited current face.',
+    continuesFrom: committedRef
+  });
+  assert.equal(
+    getRunForTesting(successor.id).state.inherits.resolution,
+    'UNRESOLVED_LOCALLY',
+    'a matching capsule_ref field cannot make edited current bytes resolvable'
+  );
+});
+
 test('a sealed packet that lost its handoff tail is repaired by seal verification', (t) => {
   const root = isolatedData(t);
   const { run, sealed, directory } = runWindow({ sessionId: 'sealtail', objective: 'Seals, then crashes mid-tail.' });
