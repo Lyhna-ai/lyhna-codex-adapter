@@ -83,13 +83,23 @@ function includesObjectiveText(foldVersion) {
  * reducers; mapping either to v0 would falsely report an untampered packet as changed.
  */
 const HISTORICAL_RENDERER_FOLDS = {
-  '0.1.28': 'v0_1_28',
-  '0.1.29': 'v0_1_29_30',
-  '0.1.30': 'v0_1_29_30',
-  '0.1.31': 'v0'
+  '0.1.28': ['v0_1_28'],
+  '0.1.29': ['v0_1_29_30'],
+  // "0.1.30" is one renderer STRING spanning two shipped shapes: objective_text entered the
+  // carry-forward mid-version, before the release was cut. The published 0.1.30 bundle — the only
+  // 0.1.30 artifact with real packets in the wild — folds the v0 shape; the short-lived pre-release
+  // commits folded v0_1_29_30. The string cannot distinguish them, so both are candidates and the
+  // packet's own bytes decide: the checker accepts whichever reducer reproduces the published
+  // capsule byte-for-byte. This is content-addressed dispatch over a closed set of legitimate
+  // shipped shapes — NOT "the reducer that makes it verify": the candidates share identical claim
+  // semantics, the set is fixed here rather than by anything in the packet, and a forged packet
+  // gains nothing because matching still requires bytes that actually refold from the ledger.
+  '0.1.30': ['v0', 'v0_1_29_30'],
+  '0.1.31': ['v0']
 };
 
-export function foldVersionForRenderer(renderer) {
+/** All fold generations a historical renderer string could have shipped, most likely first. */
+export function foldCandidatesForRenderer(renderer) {
   return HISTORICAL_RENDERER_FOLDS[String(renderer ?? '')] ?? null;
 }
 

@@ -22,7 +22,7 @@ import {
 import {
   buildContinuation,
   deriveCapsuleRef,
-  foldVersionForRenderer,
+  foldCandidatesForRenderer,
   labelClaims
 } from '../src/continuation.mjs';
 import { renderHandoffMarkdown } from '../src/handoff.mjs';
@@ -322,10 +322,14 @@ test('each shipped pre-versioned renderer retains its exact continuation shape',
   recordClaim(parent, 'Second claim.', [`sha256:${first.event_hash}`]);
   const { state, events } = getRunForTesting(run.id);
 
-  assert.equal(foldVersionForRenderer('0.1.28'), 'v0_1_28');
-  assert.equal(foldVersionForRenderer('0.1.29'), 'v0_1_29_30');
-  assert.equal(foldVersionForRenderer('0.1.30'), 'v0_1_29_30');
-  assert.equal(foldVersionForRenderer('0.1.31'), 'v0');
+  assert.deepEqual(foldCandidatesForRenderer('0.1.28'), ['v0_1_28']);
+  assert.deepEqual(foldCandidatesForRenderer('0.1.29'), ['v0_1_29_30']);
+  // One renderer string, two shipped shapes: objective_text entered the carry-forward mid-0.1.30,
+  // before the release was cut. The released bundle folds v0; the pre-release commits folded
+  // v0_1_29_30. The packet's own bytes pick between them at verification time.
+  assert.deepEqual(foldCandidatesForRenderer('0.1.30'), ['v0', 'v0_1_29_30']);
+  assert.deepEqual(foldCandidatesForRenderer('0.1.31'), ['v0']);
+  assert.equal(foldCandidatesForRenderer('9.9.9'), null);
 
   const v028 = buildContinuation(state, events, 'v0_1_28');
   assert.equal(v028.privacy_mode, undefined, '0.1.28 shipped before privacy_mode entered the capsule');
@@ -351,6 +355,7 @@ test('genuine 0.1.28 through 0.1.31-shaped packets still verify through lineage'
     ['0.1.28', 'v0_1_28'],
     ['0.1.29', 'v0_1_29_30'],
     ['0.1.30', 'v0_1_29_30'],
+    ['0.1.30', 'v0'],
     ['0.1.31', 'v0']
   ]) {
     isolatedData(t);

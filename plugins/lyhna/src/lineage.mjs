@@ -36,7 +36,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { canonicalJson, sha256 } from './util.mjs';
-import { buildContinuation, buildCarryForward, deriveCapsuleRef, CURRENT_FOLD_VERSION, KNOWN_FOLD_VERSIONS, foldVersionForRenderer } from './continuation.mjs';
+import { buildContinuation, buildCarryForward, deriveCapsuleRef, CURRENT_FOLD_VERSION, KNOWN_FOLD_VERSIONS, foldCandidatesForRenderer } from './continuation.mjs';
 import { verifyCapsuleSignature } from './signing.mjs';
 
 const ZERO_HASH = '0'.repeat(64);
@@ -189,19 +189,21 @@ function foldVersionForPacket(events) {
   const declared = anchor.payload?.continuation_fold_version;
   if (declared !== undefined) {
     if (!KNOWN_FOLD_VERSIONS.includes(declared)) {
-      return { ok: false, version: null, renderer, detail: `the prior ledger commits to fold generation "${declared}", which this checker does not implement` };
+      return { ok: false, candidates: null, renderer, detail: `the prior ledger commits to fold generation "${declared}", which this checker does not implement` };
     }
-    return { ok: true, version: declared, renderer, detail: `chained fold ${declared}` };
+    return { ok: true, candidates: [declared], renderer, detail: `chained fold ${declared}` };
   }
   // No chained declaration: a historical packet. Dispatch ONLY off the closed whitelist of
   // renderers that actually shipped before the field existed. No range inference — an open-ended
   // "anything below X is v0, anything else is current" rule silently folds a renderer from the
-  // future with today's reducer, which is the one outcome that must never happen.
-  const version = foldVersionForRenderer(renderer);
-  if (!version) {
-    return { ok: false, version: null, renderer, detail: `the prior ledger commits to renderer "${renderer ?? 'none'}" with no fold declaration, which this checker cannot place` };
+  // future with today's reducer, which is the one outcome that must never happen. A renderer may
+  // map to MORE THAN ONE shipped shape (0.1.30 changed its carry-forward mid-version, before the
+  // release): the packet's own bytes pick between them, and the report states which matched.
+  const candidates = foldCandidatesForRenderer(renderer);
+  if (!candidates) {
+    return { ok: false, candidates: null, renderer, detail: `the prior ledger commits to renderer "${renderer ?? 'none'}" with no fold declaration, which this checker cannot place` };
   }
-  return { ok: true, version, renderer, detail: `renderer ${renderer} → fold ${version}` };
+  return { ok: true, candidates, renderer, detail: `renderer ${renderer} → fold candidate(s) ${candidates.join(', ')}` };
 }
 
 /**
@@ -252,18 +254,39 @@ export function verifyLineage(priorDirectory, currentDirectory) {
   const priorChain = verifyLedgerChain(priorDirectory);
   const fold = priorChain.ok
     ? foldVersionForPacket(priorChain.events)
-    : { ok: false, version: null, renderer: null, detail: 'the prior ledger does not chain-validate' };
-  report.prior_fold_version = fold.version;
+    : { ok: false, candidates: null, renderer: null, detail: 'the prior ledger does not chain-validate' };
+  // Where a renderer maps to several shipped shapes, the packet's own bytes decide which one wrote
+  // it: the matched generation is the candidate whose refold reproduces the published capsule.
+  // Matching runs once here and feeds both the state-hash and refold rows, so the two can never
+  // disagree about which generation they judged the packet under.
+  let matchedFold = null;
+  let refoldOutcome = null;
+  if (priorChain.ok && fold.ok) {
+    for (const candidate of fold.candidates) {
+      const refolded = refoldContinuation(priorDirectory, priorChain.events, candidate);
+      if (!refolded.ok) { refoldOutcome = refolded; break; }
+      const { signature: _publishedSignature, ...publishedCore } = published;
+      const { signature: _refoldedSignature, ...refoldedCore } = refolded.value;
+      if (canonicalJson(refoldedCore) === canonicalJson(publishedCore)) {
+        matchedFold = candidate;
+        break;
+      }
+    }
+  }
+  const judgedFold = matchedFold ?? fold.candidates?.[0] ?? null;
+  report.prior_fold_version = matchedFold ?? (fold.ok ? fold.candidates.join('|') : null);
   report.prior_renderer = fold.renderer;
-  report.prior_claim_semantics = fold.version === null ? null : fold.version === CURRENT_FOLD_VERSION ? 'CURRENT' : 'SUPERSEDED';
+  report.prior_claim_semantics = judgedFold === null ? null : judgedFold === CURRENT_FOLD_VERSION ? 'CURRENT' : 'SUPERSEDED';
   if (!priorChain.ok || !fold.ok) {
     checks.push(notRun('prior_state_hash_self_consistent', `not run — ${fold.detail}`));
   } else {
-    const recomputedStateHash = sha256(canonicalJson(buildCarryForward(published, fold.version)));
+    const recomputedStateHash = sha256(canonicalJson(buildCarryForward(published, judgedFold)));
     checks.push(check(
       'prior_state_hash_self_consistent',
       recomputedStateHash === published.state_hash,
-      recomputedStateHash === published.state_hash ? 'state_hash recomputes from the carry-forward core' : `state_hash mismatch: core hashes to ${recomputedStateHash}`
+      recomputedStateHash === published.state_hash
+        ? `state_hash recomputes from the carry-forward core (fold ${judgedFold})`
+        : `state_hash mismatch under fold ${judgedFold}: core hashes to ${recomputedStateHash}`
     ));
   }
   checks.push(check('prior_chain_valid', priorChain.ok, priorChain.detail));
@@ -277,19 +300,18 @@ export function verifyLineage(priorDirectory, currentDirectory) {
   if (priorChain.ok && !fold.ok) {
     checks.push(notRun('prior_continuation_refolds', `not run — ${fold.detail}`));
   } else if (priorChain.ok) {
-    const refolded = refoldContinuation(priorDirectory, priorChain.events, fold.version);
-    if (!refolded.ok) {
-      checks.push(check('prior_continuation_refolds', false, refolded.detail));
+    // The candidate matching above already re-folded and compared without the signature block — a
+    // fresh fold has no signature and the signature is checked separately below, so the re-fold
+    // stays a test of the CONTENT.
+    if (refoldOutcome && !refoldOutcome.ok) {
+      checks.push(check('prior_continuation_refolds', false, refoldOutcome.detail));
     } else {
-      // Compare WITHOUT the signature block: a fresh fold has no signature, and the signature is
-      // checked separately below. Stripping it here keeps the re-fold a test of the CONTENT.
-      const { signature: _publishedSignature, ...publishedCore } = published;
-      const { signature: _refoldedSignature, ...refoldedCore } = refolded.value;
-      const matches = canonicalJson(refoldedCore) === canonicalJson(publishedCore);
       checks.push(check(
         'prior_continuation_refolds',
-        matches,
-        matches ? 're-folding the prior ledger reproduces the published continuation exactly' : 'the published continuation does not match a fresh fold of its own ledger'
+        matchedFold !== null,
+        matchedFold !== null
+          ? `re-folding the prior ledger under fold ${matchedFold} reproduces the published continuation exactly`
+          : `the published continuation does not match a fresh fold of its own ledger under any candidate generation (tried ${fold.candidates.join(', ')})`
       ));
     }
   } else {

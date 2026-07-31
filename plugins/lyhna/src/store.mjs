@@ -18,7 +18,7 @@ import {
   renderContinuationJson,
   CURRENT_FOLD_VERSION,
   KNOWN_FOLD_VERSIONS,
-  foldVersionForRenderer
+  foldCandidatesForRenderer
 } from './continuation.mjs';
 import { renderHandoffMarkdown } from './handoff.mjs';
 import { loadOrCreateKeypair, signCapsule } from './signing.mjs';
@@ -166,8 +166,16 @@ function ensureStopArtifacts(runId, state) {
     const { events } = parseLedger(runId);
     const anchor = events.find((event) => event.type === 'run_sealed')
       ?? [...events].reverse().find((event) => event.type === 'checkpoint_anchor');
-    const fold = anchor?.payload?.continuation_fold_version
-      ?? foldVersionForRenderer(anchor?.payload?.receipt_renderer);
+    let fold = anchor?.payload?.continuation_fold_version;
+    if (fold === undefined) {
+      // A renderer string may span more than one shipped shape (0.1.30). With the capsule gone
+      // there are no bytes to match against, so an ambiguous candidate set means the repair cannot
+      // know which shape to regenerate — and a wrong repair is worse than a missing file, which at
+      // least reports honestly. Repair only when the generation is unambiguous.
+      const candidates = foldCandidatesForRenderer(anchor?.payload?.receipt_renderer);
+      if (!candidates || candidates.length !== 1) return;
+      fold = candidates[0];
+    }
     if (!KNOWN_FOLD_VERSIONS.includes(fold)) return;
     writeContinuationArtifacts(runId, state, events, fold);
     return;
