@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
@@ -611,6 +611,68 @@ test('a sealed packet that lost its handoff tail is repaired by seal verificatio
   const next = mintSession({ sessionId: 'sealtail-next' });
   const successor = beginRun(next, { mode: 'full', objective: 'Successor.', continuesFrom: sealed.capsule_ref });
   assert.equal(getRunForTesting(successor.id).state.inherits.resolution, 'RESOLVED_LOCAL_PACKET');
+});
+
+test('a missing handoff is re-projected from a surviving capsule, even when the fold is ambiguous', (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'amb-handoff' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Historical-shaped packet.' });
+  recordClaim(parent, 'work', []);
+  checkpointOrSeal(parent, 'amb-handoff-stop');
+  const directory = getRunForTesting(run.id).directory;
+
+  // Recast as a historical 0.1.30 packet: two fold candidates, no chained declaration. Candidate
+  // ambiguity matters only when the CAPSULE must be regenerated; the handoff is a pure projection
+  // of capsule bytes that survived, and skipping it left the artifact tail permanently incomplete.
+  const ledgerPath = join(directory, 'events.jsonl');
+  const events = readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  let previous = '0'.repeat(64);
+  for (const event of events) {
+    if (event.payload?.receipt_renderer) event.payload.receipt_renderer = '0.1.30';
+    if (event.payload?.continuation_fold_version) delete event.payload.continuation_fold_version;
+    event.prev_hash = previous;
+    const { event_hash: _drop, ...rest } = event;
+    event.event_hash = sha256(canonicalJson(rest));
+    previous = event.event_hash;
+  }
+  writeFileSync(ledgerPath, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`);
+  rmSync(join(directory, 'HANDOFF.md'));
+
+  checkpointOrSeal(parent, 'amb-handoff-stop');
+  assert.ok(existsSync(join(directory, 'HANDOFF.md')), 'the surviving capsule bytes must re-project the handoff');
+});
+
+test('an archive planted from another packet never verifies as this packet\'s inheritance', (t) => {
+  isolatedData(t);
+  // Content-addressing authenticates what an archive IS, not WHOSE it is: a valid signed archive
+  // copied from run A into run B\'s packet passes ref and signature checks perfectly. The binding
+  // that kills it is the ledger: the fold committed to a tip that must appear at the position it
+  // names in THIS chain, and chains from different runs share no event hashes.
+  const runA = mintSession({ sessionId: 'plant-a' });
+  const a = beginRun(runA, { mode: 'full', objective: 'Run A.' });
+  recordClaim(runA, 'a1', []);
+  checkpointOrSeal(runA, 'plant-a-stop-1');
+  const dirA = getRunForTesting(a.id).directory;
+  const refA = JSON.parse(readFileSync(join(dirA, 'continuation.json'), 'utf8')).capsule_ref;
+  recordClaim(runA, 'a2', []);
+  checkpointOrSeal(runA, 'plant-a-stop-2');
+
+  const succ = mintSession({ sessionId: 'plant-succ' });
+  const successor = beginRun(succ, { mode: 'full', objective: 'Successor of A.', continuesFrom: refA });
+  checkpointOrSeal(succ, 'plant-succ-stop');
+  const successorDir = getRunForTesting(successor.id).directory;
+  assert.ok(verifyLineage(dirA, successorDir).ok, 'the genuine edge must verify');
+
+  const runB = mintSession({ sessionId: 'plant-b' });
+  const b = beginRun(runB, { mode: 'full', objective: 'Unrelated run B.' });
+  recordClaim(runB, 'b1', []);
+  checkpointOrSeal(runB, 'plant-b-stop');
+  const dirB = getRunForTesting(b.id).directory;
+  mkdirSync(join(dirB, 'capsules'), { recursive: true });
+  writeFileSync(join(dirB, 'capsules', `${refA}.json`), readFileSync(join(dirA, 'capsules', `${refA}.json`)));
+
+  const report = verifyLineage(dirB, successorDir);
+  assert.equal(report.ok, false, 'a planted archive must not make an unrelated packet LINKED');
 });
 
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {

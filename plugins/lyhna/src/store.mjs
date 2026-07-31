@@ -162,7 +162,8 @@ function ensureStopArtifacts(runId, state) {
   const dir = runDir(runId);
   const capsulePath = join(dir, 'continuation.json');
   const handoffPath = join(dir, 'HANDOFF.md');
-  if (!existsSync(capsulePath) || !existsSync(handoffPath)) {
+  if (!existsSync(capsulePath)) {
+    // Only regenerating the CAPSULE needs a fold generation: the fold is what shapes those bytes.
     const { events } = parseLedger(runId);
     const anchor = events.find((event) => event.type === 'run_sealed')
       ?? [...events].reverse().find((event) => event.type === 'checkpoint_anchor');
@@ -179,6 +180,15 @@ function ensureStopArtifacts(runId, state) {
     if (!KNOWN_FOLD_VERSIONS.includes(fold)) return;
     writeContinuationArtifacts(runId, state, events, fold);
     return;
+  }
+  if (!existsSync(handoffPath)) {
+    // The handoff is a pure projection of the capsule that survived — no fold guess involved, so
+    // candidate ambiguity is no reason to leave it missing. Validate the surviving bytes first: a
+    // capsule that does not recompute to its own ref must not be re-projected onto a new surface.
+    const survived = readJson(capsulePath, null);
+    if (survived?.capsule_ref && deriveCapsuleRef(survived) === survived.capsule_ref) {
+      atomicWriteText(handoffPath, renderHandoffMarkdown(survived));
+    }
   }
   const published = readJson(capsulePath, null);
   const ref = published?.capsule_ref;
@@ -231,7 +241,7 @@ function resolveContinuesFrom(capsuleRef) {
   // name IS that capsule — resolving from the archive invents nothing, and refusing to would strand
   // every handoff taken before a run's final Stop.
   const archived = priorRunId ? readJson(capsuleArchivePath(priorRunId, ref), null) : null;
-  if (archived && archived.capsule_ref === ref && deriveCapsuleRef(archived) === ref) {
+  if (archived && archived.capsule_ref === ref && deriveCapsuleRef(archived) === ref && archived.run_id === priorRunId) {
     return {
       capsule_ref: ref,
       run_id: priorRunId,

@@ -335,9 +335,28 @@ export function verifyLineage(priorDirectory, currentDirectory) {
     const archivePath = join(priorDirectory, 'capsules', `${currentInherits.capsule_ref}.json`);
     if (existsSync(archivePath)) {
       const archived = readJsonObject(archivePath);
+      // The content-addressed ref authenticates what the archive IS; it says nothing about WHOSE
+      // it is. A valid, signed archive copied from another run's packet passes the ref and
+      // signature checks perfectly — so the archive must also be bound to THIS packet's ledger:
+      // its run_id must be the prior chain's run_id, and the ledger tip it committed to must
+      // actually appear at the position it names in this chain. Both fields live inside the bytes
+      // the committed ref covers, so a forger cannot adjust them without breaking the ref match.
       if (archived.ok && deriveCapsuleRef(archived.value) === currentInherits.capsule_ref) {
-        inheritanceTarget = archived.value;
-        inheritanceVia = 'an archived fold this run later superseded (verified content-addressed)';
+        const archivedCount = archived.value.witnessed?.event_count;
+        const archivedTip = archived.value.witnessed?.ledger_tip;
+        // The decisive bond: the ledger tip this fold committed to must actually BE the event hash
+        // at the position it names in THIS packet's chain. Hash chains from different runs share no
+        // event hashes, so a planted archive cannot satisfy this. run_id is cross-checked against
+        // the published capsule (itself refold-verified against this ledger) as a second stitch.
+        const prefixTipMatches = priorChain.ok
+          && Number.isInteger(archivedCount)
+          && archivedCount >= 1
+          && archivedCount <= priorChain.events.length
+          && priorChain.events[archivedCount - 1]?.event_hash === archivedTip;
+        if (archived.value.run_id === published.run_id && prefixTipMatches) {
+          inheritanceTarget = archived.value;
+          inheritanceVia = `an archived fold this run later superseded (content-addressed; bound to this ledger at event ${archivedCount})`;
+        }
       }
     }
   }
