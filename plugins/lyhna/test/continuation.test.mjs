@@ -307,8 +307,21 @@ test('a renderer this checker cannot place is reported, never folded with curren
   assert.match(refolds.detail, /cannot place/);
   assert.equal(report.ok, false, 'an unknown fold must fail safe');
 
+  // A renderer that existed as a commit but never shipped a packet: 0.1.28's fold had a different
+  // shape (no privacy_mode), so mapping it onto the v0 reducer would re-fold a genuine packet into
+  // different bytes and report it TAMPERED. Unplaceable — an honest NOT_RUN — is the only label
+  // that is not a false accusation.
+  rechain((event) => {
+    if (event.payload?.receipt_renderer) event.payload.receipt_renderer = '0.1.28';
+  });
+  report = verifyLineage(first.directory, second.directory);
+  refolds = report.checks.find((item) => item.name === 'prior_continuation_refolds');
+  assert.equal(refolds.status, 'NOT_RUN', 'an unreleased renderer with a different fold shape must not map to v0');
+  assert.match(refolds.detail, /cannot place/);
+  assert.equal(report.ok, false);
+
   // A chained fold declaration this build does not implement. Same rule, other path. The prior
-  // rechain stripped the field, so re-declare it on the anchor events themselves.
+  // rechains stripped the field, so re-declare it on the anchor events themselves.
   rechain((event) => {
     if (event.type === 'checkpoint_anchor' || event.type === 'run_sealed') event.payload.continuation_fold_version = 'v99';
   });

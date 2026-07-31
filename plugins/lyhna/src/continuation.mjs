@@ -63,10 +63,16 @@ export const KNOWN_FOLD_VERSIONS = ['v0', 'v1'];
  * from an open-ended version range means a renderer from the future silently gets folded with
  * current rules, which is exactly the "never guess an unknown fold" requirement inverted. A
  * renderer not in this list, with no chained fold declaration, is unknown and must be reported.
+ *
+ * Only renderers whose fold the v0 reducer reproduces BYTE-FOR-BYTE are listed. 0.1.28 and 0.1.29
+ * are deliberately absent: their folds differed in shape (no privacy_mode; no objective_text
+ * carry-forward), so mapping them here would re-fold a genuine packet into different bytes and
+ * report it as tampered — a false accusation, which is worse than "cannot place". Neither version
+ * was ever released or installed (the first release was 0.1.30; each lived under two hours on the
+ * default branch), so no packet from them should exist; if one ever surfaces it reports honestly
+ * as a fold this checker cannot place, rather than failing as a mismatch it never had.
  */
 const HISTORICAL_RENDERER_FOLDS = {
-  '0.1.28': 'v0',
-  '0.1.29': 'v0',
   '0.1.30': 'v0',
   '0.1.31': 'v0'
 };
