@@ -79,7 +79,12 @@ export function renderHandoffMarkdown(capsule) {
     `- Status: \`${capsule.status}\``,
     `- Capsule ref: \`${capsule.capsule_ref}\``,
     `- Carry-forward state hash: \`${capsule.state_hash}\``,
-    `- Privacy mode: \`${capsule.privacy_mode}\`${capsule.privacy_mode === 'proof' ? ' — claim text is projected away in this packet' : ''}`,
+    // Capsules folded before 0.1.29 predate privacy modes entirely; rendering the absence as the
+    // literal string "undefined" would invent a value the fold never carried. Omit the line — the
+    // capsule is the record, and this is a projection of it, not an annotation on it.
+    ...(capsule.privacy_mode !== undefined
+      ? [`- Privacy mode: \`${capsule.privacy_mode}\`${capsule.privacy_mode === 'proof' ? ' — claim text is projected away in this packet' : ''}`]
+      : []),
     `- Continues from: ${capsule.inherits ? `\`${capsule.inherits.capsule_ref}\`` : '_no prior capsule declared_'}`,
     '',
     '## Paste this into the next window',

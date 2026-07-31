@@ -817,6 +817,49 @@ test('an inherited archive declaring an unimplemented generation fails safe, not
   assert.equal(report.ok, false, 'an unverifiable inherited fold must fail safe');
 });
 
+test('a torn Stop tail is never regenerated once the ledger has moved past its anchor', (t) => {
+  isolatedData(t);
+  // The capsule is a Stop artifact. If the run recorded more events before the crashed Stop's
+  // delivery was replayed, folding the full current ledger would publish post-Stop activity that
+  // no Stop observed or anchored — a boundary fabricated by the repair path. A missing file that
+  // reports honestly beats that; the next real Stop folds and anchors everything.
+  const parent = mintSession({ sessionId: 'advanced' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Torn Stop, then more work.' });
+  recordClaim(parent, 'pre-stop work', []);
+  checkpointOrSeal(parent, 'advanced-stop-1');
+  const directory = getRunForTesting(run.id).directory;
+  rmSync(join(directory, 'continuation.json'));
+  rmSync(join(directory, 'HANDOFF.md'));
+  rmSync(join(directory, 'capsules'), { recursive: true, force: true });
+
+  recordClaim(parent, 'post-stop work no Stop observed', []);
+  checkpointOrSeal(parent, 'advanced-stop-1');   // the replayed delivery
+  assert.ok(!existsSync(join(directory, 'continuation.json')), 'regeneration past the anchor must be declined');
+
+  // The next REAL Stop completes the packet with an honest boundary.
+  checkpointOrSeal(parent, 'advanced-stop-2');
+  assert.ok(existsSync(join(directory, 'continuation.json')), 'the next Stop folds and anchors everything');
+});
+
+test('a legacy capsule with no privacy mode re-projects a handoff without inventing one', (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'legacy-privacy' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Legacy shape.' });
+  recordClaim(parent, 'work', []);
+  const { state, events } = getRunForTesting(run.id);
+
+  // 0.1.28 predates privacy modes entirely: the field is absent, and rendering that absence as
+  // the string "undefined" would invent a value the fold never carried.
+  const legacy = buildContinuation(state, events, 'v0_1_28');
+  const markdown = renderHandoffMarkdown(legacy);
+  assert.doesNotMatch(markdown, /undefined/);
+  assert.doesNotMatch(markdown, /- Privacy mode:/, 'the line is omitted, not filled in');
+
+  // Current capsules keep the line.
+  const current = buildContinuation(state, events);
+  assert.match(renderHandoffMarkdown(current), /- Privacy mode: `verified_context`/);
+});
+
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {
   isolatedData(t);
   const { run, sealed, directory } = runWindow({

@@ -167,6 +167,26 @@ function ensureStopArtifacts(runId, state) {
     const { events } = parseLedger(runId);
     const anchor = events.find((event) => event.type === 'run_sealed')
       ?? [...events].reverse().find((event) => event.type === 'checkpoint_anchor');
+    // Regenerate ONLY at the anchored boundary. A capsule is a Stop artifact: if the ledger has
+    // advanced past the anchor before the replay arrived, folding the full current ledger would
+    // publish post-Stop activity no Stop observed or anchored — a capsule the packet's own history
+    // cannot account for. The next real Stop will fold and anchor everything; until then a missing
+    // file that reports honestly beats a fabricated boundary. For a checkpoint the current state
+    // must also be the exact state the anchor committed, or the fold's inputs are not the ones the
+    // chain vouches for.
+    if (!anchor || events.at(-1) !== anchor) return;
+    if (anchor.type === 'checkpoint_anchor') {
+      // The anchor committed the state as it stood BEFORE the anchor event was appended (the
+      // append advances ledger_count/tip as pure bookkeeping). Roll those two fields back to the
+      // anchor's position and compare: a mismatch means the state itself changed since the Stop,
+      // and folding it would publish inputs the chain never vouched for.
+      const preAnchor = {
+        ...state,
+        ledger_count: anchor.payload.covers_seq,
+        ledger_tip: anchor.payload.covers_seq === 0 ? ZERO_HASH : events[anchor.payload.covers_seq - 1]?.event_hash
+      };
+      if (anchor.payload?.state_hash !== sha256(canonicalJson(preAnchor))) return;
+    }
     let fold = anchor?.payload?.continuation_fold_version;
     if (fold === undefined) {
       // A renderer string may span more than one shipped shape (0.1.30). With the capsule gone
