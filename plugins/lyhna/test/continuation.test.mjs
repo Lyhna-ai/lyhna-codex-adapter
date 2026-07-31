@@ -972,6 +972,35 @@ test('an issued handoff is not invalidated by activity after its Stop', (t) => {
   assert.equal(verifyLineage(directory, getRunForTesting(successor.id).directory).ok, false);
 });
 
+test('a post-seal tail fails closed; the prefix treatment never slices it away', (t) => {
+  isolatedData(t);
+  // run_sealed is terminal — the invariant repairSeal enforces. A validly hash-chained event
+  // appended after the seal is corruption, and the open-face prefix treatment must not rescue it
+  // into a LINKED verdict the store itself would refuse.
+  const first = runWindow({ sessionId: 'tail-1', objective: 'Sealed window.' });
+  const second = runWindow({
+    sessionId: 'tail-2',
+    objective: 'Successor.',
+    continuesFrom: first.sealed.capsule_ref
+  });
+  assert.ok(verifyLineage(first.directory, second.directory).ok, 'baseline must link');
+
+  const ledgerPath = join(first.directory, 'events.jsonl');
+  const events = readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  const tip = events.at(-1);
+  const forged = { seq: events.length + 1, type: 'builder_claim', origin: 'agent_reported', payload: { statement: 'post-seal append' }, prev_hash: tip.event_hash };
+  const { event_hash: _drop, ...rest } = forged;
+  forged.event_hash = sha256(canonicalJson(rest));
+  writeFileSync(ledgerPath, `${[...events, forged].map((event) => JSON.stringify(event)).join('\n')}\n`);
+
+  const report = verifyLineage(first.directory, second.directory);
+  assert.equal(report.ok, false, 'a chained post-seal tail must fail closed');
+  assert.match(
+    report.checks.find((item) => item.name === 'prior_continuation_refolds').detail,
+    /continues past run_sealed/
+  );
+});
+
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {
   isolatedData(t);
   const { run, sealed, directory } = runWindow({

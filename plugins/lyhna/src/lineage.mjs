@@ -392,6 +392,15 @@ export function verifyLineage(priorDirectory, currentDirectory) {
   let refoldOutcome = null;
   let faceFold = fold;
   if (priorChain.ok && fold.ok) {
+    // run_sealed is terminal — the same invariant repairSeal enforces. A validly hash-chained
+    // event AFTER the seal is corruption, not activity, and the prefix treatment below must never
+    // slice it away into a LINKED verdict the store itself would refuse. Fail closed first.
+    const sealIndex = priorChain.events.findIndex((event) => event.type === 'run_sealed');
+    if (sealIndex !== -1 && sealIndex !== priorChain.events.length - 1) {
+      refoldOutcome = { ok: false, detail: 'the ledger continues past run_sealed — a sealed packet is terminal, and a post-seal tail is corruption this checker must not slice away' };
+    }
+  }
+  if (priorChain.ok && fold.ok && !refoldOutcome) {
     // A handoff already issued must not be invalidated by later activity. A face whose committed
     // boundary is a genuine anchored PREFIX of the ledger — its tip sits at exactly the position it
     // names, before the current tip — is the fold of that earlier Stop, byte-identical to its own
@@ -405,6 +414,9 @@ export function verifyLineage(priorDirectory, currentDirectory) {
       && faceCount >= 1
       && faceCount < priorChain.events.length
       && priorChain.events[faceCount - 1]?.event_hash === published.witnessed?.ledger_tip
+      // Only an OPEN checkpoint boundary earns prefix treatment: a run continues past a
+      // checkpoint by design, and past a seal only by corruption (rejected above).
+      && priorChain.events[faceCount - 1]?.type === 'checkpoint_anchor'
       ? priorChain.events.slice(0, faceCount)
       : null;
     const foldEvents = facePrefix ?? priorChain.events;
