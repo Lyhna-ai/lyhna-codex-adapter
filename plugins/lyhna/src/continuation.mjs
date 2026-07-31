@@ -43,10 +43,14 @@ function countBy(items, key) {
  * The cost is that changing the fold silently invalidates every packet an earlier build wrote, so
  * each fold generation is kept and selected explicitly.
  *
- *   v0  the fold as it shipped through 0.1.31. KNOWN WRONG: any event could support any claim, so
- *       a claim citing another claim — or citing an unrelated `run_begun` — rendered SUPPORTED and
- *       was promoted into `settled`. Preserved verbatim, never used for new packets, so a v0 packet
- *       still re-folds to its own published bytes and stays historically verifiable.
+ *   v0_1_28      the 0.1.28 fold: no privacy_mode or objective_text in capsule/carry-forward.
+ *   v0_1_29_30   the 0.1.29-0.1.30 fold: privacy_mode present, objective_text absent.
+ *   v0            the 0.1.31 fold: privacy_mode and objective_text present.
+ *
+ * All three historical generations share the KNOWN WRONG claim rule: any event could support any
+ * claim, so a claim citing another claim — or citing an unrelated `run_begun` — rendered SUPPORTED
+ * and was promoted into `settled`. Preserved verbatim and never used for new packets, each old
+ * packet still re-folds to its own published bytes and stays historically verifiable.
  *   v1  0.1.32 onward. A cited reference is only ever reported as RESOLVING, never as supporting,
  *       and builder claims are never promoted into `settled`.
  *
@@ -55,7 +59,18 @@ function countBy(items, key) {
  * read from it would let a forged packet choose the reducer that makes it verify.
  */
 export const CURRENT_FOLD_VERSION = 'v1';
-export const KNOWN_FOLD_VERSIONS = ['v0', 'v1'];
+export const KNOWN_FOLD_VERSIONS = ['v0_1_28', 'v0_1_29_30', 'v0', 'v1'];
+
+const PRE_DECLARATION_FOLDS = new Set(['v0_1_28', 'v0_1_29_30', 'v0']);
+const LEGACY_CLAIM_FOLDS = PRE_DECLARATION_FOLDS;
+
+function includesPrivacyMode(foldVersion) {
+  return foldVersion !== 'v0_1_28';
+}
+
+function includesObjectiveText(foldVersion) {
+  return foldVersion === 'v0' || foldVersion === 'v1';
+}
 
 /**
  * Which fold generation a HISTORICAL renderer used — packets from builds that predate the
@@ -63,17 +78,14 @@ export const KNOWN_FOLD_VERSIONS = ['v0', 'v1'];
  * from an open-ended version range means a renderer from the future silently gets folded with
  * current rules, which is exactly the "never guess an unknown fold" requirement inverted. A
  * renderer not in this list, with no chained fold declaration, is unknown and must be reported.
- *
- * Only renderers whose fold the v0 reducer reproduces BYTE-FOR-BYTE are listed. 0.1.28 and 0.1.29
- * are deliberately absent: their folds differed in shape (no privacy_mode; no objective_text
- * carry-forward), so mapping them here would re-fold a genuine packet into different bytes and
- * report it as tampered — a false accusation, which is worse than "cannot place". Neither version
- * was ever released or installed (the first release was 0.1.30; each lived under two hours on the
- * default branch), so no packet from them should exist; if one ever surfaces it reports honestly
- * as a fold this checker cannot place, rather than failing as a mismatch it never had.
+ * Each listed renderer maps to the reducer that reproduces its actual continuation and
+ * carry-forward shape byte-for-byte. Versions 0.1.28 and 0.1.29 require their own historical
+ * reducers; mapping either to v0 would falsely report an untampered packet as changed.
  */
 const HISTORICAL_RENDERER_FOLDS = {
-  '0.1.30': 'v0',
+  '0.1.28': 'v0_1_28',
+  '0.1.29': 'v0_1_29_30',
+  '0.1.30': 'v0_1_29_30',
   '0.1.31': 'v0'
 };
 
@@ -168,7 +180,7 @@ function finishClaim(event, refs, unresolved, support, privacyMode) {
 }
 
 export function labelClaims(events, privacyMode = 'verified_context', foldVersion = CURRENT_FOLD_VERSION) {
-  return foldVersion === 'v0' ? labelClaimsV0(events, privacyMode) : labelClaimsV1(events, privacyMode);
+  return LEGACY_CLAIM_FOLDS.has(foldVersion) ? labelClaimsV0(events, privacyMode) : labelClaimsV1(events, privacyMode);
 }
 
 export function claimText(claim) {
@@ -225,9 +237,10 @@ function buildSettled(state, events, claims, foldVersion) {
   // v1 promotes NO builder claim into settled. Settled means terminal, witnessed facts a successor
   // may rely on without redoing the work, and no structural check can establish that an agent's
   // statement is true — only that a reference it cited points at something real. The claims list
-  // carries every claim with its label; that is where a reader judges them. Under v0 the promotion
-  // is reproduced exactly as it happened, because a v0 packet is entitled to re-fold to its own bytes.
-  if (foldVersion === 'v0') {
+  // carries every claim with its label; that is where a reader judges them. Under a historical fold
+  // the promotion is reproduced exactly as it happened, because an old packet is entitled to
+  // re-fold to its own bytes.
+  if (LEGACY_CLAIM_FOLDS.has(foldVersion)) {
     for (const claim of claims) {
       if (claim.support !== 'SUPPORTED') continue;
       settled.push(entry(`Builder claim supported by witnessed evidence: ${claimText(claim)}`, claim.ref));
@@ -315,14 +328,14 @@ function buildNext(open) {
  * this capsule happened to be rendered. `inherits_state_hash` in a successor run commits to THIS
  * value, which is why it must exclude presentation-only fields.
  */
-export function buildCarryForward(capsule) {
+export function buildCarryForward(capsule, foldVersion = CURRENT_FOLD_VERSION) {
   return {
     run_id: capsule.run_id,
     mode: capsule.mode,
-    privacy_mode: capsule.privacy_mode,
+    ...(includesPrivacyMode(foldVersion) ? { privacy_mode: capsule.privacy_mode } : {}),
     status: capsule.status,
     objective: capsule.objective,
-    objective_text: capsule.objective_text ?? null,
+    ...(includesObjectiveText(foldVersion) ? { objective_text: capsule.objective_text ?? null } : {}),
     objective_origin: capsule.objective_origin,
     ledger_tip: capsule.witnessed.ledger_tip,
     event_count: capsule.witnessed.event_count,
@@ -332,8 +345,8 @@ export function buildCarryForward(capsule) {
   };
 }
 
-export function deriveStateHash(capsule) {
-  return sha256(canonicalJson(buildCarryForward(capsule)));
+export function deriveStateHash(capsule, foldVersion = CURRENT_FOLD_VERSION) {
+  return sha256(canonicalJson(buildCarryForward(capsule, foldVersion)));
 }
 
 /**
@@ -357,13 +370,15 @@ export function buildContinuation(state, events, foldVersion = CURRENT_FOLD_VERS
     // Declared for a reader's benefit only. Verification NEVER dispatches on this field — the
     // capsule is unanchored, so trusting it would let a forged packet pick the reducer that makes
     // it verify. The checker reads the renderer from the hash-chained anchor and cross-checks.
-    ...(foldVersion === 'v0' ? {} : { continuation_fold_version: foldVersion }),
+    ...(PRE_DECLARATION_FOLDS.has(foldVersion) ? {} : { continuation_fold_version: foldVersion }),
     run_id: state.id,
     mode: state.mode,
-    privacy_mode: privacyMode,
+    ...(includesPrivacyMode(foldVersion) ? { privacy_mode: privacyMode } : {}),
     status: state.sealed ? 'SEALED' : state.close_requested ? 'CLOSE_REQUESTED_NOT_SEALED' : 'OPEN',
     objective: state.objective,
-    ...(privacyMode !== 'proof' && state.objective_text ? { objective_text: state.objective_text } : {}),
+    ...(includesObjectiveText(foldVersion) && privacyMode !== 'proof' && state.objective_text
+      ? { objective_text: state.objective_text }
+      : {}),
     objective_origin: state.objective_origin,
     // The lineage edge: which prior capsule this run declared it continues from. Sealed into the
     // run_begun event, therefore inside the hash chain, therefore covered by the seal anchor.
@@ -380,7 +395,7 @@ export function buildContinuation(state, events, foldVersion = CURRENT_FOLD_VERS
       'Nothing here approves, blocks, certifies, or judges correctness.'
     ]
   };
-  capsule.state_hash = deriveStateHash(capsule);
+  capsule.state_hash = deriveStateHash(capsule, foldVersion);
   capsule.capsule_ref = deriveCapsuleRef(capsule);
   return capsule;
 }

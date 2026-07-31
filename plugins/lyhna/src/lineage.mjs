@@ -246,15 +246,26 @@ export function verifyLineage(priorDirectory, currentDirectory) {
     recomputedRef === published.capsule_ref,
     recomputedRef === published.capsule_ref ? 'capsule_ref recomputes from its own content' : `capsule_ref mismatch: content hashes to ${recomputedRef}`
   ));
-  const recomputedStateHash = sha256(canonicalJson(buildCarryForward(published)));
-  checks.push(check(
-    'prior_state_hash_self_consistent',
-    recomputedStateHash === published.state_hash,
-    recomputedStateHash === published.state_hash ? 'state_hash recomputes from the carry-forward core' : `state_hash mismatch: core hashes to ${recomputedStateHash}`
-  ));
-
-  // 2. The prior packet's chain is the trust root, not its rendered files.
+  // 2. The prior packet's chain is the trust root, not its rendered files. Resolve its fold before
+  // checking state_hash: shipped generations hashed different carry-forward shapes, and the
+  // unanchored capsule must never select the reducer used to validate itself.
   const priorChain = verifyLedgerChain(priorDirectory);
+  const fold = priorChain.ok
+    ? foldVersionForPacket(priorChain.events)
+    : { ok: false, version: null, renderer: null, detail: 'the prior ledger does not chain-validate' };
+  report.prior_fold_version = fold.version;
+  report.prior_renderer = fold.renderer;
+  report.prior_claim_semantics = fold.version === null ? null : fold.version === CURRENT_FOLD_VERSION ? 'CURRENT' : 'SUPERSEDED';
+  if (!priorChain.ok || !fold.ok) {
+    checks.push(notRun('prior_state_hash_self_consistent', `not run — ${fold.detail}`));
+  } else {
+    const recomputedStateHash = sha256(canonicalJson(buildCarryForward(published, fold.version)));
+    checks.push(check(
+      'prior_state_hash_self_consistent',
+      recomputedStateHash === published.state_hash,
+      recomputedStateHash === published.state_hash ? 'state_hash recomputes from the carry-forward core' : `state_hash mismatch: core hashes to ${recomputedStateHash}`
+    ));
+  }
   checks.push(check('prior_chain_valid', priorChain.ok, priorChain.detail));
 
   // 3. Non-circular value binding — re-derive rather than believe.
@@ -263,10 +274,6 @@ export function verifyLineage(priorDirectory, currentDirectory) {
   // declared (historical integrity), and do its claim labels still mean what today's rules mean
   // (current-policy trust)? A packet written by an older fold can be perfectly intact and still
   // carry labels this build would not issue. Only the first gates the verdict.
-  const fold = foldVersionForPacket(priorChain.events);
-  report.prior_fold_version = fold.version;
-  report.prior_renderer = fold.renderer;
-  report.prior_claim_semantics = fold.version === null ? null : fold.version === CURRENT_FOLD_VERSION ? 'CURRENT' : 'SUPERSEDED';
   if (priorChain.ok && !fold.ok) {
     checks.push(notRun('prior_continuation_refolds', `not run — ${fold.detail}`));
   } else if (priorChain.ok) {

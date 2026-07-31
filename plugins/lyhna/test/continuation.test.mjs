@@ -19,7 +19,12 @@ import {
   requestClose,
   sealChildByAgent
 } from '../src/store.mjs';
-import { buildContinuation, deriveCapsuleRef, labelClaims } from '../src/continuation.mjs';
+import {
+  buildContinuation,
+  deriveCapsuleRef,
+  foldVersionForRenderer,
+  labelClaims
+} from '../src/continuation.mjs';
 import { renderHandoffMarkdown } from '../src/handoff.mjs';
 import { renderLineageMarkdown, verifyLineage, verifyLedgerChain } from '../src/lineage.mjs';
 import { canonicalJson, sha256 } from '../src/util.mjs';
@@ -58,6 +63,50 @@ function runWindow({ sessionId, objective, continuesFrom, privacyMode, claims = 
   const sealed = checkpointOrSeal(parent, `${sessionId}-stop`);
   assert.equal(sealed.status, 'SEALED');
   return { parent, run, sealed, directory: getRunForTesting(run.id).directory };
+}
+
+/** Rewrite a fixture ledger while preserving a valid hash chain. Returns the rewritten events. */
+function rechainLedger(directory, mutate) {
+  const ledgerPath = join(directory, 'events.jsonl');
+  const events = readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  let previous = '0'.repeat(64);
+  for (const event of events) {
+    mutate(event);
+    event.prev_hash = previous;
+    const { event_hash: _drop, ...rest } = event;
+    event.event_hash = sha256(canonicalJson(rest));
+    previous = event.event_hash;
+  }
+  writeFileSync(ledgerPath, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`);
+  return events;
+}
+
+/**
+ * Recast a current fixture as a packet emitted by a named historical renderer. The historical
+ * continuation is then written from that renderer's preserved fold, while the successor's chained
+ * inheritance commitment is updated to name those exact bytes.
+ */
+function recastHistoricalPacket(prior, current, renderer, foldVersion) {
+  const priorEvents = rechainLedger(prior.directory, (event) => {
+    if (event.payload?.receipt_renderer) event.payload.receipt_renderer = renderer;
+    if (event.payload?.continuation_fold_version) delete event.payload.continuation_fold_version;
+    if (renderer === '0.1.28' && event.type === 'builder_claim') delete event.payload.statement_text;
+  });
+  const priorStatePath = join(prior.directory, 'state.json');
+  const priorState = JSON.parse(readFileSync(priorStatePath, 'utf8'));
+  priorState.ledger_count = priorEvents.length;
+  priorState.ledger_tip = priorEvents.at(-1).event_hash;
+  writeFileSync(priorStatePath, canonicalJson(priorState, true));
+
+  const historical = buildContinuation(priorState, priorEvents, foldVersion);
+  writeFileSync(join(prior.directory, 'continuation.json'), canonicalJson(historical, true));
+
+  rechainLedger(current.directory, (event) => {
+    if (event.type !== 'run_begun') return;
+    event.payload.inherits.capsule_ref = historical.capsule_ref;
+    event.payload.inherits.state_hash = historical.state_hash;
+  });
+  return historical;
 }
 
 test('the continuation capsule is a deterministic fold of the ledger', (t) => {
@@ -265,6 +314,66 @@ test('a packet folded by an earlier build still verifies, under the rules it was
   assert.notEqual(legacy.capsule_ref, current.capsule_ref);
 });
 
+test('each shipped pre-versioned renderer retains its exact continuation shape', (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'historical-shapes' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Objective text retained by newer builds.' });
+  const first = recordClaim(parent, 'A human-readable claim.', []);
+  recordClaim(parent, 'Second claim.', [`sha256:${first.event_hash}`]);
+  const { state, events } = getRunForTesting(run.id);
+
+  assert.equal(foldVersionForRenderer('0.1.28'), 'v0_1_28');
+  assert.equal(foldVersionForRenderer('0.1.29'), 'v0_1_29_30');
+  assert.equal(foldVersionForRenderer('0.1.30'), 'v0_1_29_30');
+  assert.equal(foldVersionForRenderer('0.1.31'), 'v0');
+
+  const v028 = buildContinuation(state, events, 'v0_1_28');
+  assert.equal(v028.privacy_mode, undefined, '0.1.28 shipped before privacy_mode entered the capsule');
+  assert.equal(v028.objective_text, undefined, '0.1.28 shipped before objective text entered the capsule');
+  assert.equal(v028.continuation_fold_version, undefined, 'historical capsules had no fold declaration');
+
+  const v029 = buildContinuation(state, events, 'v0_1_29_30');
+  assert.equal(v029.privacy_mode, 'verified_context', '0.1.29 and 0.1.30 included privacy_mode');
+  assert.equal(v029.objective_text, undefined, '0.1.29 and 0.1.30 predated objective text carry-forward');
+  assert.equal(v029.continuation_fold_version, undefined);
+
+  const v031 = buildContinuation(state, events, 'v0');
+  assert.equal(v031.privacy_mode, 'verified_context');
+  assert.equal(v031.objective_text, 'Objective text retained by newer builds.');
+  assert.equal(v031.continuation_fold_version, undefined);
+
+  assert.notEqual(v028.state_hash, v029.state_hash, 'adding privacy_mode changed the shipped carry-forward hash');
+  assert.notEqual(v029.state_hash, v031.state_hash, 'adding objective_text changed the shipped carry-forward hash');
+});
+
+test('genuine 0.1.28 through 0.1.31-shaped packets still verify through lineage', (t) => {
+  for (const [renderer, foldVersion] of [
+    ['0.1.28', 'v0_1_28'],
+    ['0.1.29', 'v0_1_29_30'],
+    ['0.1.30', 'v0_1_29_30'],
+    ['0.1.31', 'v0']
+  ]) {
+    isolatedData(t);
+    const prior = runWindow({ sessionId: `historical-${renderer}-prior`, objective: 'Historical window.' });
+    const current = runWindow({
+      sessionId: `historical-${renderer}-current`,
+      objective: 'Successor window.',
+      continuesFrom: prior.sealed.capsule_ref
+    });
+    const historical = recastHistoricalPacket(prior, current, renderer, foldVersion);
+    assert.equal(historical.continuation_fold_version, undefined);
+
+    const report = verifyLineage(prior.directory, current.directory);
+    assert.equal(report.prior_renderer, renderer);
+    assert.equal(report.prior_fold_version, foldVersion);
+    assert.equal(
+      report.ok,
+      true,
+      `${renderer} packet should remain LINKED:\n${report.checks.filter((item) => item.status !== 'PASS').map((item) => `${item.status} ${item.name}: ${item.detail}`).join('\n')}`
+    );
+  }
+});
+
 test('a renderer this checker cannot place is reported, never folded with current rules', (t) => {
   isolatedData(t);
   const first = runWindow({ sessionId: 'unk-1', objective: 'First window.' });
@@ -279,24 +388,10 @@ test('a renderer this checker cannot place is reported, never folded with curren
   // fold-version decision is what is actually under test. The trailing suffix matters: a lenient
   // parser reads "9.9.9-experimental" as 9.9.9 and silently selects the current reducer, which is
   // the one outcome this must never produce.
-  const ledgerPath = join(first.directory, 'events.jsonl');
-  const rechain = (mutate) => {
-    const events = readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
-    let previous = '0'.repeat(64);
-    for (const event of events) {
-      mutate(event);
-      event.prev_hash = previous;
-      const { event_hash: _drop, ...rest } = event;
-      event.event_hash = sha256(canonicalJson(rest));
-      previous = event.event_hash;
-    }
-    writeFileSync(ledgerPath, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`);
-  };
-
   // A historical/foreign packet: VALID semver the whitelist has never heard of, and no chained
   // fold declaration. "9.9.9" parses cleanly — an open-ended version range would map it onto the
   // current reducer and verify a fold this checker knows nothing about. The whitelist must not.
-  rechain((event) => {
+  rechainLedger(first.directory, (event) => {
     if (event.payload?.receipt_renderer) event.payload.receipt_renderer = '9.9.9';
     if (event.payload?.continuation_fold_version) delete event.payload.continuation_fold_version;
   });
@@ -308,22 +403,9 @@ test('a renderer this checker cannot place is reported, never folded with curren
   assert.match(refolds.detail, /cannot place/);
   assert.equal(report.ok, false, 'an unknown fold must fail safe');
 
-  // A renderer that existed as a commit but never shipped a packet: 0.1.28's fold had a different
-  // shape (no privacy_mode), so mapping it onto the v0 reducer would re-fold a genuine packet into
-  // different bytes and report it TAMPERED. Unplaceable — an honest NOT_RUN — is the only label
-  // that is not a false accusation.
-  rechain((event) => {
-    if (event.payload?.receipt_renderer) event.payload.receipt_renderer = '0.1.28';
-  });
-  report = verifyLineage(first.directory, second.directory);
-  refolds = report.checks.find((item) => item.name === 'prior_continuation_refolds');
-  assert.equal(refolds.status, 'NOT_RUN', 'an unreleased renderer with a different fold shape must not map to v0');
-  assert.match(refolds.detail, /cannot place/);
-  assert.equal(report.ok, false);
-
   // A chained fold declaration this build does not implement. Same rule, other path. The prior
-  // rechains stripped the field, so re-declare it on the anchor events themselves.
-  rechain((event) => {
+  // rechain stripped the field, so re-declare it on the anchor events themselves.
+  rechainLedger(first.directory, (event) => {
     if (event.type === 'checkpoint_anchor' || event.type === 'run_sealed') event.payload.continuation_fold_version = 'v99';
   });
   report = verifyLineage(first.directory, second.directory);
