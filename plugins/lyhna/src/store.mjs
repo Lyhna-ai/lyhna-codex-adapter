@@ -174,8 +174,12 @@ function ensureStopArtifacts(runId, state) {
   }
   const published = readJson(capsulePath, null);
   const ref = published?.capsule_ref;
-  if (!ref || readJson(capsuleIndexPath(ref), null)) return;
-  atomicWriteJson(capsuleIndexPath(ref), { run_id: runId, capsule_ref: ref });
+  if (!ref || deriveCapsuleRef(published) !== ref) return;
+  const archivePath = capsuleArchivePath(runId, ref);
+  if (!existsSync(archivePath)) atomicWriteText(archivePath, canonicalJson(published, true));
+  if (!readJson(capsuleIndexPath(ref), null)) {
+    atomicWriteJson(capsuleIndexPath(ref), { run_id: runId, capsule_ref: ref });
+  }
 }
 
 // A capsule_ref -> run_id index, so a run started in a LATER session (a new window is a new

@@ -477,6 +477,32 @@ test('a handoff taken before the run\'s final Stop still resolves and verifies',
   );
 });
 
+test('a replayed Stop restores an archive lost after the visible handoff landed', (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'crash-archive' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Crashes before archive write.' });
+  checkpointOrSeal(parent, 'crash-archive-stop-1');
+  const directory = getRunForTesting(run.id).directory;
+  const first = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8'));
+  const archivePath = join(directory, 'capsules', `${first.capsule_ref}.json`);
+  rmSync(archivePath);
+
+  // The face, handoff, and index survived, so this is the tail branch that used to return without
+  // recreating the archive. Replay the same Stop delivery, then let a later Stop move the face on.
+  checkpointOrSeal(parent, 'crash-archive-stop-1');
+  assert.ok(existsSync(archivePath), 'the replay must restore the current fold archive too');
+  recordClaim(parent, 'Later work moved the current face.', []);
+  checkpointOrSeal(parent, 'crash-archive-stop-2');
+
+  const next = mintSession({ sessionId: 'crash-archive-next' });
+  const successor = beginRun(next, {
+    mode: 'full',
+    objective: 'Continue the exact first handoff.',
+    continuesFrom: first.capsule_ref
+  });
+  assert.equal(getRunForTesting(successor.id).state.inherits.resolution, 'RESOLVED_LOCAL_ARCHIVE');
+});
+
 test('an archived fold must hash to its own name before a successor may inherit it', (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'archive-integrity' });
@@ -504,6 +530,36 @@ test('an archived fold must hash to its own name before a successor may inherit 
     'UNRESOLVED_LOCALLY',
     'matching the capsule_ref field is insufficient; the archived bytes must recompute to that ref'
   );
+});
+
+test('lineage validates the signature on the archived fold actually inherited', (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'archive-signature' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Produce a signed archived fold.' });
+  checkpointOrSeal(parent, 'archive-signature-stop-1');
+  const directory = getRunForTesting(run.id).directory;
+  const first = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8'));
+
+  recordClaim(parent, 'Move the current face past the inherited fold.', []);
+  checkpointOrSeal(parent, 'archive-signature-stop-2');
+
+  const next = mintSession({ sessionId: 'archive-signature-next' });
+  const successor = beginRun(next, {
+    mode: 'full',
+    objective: 'Inherit the first signed fold.',
+    continuesFrom: first.capsule_ref
+  });
+  checkpointOrSeal(next, 'archive-signature-next-stop');
+
+  const archivePath = join(directory, 'capsules', `${first.capsule_ref}.json`);
+  const archived = JSON.parse(readFileSync(archivePath, 'utf8'));
+  const prefix = archived.signature.signature.slice(0, 2);
+  archived.signature.signature = `${prefix === '00' ? 'ff' : '00'}${archived.signature.signature.slice(2)}`;
+  writeFileSync(archivePath, canonicalJson(archived, true));
+
+  const report = verifyLineage(directory, getRunForTesting(successor.id).directory);
+  assert.equal(report.checks.find((item) => item.name === 'prior_signature').status, 'FAIL');
+  assert.equal(report.ok, false, 'an invalid signature on the inherited archive must prevent LINKED');
 });
 
 test('the current continuation must hash to its own ref before a successor may inherit it', (t) => {

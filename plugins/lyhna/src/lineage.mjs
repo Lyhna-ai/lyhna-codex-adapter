@@ -299,22 +299,43 @@ export function verifyLineage(priorDirectory, currentDirectory) {
     ));
   }
 
-  // Signature: who folded this, and has a byte changed since. An UNSIGNED capsule is reported as
-  // such rather than failed — a packet can be complete and hash-verifiable without a key, and
-  // calling that tampered would be the overclaim. A signature that is PRESENT and BAD does fail.
-  const signatureResult = verifyCapsuleSignature(published);
+  // Read the successor chain now so signature verification can target the capsule it ACTUALLY
+  // inherited. The check row remains later in the fixed report order; computing the input early
+  // does not make an invalid current chain pass.
+  const currentChain = verifyLedgerChain(currentDirectory);
+  const currentRunBegun = currentChain.ok
+    ? currentChain.events.find((event) => event.type === 'run_begun')
+    : null;
+  const currentInherits = currentRunBegun?.payload?.inherits || null;
+  let inheritanceTarget = published;
+  let inheritanceVia = 'the prior packet\'s capsule';
+  if (currentInherits && currentInherits.capsule_ref !== published.capsule_ref) {
+    const archivePath = join(priorDirectory, 'capsules', `${currentInherits.capsule_ref}.json`);
+    if (existsSync(archivePath)) {
+      const archived = readJsonObject(archivePath);
+      if (archived.ok && deriveCapsuleRef(archived.value) === currentInherits.capsule_ref) {
+        inheritanceTarget = archived.value;
+        inheritanceVia = 'an archived fold this run later superseded (verified content-addressed)';
+      }
+    }
+  }
+
+  // Signature: who folded the capsule selected by the successor, and has a byte changed since. An
+  // UNSIGNED capsule is reported as such rather than failed — a packet can be complete and
+  // hash-verifiable without a key, and calling that tampered would be the overclaim. A signature
+  // that is PRESENT and BAD does fail.
+  const signatureResult = verifyCapsuleSignature(inheritanceTarget);
   report.prior_signed_by = signatureResult.public_key;
-  if (!published.signature) {
-    checks.push(check('prior_signature', true, 'unsigned capsule — identity not attested, content still hash-verified'));
+  if (!inheritanceTarget.signature) {
+    checks.push(check('prior_signature', true, `unsigned capsule — identity not attested, content still hash-verified (${inheritanceVia})`));
   } else {
-    checks.push(check('prior_signature', signatureResult.ok, `${signatureResult.reason} (key_id ${signatureResult.key_id})`));
+    checks.push(check('prior_signature', signatureResult.ok, `${signatureResult.reason} (key_id ${signatureResult.key_id}; ${inheritanceVia})`));
   }
 
   // 4. The current packet's inheritance commitment, read from inside its own hash chain.
-  const currentChain = verifyLedgerChain(currentDirectory);
   checks.push(check('current_chain_valid', currentChain.ok, currentChain.detail));
   if (currentChain.ok) {
-    const runBegun = currentChain.events.find((event) => event.type === 'run_begun');
+    const runBegun = currentRunBegun;
     report.current_run_id = runBegun ? currentChain.events[0]?.run_id ?? null : null;
     const inherits = runBegun?.payload?.inherits || null;
     if (!inherits) {
@@ -330,18 +351,8 @@ export function verifyLineage(priorDirectory, currentDirectory) {
       // it invents nothing, because forging the file would require content hashing to a ref the
       // successor already sealed into its own chain. The comparison target is therefore the
       // committed fold, current or archived; which one it was is stated, not hidden.
-      let target = published;
-      let via = 'the prior packet\'s capsule';
-      if (inherits.capsule_ref !== published.capsule_ref) {
-        const archivePath = join(priorDirectory, 'capsules', `${inherits.capsule_ref}.json`);
-        if (existsSync(archivePath)) {
-          const archived = readJsonObject(archivePath);
-          if (archived.ok && deriveCapsuleRef(archived.value) === inherits.capsule_ref) {
-            target = archived.value;
-            via = 'an archived fold this run later superseded (verified content-addressed)';
-          }
-        }
-      }
+      const target = inheritanceTarget;
+      const via = inheritanceVia;
       checks.push(check(
         'inheritance_capsule_ref_matches',
         inherits.capsule_ref === target.capsule_ref,
