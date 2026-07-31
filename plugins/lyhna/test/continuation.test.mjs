@@ -748,6 +748,65 @@ test('an inherited legacy checkpoint is classified by its own anchor, not the up
   assert.match(renderLineageMarkdown(report), /superseded semantics/);
 });
 
+test('an inherited archive declaring an unimplemented generation fails safe, not LINKED', (t) => {
+  isolatedData(t);
+  // The archive is ref-matched and ledger-bound, but its own anchor declares a generation this
+  // checker does not implement. The edge exists and cannot be verified: recording that as report
+  // metadata after acceptance returned LINKED on a fold nothing checked. Unknown is NOT_RUN —
+  // never a pass, and never a tampering FAIL the packet does not have.
+  const parent = mintSession({ sessionId: 'unkfold' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Mixed with unknown generation.' });
+  recordClaim(parent, 'work', []);
+  checkpointOrSeal(parent, 'unkfold-stop-1');
+  const directory = getRunForTesting(run.id).directory;
+  const stopOneCount = readFileSync(join(directory, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).length;
+  recordClaim(parent, 'more', []);
+  checkpointOrSeal(parent, 'unkfold-stop-2');
+
+  const successorSession = mintSession({ sessionId: 'unkfold-next' });
+  const successor = beginRun(successorSession, { mode: 'full', objective: 'Successor.', continuesFrom: 'placeholder' });
+  checkpointOrSeal(successorSession, 'unkfold-next-stop');
+  const successorDir = getRunForTesting(successor.id).directory;
+
+  const priorEvents = rechainLedger(directory, (event) => {
+    if (event.type === 'checkpoint_anchor' && event.payload?.covers_seq === stopOneCount - 1) {
+      event.payload.continuation_fold_version = 'v2';
+    }
+  });
+  const statePath = join(directory, 'state.json');
+  const state = JSON.parse(readFileSync(statePath, 'utf8'));
+  const prefixState = { ...state, ledger_count: stopOneCount, ledger_tip: priorEvents[stopOneCount - 1].event_hash };
+  const legacyCapsule = buildContinuation(prefixState, priorEvents.slice(0, stopOneCount));
+  rmSync(join(directory, 'capsules'), { recursive: true, force: true });
+  mkdirSync(join(directory, 'capsules'), { recursive: true });
+  writeFileSync(join(directory, 'capsules', `${legacyCapsule.capsule_ref}.json`), canonicalJson(legacyCapsule, true));
+  state.ledger_count = priorEvents.length;
+  state.ledger_tip = priorEvents.at(-1).event_hash;
+  writeFileSync(statePath, canonicalJson(state, true));
+  writeFileSync(join(directory, 'continuation.json'), canonicalJson(buildContinuation(state, priorEvents), true));
+
+  const successorEvents = rechainLedger(successorDir, (event) => {
+    if (event.type !== 'run_begun') return;
+    event.payload.inherits = { capsule_ref: legacyCapsule.capsule_ref, state_hash: legacyCapsule.state_hash, run_id: run.id, resolution: 'RESOLVED_LOCAL_ARCHIVE' };
+  });
+  const successorStatePath = join(successorDir, 'state.json');
+  const successorState = JSON.parse(readFileSync(successorStatePath, 'utf8'));
+  successorState.ledger_count = successorEvents.length;
+  successorState.ledger_tip = successorEvents.at(-1).event_hash;
+  successorState.inherits = { capsule_ref: legacyCapsule.capsule_ref, state_hash: legacyCapsule.state_hash };
+  writeFileSync(successorStatePath, canonicalJson(successorState, true));
+  writeFileSync(join(successorDir, 'continuation.json'), canonicalJson(buildContinuation(successorState, successorEvents), true));
+
+  const report = verifyLineage(directory, successorDir);
+  for (const name of ['inheritance_capsule_ref_matches', 'inheritance_state_hash_matches']) {
+    const row = report.checks.find((item) => item.name === name);
+    assert.equal(row.status, 'NOT_RUN', `${name} must be NOT_RUN for an unimplemented inherited generation`);
+    assert.match(row.detail, /cannot place/);
+  }
+  assert.equal(report.inherited_fold_version, null);
+  assert.equal(report.ok, false, 'an unverifiable inherited fold must fail safe');
+});
+
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {
   isolatedData(t);
   const { run, sealed, directory } = runWindow({

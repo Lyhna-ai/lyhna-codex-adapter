@@ -332,6 +332,7 @@ export function verifyLineage(priorDirectory, currentDirectory) {
   const currentInherits = currentRunBegun?.payload?.inherits || null;
   let inheritanceTarget = published;
   let inheritanceVia = 'the prior packet\'s capsule';
+  let inheritedFoldUnknown = null;
   if (currentInherits && currentInherits.capsule_ref !== published.capsule_ref) {
     const archivePath = join(priorDirectory, 'capsules', `${currentInherits.capsule_ref}.json`);
     if (existsSync(archivePath)) {
@@ -355,12 +356,16 @@ export function verifyLineage(priorDirectory, currentDirectory) {
           && archivedCount <= priorChain.events.length
           && priorChain.events[archivedCount - 1]?.event_hash === archivedTip;
         if (archived.value.run_id === published.run_id && prefixTipMatches) {
-          inheritanceTarget = archived.value;
           // Classify the inherited capsule from ITS OWN anchor — the event its fold rode on, which
           // by the tip binding is exactly the event at the position it names. A packet can span
           // fold generations (a v0 checkpoint, an upgrade, a v1 face): the face's classification
           // must not speak for the archive, or a legacy inherited capsule reads as current and the
           // superseded-semantics warning about its claims is silently suppressed.
+          //
+          // The classification GATES acceptance. An anchor declaring a generation this checker
+          // does not implement means the inherited fold cannot be verified at all — recording that
+          // as report metadata after accepting the archive would return LINKED on a fold nothing
+          // checked, which is the fail-safe rule inverted. Unknown is NOT_RUN, never a pass.
           const inheritedAnchor = priorChain.events[archivedCount - 1];
           const declaredInherited = inheritedAnchor?.payload?.continuation_fold_version;
           let inheritedFold = null;
@@ -370,9 +375,14 @@ export function verifyLineage(priorDirectory, currentDirectory) {
             const inheritedCandidates = foldCandidatesForRenderer(inheritedAnchor?.payload?.receipt_renderer);
             inheritedFold = inheritedCandidates ? (inheritedCandidates.length === 1 ? inheritedCandidates[0] : inheritedCandidates.join('|')) : null;
           }
-          report.inherited_fold_version = inheritedFold;
-          if (inheritedFold !== CURRENT_FOLD_VERSION) report.prior_claim_semantics = 'SUPERSEDED';
-          inheritanceVia = `an archived fold this run later superseded (content-addressed; bound to this ledger at event ${archivedCount}; inherited fold ${inheritedFold ?? 'unknown'})`;
+          if (inheritedFold === null) {
+            inheritedFoldUnknown = `not run — the inherited archived fold's anchor declares generation "${declaredInherited ?? inheritedAnchor?.payload?.receipt_renderer ?? 'none'}", which this checker cannot place, so the inherited edge cannot be verified`;
+          } else {
+            inheritanceTarget = archived.value;
+            report.inherited_fold_version = inheritedFold;
+            if (inheritedFold !== CURRENT_FOLD_VERSION) report.prior_claim_semantics = 'SUPERSEDED';
+            inheritanceVia = `an archived fold this run later superseded (content-addressed; bound to this ledger at event ${archivedCount}; inherited fold ${inheritedFold})`;
+          }
         }
       }
     }
@@ -411,6 +421,14 @@ export function verifyLineage(priorDirectory, currentDirectory) {
       // committed fold, current or archived; which one it was is stated, not hidden.
       const target = inheritanceTarget;
       const via = inheritanceVia;
+      if (inheritedFoldUnknown) {
+        // A ref-matched, ledger-bound archive whose generation this checker does not implement:
+        // the edge exists but cannot be verified. NOT_RUN, never a pass — and never a FAIL either,
+        // which would read as tampering the packet does not have.
+        checks.push(notRun('inheritance_capsule_ref_matches', inheritedFoldUnknown));
+        checks.push(notRun('inheritance_state_hash_matches', inheritedFoldUnknown));
+        return finalize(report, checks);
+      }
       checks.push(check(
         'inheritance_capsule_ref_matches',
         inherits.capsule_ref === target.capsule_ref,
