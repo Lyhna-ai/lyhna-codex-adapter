@@ -860,6 +860,47 @@ test('a legacy capsule with no privacy mode re-projects a handoff without invent
   assert.match(renderHandoffMarkdown(current), /- Privacy mode: `verified_context`/);
 });
 
+test('a lagging state cache is advanced over its anchor before the capsule is regenerated', (t) => {
+  isolatedData(t);
+  // Crash between the anchor append and saveState: the cache is one write behind, still carrying
+  // pre-anchor count/tip. The regeneration gate correctly accepts it (it IS the committed state),
+  // but folding with the lag published a capsule whose witnessed bookkeeping excluded the anchor —
+  // and it stopped refolding the moment a normal read advanced state.json. An untampered packet
+  // aging into a tamper report.
+  const parent = mintSession({ sessionId: 'lag' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Lagging state crash.' });
+  recordClaim(parent, 'work', []);
+  checkpointOrSeal(parent, 'lag-stop');
+  const directory = getRunForTesting(run.id).directory;
+  const events = readFileSync(join(directory, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  const anchorEvent = events.at(-1);
+
+  const statePath = join(directory, 'state.json');
+  const state = JSON.parse(readFileSync(statePath, 'utf8'));
+  state.ledger_count = anchorEvent.payload.covers_seq;
+  state.ledger_tip = events[anchorEvent.payload.covers_seq - 1].event_hash;
+  writeFileSync(statePath, canonicalJson(state, true));
+  rmSync(join(directory, 'continuation.json'));
+  rmSync(join(directory, 'HANDOFF.md'));
+  rmSync(join(directory, 'capsules'), { recursive: true, force: true });
+
+  checkpointOrSeal(parent, 'lag-stop');   // the replayed delivery
+  const capsule = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8'));
+  assert.equal(capsule.witnessed.event_count, events.length, 'the regenerated capsule must include the anchor');
+
+  // A later normal read advances state.json to the tip; the capsule must still refold.
+  const advanced = JSON.parse(readFileSync(statePath, 'utf8'));
+  advanced.ledger_count = events.length;
+  advanced.ledger_tip = anchorEvent.event_hash;
+  writeFileSync(statePath, canonicalJson(advanced, true));
+
+  const next = mintSession({ sessionId: 'lag-next' });
+  const successor = beginRun(next, { mode: 'full', objective: 'Successor.', continuesFrom: capsule.capsule_ref });
+  checkpointOrSeal(next, 'lag-next-stop');
+  const report = verifyLineage(directory, getRunForTesting(successor.id).directory);
+  assert.ok(report.ok, `the repaired capsule must keep refolding:\n${report.checks.filter((c) => c.status !== 'PASS').map((c) => `${c.status} ${c.name}: ${c.detail}`).join('\n')}`);
+});
+
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {
   isolatedData(t);
   const { run, sealed, directory } = runWindow({

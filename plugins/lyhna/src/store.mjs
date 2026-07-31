@@ -187,6 +187,13 @@ function ensureStopArtifacts(runId, state) {
       };
       if (anchor.payload?.state_hash !== sha256(canonicalJson(preAnchor))) return;
     }
+    // The gate above proves the state is semantically the one the anchor committed — but a crash
+    // between the anchor append and saveState leaves the CACHE one write behind, still carrying
+    // pre-anchor count/tip. Folding with that lag publishes a capsule whose witnessed bookkeeping
+    // excludes the anchor, and it stops refolding the moment any normal read advances state.json
+    // to the ledger tip: an untampered packet aging into a tamper report. Advance the two fields
+    // over the anchor — the same prefix recovery the next real Stop would perform.
+    const foldState = { ...state, ledger_count: events.length, ledger_tip: events.at(-1).event_hash };
     let fold = anchor?.payload?.continuation_fold_version;
     if (fold === undefined) {
       // A renderer string may span more than one shipped shape (0.1.30). With the capsule gone
@@ -198,7 +205,7 @@ function ensureStopArtifacts(runId, state) {
       fold = candidates[0];
     }
     if (!KNOWN_FOLD_VERSIONS.includes(fold)) return;
-    writeContinuationArtifacts(runId, state, events, fold);
+    writeContinuationArtifacts(runId, foldState, events, fold);
     return;
   }
   if (!existsSync(handoffPath)) {
