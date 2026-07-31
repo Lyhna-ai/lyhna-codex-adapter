@@ -222,6 +222,7 @@ export function verifyLineage(priorDirectory, currentDirectory) {
     prior_fold_version: null,
     prior_renderer: null,
     prior_claim_semantics: null,
+    inherited_fold_version: null,
     current_run_id: null,
     checks,
     trust_notice: LINEAGE_TRUST_NOTICE
@@ -355,7 +356,23 @@ export function verifyLineage(priorDirectory, currentDirectory) {
           && priorChain.events[archivedCount - 1]?.event_hash === archivedTip;
         if (archived.value.run_id === published.run_id && prefixTipMatches) {
           inheritanceTarget = archived.value;
-          inheritanceVia = `an archived fold this run later superseded (content-addressed; bound to this ledger at event ${archivedCount})`;
+          // Classify the inherited capsule from ITS OWN anchor — the event its fold rode on, which
+          // by the tip binding is exactly the event at the position it names. A packet can span
+          // fold generations (a v0 checkpoint, an upgrade, a v1 face): the face's classification
+          // must not speak for the archive, or a legacy inherited capsule reads as current and the
+          // superseded-semantics warning about its claims is silently suppressed.
+          const inheritedAnchor = priorChain.events[archivedCount - 1];
+          const declaredInherited = inheritedAnchor?.payload?.continuation_fold_version;
+          let inheritedFold = null;
+          if (declaredInherited !== undefined) {
+            inheritedFold = KNOWN_FOLD_VERSIONS.includes(declaredInherited) ? declaredInherited : null;
+          } else {
+            const inheritedCandidates = foldCandidatesForRenderer(inheritedAnchor?.payload?.receipt_renderer);
+            inheritedFold = inheritedCandidates ? (inheritedCandidates.length === 1 ? inheritedCandidates[0] : inheritedCandidates.join('|')) : null;
+          }
+          report.inherited_fold_version = inheritedFold;
+          if (inheritedFold !== CURRENT_FOLD_VERSION) report.prior_claim_semantics = 'SUPERSEDED';
+          inheritanceVia = `an archived fold this run later superseded (content-addressed; bound to this ledger at event ${archivedCount}; inherited fold ${inheritedFold ?? 'unknown'})`;
         }
       }
     }

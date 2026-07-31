@@ -320,6 +320,11 @@ function buildNext(open) {
     if (item.statement.startsWith('Builder claim is UNRESOLVED_EVIDENCE')) {
       return entry('Resolve this claim\'s cited evidence, or treat the claim as unverified in this window.', item.ref);
     }
+    if (item.statement.startsWith('Builder claim cites references that resolve')) {
+      // Not a sealing blocker, and not cleared either: the references point at real events, and
+      // whether they bear on the statement is exactly what was never evaluated.
+      return entry('Re-check whether the cited events actually support this claim before relying on it; resolution was verified, relevance was not.', item.ref);
+    }
     if (item.statement.startsWith('Evaluation ')) {
       return entry('Complete or re-run this evaluation and retrieve its sealed receipt before relying on its findings.', item.ref);
     }

@@ -675,6 +675,79 @@ test('an archive planted from another packet never verifies as this packet\'s in
   assert.equal(report.ok, false, 'a planted archive must not make an unrelated packet LINKED');
 });
 
+test('an inherited legacy checkpoint is classified by its own anchor, not the upgraded face', (t) => {
+  isolatedData(t);
+  // A packet can span fold generations: a v0 checkpoint, an upgrade, a v1 face. The successor
+  // inherited the v0 fold, and classifying by the face reported it as current — suppressing the
+  // superseded-semantics warning for exactly the claims it applies to.
+  const parent = mintSession({ sessionId: 'mixed' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Mixed-generation packet.' });
+  recordClaim(parent, 'legacy-era work', []);
+  checkpointOrSeal(parent, 'mixed-stop-1');
+  const directory = getRunForTesting(run.id).directory;
+  const stopOneCount = readFileSync(join(directory, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).length;
+  recordClaim(parent, 'current-era work', []);
+  checkpointOrSeal(parent, 'mixed-stop-2');
+
+  const successorSession = mintSession({ sessionId: 'mixed-next' });
+  const successor = beginRun(successorSession, { mode: 'full', objective: 'Successor.', continuesFrom: 'placeholder' });
+  checkpointOrSeal(successorSession, 'mixed-next-stop');
+  const successorDir = getRunForTesting(successor.id).directory;
+
+  // Recast the FIRST anchor as a 0.1.31 (v0) checkpoint; the second Stop stays v1.
+  const priorEvents = rechainLedger(directory, (event) => {
+    if (event.type === 'checkpoint_anchor' && event.payload?.covers_seq === stopOneCount - 1) {
+      event.payload.receipt_renderer = '0.1.31';
+      delete event.payload.continuation_fold_version;
+    }
+  });
+  const statePath = join(directory, 'state.json');
+  const state = JSON.parse(readFileSync(statePath, 'utf8'));
+
+  // The v0 fold as the recast first Stop would have published it, archived under its own ref.
+  const prefixState = { ...state, ledger_count: stopOneCount, ledger_tip: priorEvents[stopOneCount - 1].event_hash };
+  const legacyCapsule = buildContinuation(prefixState, priorEvents.slice(0, stopOneCount), 'v0');
+  rmSync(join(directory, 'capsules'), { recursive: true, force: true });
+  mkdirSync(join(directory, 'capsules'), { recursive: true });
+  writeFileSync(join(directory, 'capsules', `${legacyCapsule.capsule_ref}.json`), canonicalJson(legacyCapsule, true));
+
+  // The current v1 face over the full rechained ledger.
+  state.ledger_count = priorEvents.length;
+  state.ledger_tip = priorEvents.at(-1).event_hash;
+  writeFileSync(statePath, canonicalJson(state, true));
+  const face = buildContinuation(state, priorEvents);
+  writeFileSync(join(directory, 'continuation.json'), canonicalJson(face, true));
+  writeFileSync(join(directory, 'capsules', `${face.capsule_ref}.json`), canonicalJson(face, true));
+
+  // The successor's chained commitment names the legacy fold.
+  const successorEvents = rechainLedger(successorDir, (event) => {
+    if (event.type !== 'run_begun') return;
+    event.payload.inherits = {
+      capsule_ref: legacyCapsule.capsule_ref,
+      state_hash: legacyCapsule.state_hash,
+      run_id: run.id,
+      resolution: 'RESOLVED_LOCAL_ARCHIVE'
+    };
+  });
+  const successorStatePath = join(successorDir, 'state.json');
+  const successorState = JSON.parse(readFileSync(successorStatePath, 'utf8'));
+  successorState.ledger_count = successorEvents.length;
+  successorState.ledger_tip = successorEvents.at(-1).event_hash;
+  successorState.inherits = { capsule_ref: legacyCapsule.capsule_ref, state_hash: legacyCapsule.state_hash };
+  writeFileSync(successorStatePath, canonicalJson(successorState, true));
+  writeFileSync(join(successorDir, 'continuation.json'), canonicalJson(buildContinuation(successorState, successorEvents), true));
+
+  const report = verifyLineage(directory, successorDir);
+  assert.ok(report.ok, `mixed packet must verify:\n${report.checks.filter((c) => c.status !== 'PASS').map((c) => `${c.status} ${c.name}: ${c.detail}`).join('\n')}`);
+  assert.equal(report.inherited_fold_version, 'v0', 'the inherited capsule is classified by its own anchor');
+  assert.equal(
+    report.prior_claim_semantics,
+    'SUPERSEDED',
+    'a legacy inherited fold must trigger the superseded-semantics warning even under a current face'
+  );
+  assert.match(renderLineageMarkdown(report), /superseded semantics/);
+});
+
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {
   isolatedData(t);
   const { run, sealed, directory } = runWindow({
