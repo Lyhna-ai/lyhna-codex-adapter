@@ -642,6 +642,13 @@ test('a missing handoff is re-projected from a surviving capsule, even when the 
     previous = event.event_hash;
   }
   writeFileSync(ledgerPath, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`);
+  // A genuine 0.1.30 packet is internally consistent: its state and face agree with its ledger.
+  const statePath = join(directory, 'state.json');
+  const state = JSON.parse(readFileSync(statePath, 'utf8'));
+  state.ledger_count = events.length;
+  state.ledger_tip = events.at(-1).event_hash;
+  writeFileSync(statePath, canonicalJson(state, true));
+  writeFileSync(join(directory, 'continuation.json'), canonicalJson(buildContinuation(state, events, 'v0'), true));
   rmSync(join(directory, 'HANDOFF.md'));
 
   checkpointOrSeal(parent, 'amb-handoff-stop');
@@ -899,6 +906,40 @@ test('a lagging state cache is advanced over its anchor before the capsule is re
   checkpointOrSeal(next, 'lag-next-stop');
   const report = verifyLineage(directory, getRunForTesting(successor.id).directory);
   assert.ok(report.ok, `the repaired capsule must keep refolding:\n${report.checks.filter((c) => c.status !== 'PASS').map((c) => `${c.status} ${c.name}: ${c.detail}`).join('\n')}`);
+});
+
+test('a stale face left by a crashed later Stop is replaced, and its fold preserved', (t) => {
+  isolatedData(t);
+  // Stop N crashes after its anchor and saveState but before overwriting the face: Stop N-1's
+  // capsule sits where N's should be. A file that exists and self-validates and is still WRONG —
+  // presence is not currency. The replay must replace it at the anchored boundary, and the older
+  // fold must survive in the archive so handoffs taken from it keep resolving.
+  const parent = mintSession({ sessionId: 'staleface' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Stale face crash.' });
+  recordClaim(parent, 'first stretch', []);
+  checkpointOrSeal(parent, 'staleface-stop-1');
+  const directory = getRunForTesting(run.id).directory;
+  const refA = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8')).capsule_ref;
+  recordClaim(parent, 'second stretch', []);
+  checkpointOrSeal(parent, 'staleface-stop-2');
+  const refB = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8')).capsule_ref;
+
+  writeFileSync(join(directory, 'continuation.json'), readFileSync(join(directory, 'capsules', `${refA}.json`)));
+  rmSync(join(directory, 'capsules', `${refB}.json`));
+  rmSync(join(directory, 'HANDOFF.md'));
+
+  checkpointOrSeal(parent, 'staleface-stop-2');   // the replayed delivery
+  const face = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8'));
+  assert.equal(face.capsule_ref, refB, 'the face must be regenerated at the anchored boundary');
+  assert.ok(existsSync(join(directory, 'capsules', `${refA}.json`)), 'the older fold stays archived');
+  assert.ok(existsSync(join(directory, 'capsules', `${refB}.json`)), 'the regenerated fold is archived');
+  assert.ok(existsSync(join(directory, 'HANDOFF.md')), 'the handoff is re-projected from the current face');
+
+  const next = mintSession({ sessionId: 'staleface-next' });
+  const successor = beginRun(next, { mode: 'full', objective: 'Successor.', continuesFrom: refB });
+  checkpointOrSeal(next, 'staleface-next-stop');
+  const report = verifyLineage(directory, getRunForTesting(successor.id).directory);
+  assert.ok(report.ok, `the repaired packet must verify:\n${report.checks.filter((c) => c.status !== 'PASS').map((c) => `${c.status} ${c.name}: ${c.detail}`).join('\n')}`);
 });
 
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {

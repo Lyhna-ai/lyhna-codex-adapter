@@ -162,18 +162,44 @@ function ensureStopArtifacts(runId, state) {
   const dir = runDir(runId);
   const capsulePath = join(dir, 'continuation.json');
   const handoffPath = join(dir, 'HANDOFF.md');
-  if (!existsSync(capsulePath)) {
-    // Only regenerating the CAPSULE needs a fold generation: the fold is what shapes those bytes.
-    const { events } = parseLedger(runId);
-    const anchor = events.find((event) => event.type === 'run_sealed')
-      ?? [...events].reverse().find((event) => event.type === 'checkpoint_anchor');
+  const { events } = parseLedger(runId);
+  const anchor = events.find((event) => event.type === 'run_sealed')
+    ?? [...events].reverse().find((event) => event.type === 'checkpoint_anchor');
+  const published = existsSync(capsulePath) ? readJson(capsulePath, null) : null;
+  const publishedValid = Boolean(published?.capsule_ref && deriveCapsuleRef(published) === published.capsule_ref);
+  // PRESENCE is not CURRENCY. A crash after Stop N's anchor but before its face overwrite leaves
+  // Stop N-1's capsule sitting where N's should be — a file that exists, self-validates, and is
+  // still the wrong face: lineage re-folds the full ledger and reports the packet tampered. The
+  // face is current only if the fold boundary it commits to IS the ledger tip.
+  const publishedCurrent = publishedValid
+    && published.witnessed?.event_count === events.length
+    && published.witnessed?.ledger_tip === events.at(-1)?.event_hash;
+
+  if (!publishedCurrent) {
+    // Preserve a genuine older face before replacing it: if its committed tip sits at exactly the
+    // position it names in this chain, it is a real fold of this ledger and handoffs taken from it
+    // must keep resolving. Archive and index it — never destroy it.
+    if (publishedValid) {
+      const staleCount = published.witnessed?.event_count;
+      const genuine = Number.isInteger(staleCount)
+        && staleCount >= 1
+        && staleCount <= events.length
+        && events[staleCount - 1]?.event_hash === published.witnessed?.ledger_tip;
+      if (genuine) {
+        const staleArchive = capsuleArchivePath(runId, published.capsule_ref);
+        if (!existsSync(staleArchive)) atomicWriteText(staleArchive, canonicalJson(published, true));
+        if (!readJson(capsuleIndexPath(published.capsule_ref), null)) {
+          atomicWriteJson(capsuleIndexPath(published.capsule_ref), { run_id: runId, capsule_ref: published.capsule_ref });
+        }
+      }
+    }
     // Regenerate ONLY at the anchored boundary. A capsule is a Stop artifact: if the ledger has
     // advanced past the anchor before the replay arrived, folding the full current ledger would
     // publish post-Stop activity no Stop observed or anchored — a capsule the packet's own history
-    // cannot account for. The next real Stop will fold and anchor everything; until then a missing
-    // file that reports honestly beats a fabricated boundary. For a checkpoint the current state
-    // must also be the exact state the anchor committed, or the fold's inputs are not the ones the
-    // chain vouches for.
+    // cannot account for. The next real Stop will fold and anchor everything; until then a stale or
+    // missing file that reports honestly beats a fabricated boundary. For a checkpoint the current
+    // state must also be the exact state the anchor committed, or the fold's inputs are not the
+    // ones the chain vouches for.
     if (!anchor || events.at(-1) !== anchor) return;
     if (anchor.type === 'checkpoint_anchor') {
       // The anchor committed the state as it stood BEFORE the anchor event was appended (the
@@ -196,10 +222,10 @@ function ensureStopArtifacts(runId, state) {
     const foldState = { ...state, ledger_count: events.length, ledger_tip: events.at(-1).event_hash };
     let fold = anchor?.payload?.continuation_fold_version;
     if (fold === undefined) {
-      // A renderer string may span more than one shipped shape (0.1.30). With the capsule gone
+      // A renderer string may span more than one shipped shape (0.1.30). With no current face
       // there are no bytes to match against, so an ambiguous candidate set means the repair cannot
-      // know which shape to regenerate — and a wrong repair is worse than a missing file, which at
-      // least reports honestly. Repair only when the generation is unambiguous.
+      // know which shape to regenerate — and a wrong repair is worse than an honest gap. Repair
+      // only when the generation is unambiguous.
       const candidates = foldCandidatesForRenderer(anchor?.payload?.receipt_renderer);
       if (!candidates || candidates.length !== 1) return;
       fold = candidates[0];
@@ -209,17 +235,11 @@ function ensureStopArtifacts(runId, state) {
     return;
   }
   if (!existsSync(handoffPath)) {
-    // The handoff is a pure projection of the capsule that survived — no fold guess involved, so
-    // candidate ambiguity is no reason to leave it missing. Validate the surviving bytes first: a
-    // capsule that does not recompute to its own ref must not be re-projected onto a new surface.
-    const survived = readJson(capsulePath, null);
-    if (survived?.capsule_ref && deriveCapsuleRef(survived) === survived.capsule_ref) {
-      atomicWriteText(handoffPath, renderHandoffMarkdown(survived));
-    }
+    // The handoff is a pure projection of the current capsule — no fold guess involved, so
+    // candidate ambiguity is no reason to leave it missing.
+    atomicWriteText(handoffPath, renderHandoffMarkdown(published));
   }
-  const published = readJson(capsulePath, null);
-  const ref = published?.capsule_ref;
-  if (!ref || deriveCapsuleRef(published) !== ref) return;
+  const ref = published.capsule_ref;
   const archivePath = capsuleArchivePath(runId, ref);
   if (!existsSync(archivePath)) atomicWriteText(archivePath, canonicalJson(published, true));
   if (!readJson(capsuleIndexPath(ref), null)) {
