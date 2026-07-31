@@ -168,6 +168,134 @@ function refoldContinuation(directory, events, foldVersion) {
   return { ok: true, detail: 'read', value: buildContinuation(state.value, events, foldVersion) };
 }
 
+/** Rebuild only the state projection a continuation fold reads at an archived Stop. */
+function stateAtArchivedStop(capsule, events) {
+  const begun = events.find((event) => event.type === 'run_begun');
+  const state = {
+    schema: 'lyhna.codex.run.v0',
+    id: capsule.run_id,
+    mode: begun?.payload?.mode ?? capsule.mode,
+    privacy_mode: begun?.payload?.privacy_mode ?? capsule.privacy_mode ?? 'verified_context',
+    sealed: false,
+    objective: capsule.objective,
+    objective_text: capsule.objective_text ?? '',
+    objective_origin: begun?.payload?.objective_origin ?? capsule.objective_origin,
+    inherits: begun?.payload?.inherits ?? capsule.inherits ?? null,
+    ledger_count: events.length,
+    ledger_tip: events.at(-1)?.event_hash ?? ZERO_HASH,
+    close_requested: null,
+    pr_snapshots: {},
+    evaluations: {},
+    children: {},
+    child_receipts: {}
+  };
+
+  const childById = (id) => Object.values(state.children).find((item) => item.id === id);
+  for (const event of events) {
+    const payload = event.payload ?? {};
+    if (event.type === 'pr_snapshot') {
+      state.pr_snapshots[payload.id] = {
+        id: payload.id,
+        repository: payload.repository,
+        pr_number: payload.pr_number,
+        head_after: payload.head_after,
+        status: payload.status
+      };
+    } else if (event.type === 'pr_refreshed') {
+      const snapshot = state.pr_snapshots[payload.snapshot_id];
+      if (snapshot) {
+        snapshot.current_head = payload.observed_head;
+        if (payload.status === 'STALE') snapshot.status = 'STALE';
+      }
+      if (payload.status === 'STALE') {
+        for (const evaluation of Object.values(state.evaluations)) {
+          if (evaluation.snapshot_id === payload.snapshot_id) evaluation.status = 'STALE';
+        }
+      }
+    } else if (event.type === 'evaluation_requested') {
+      state.evaluations[payload.evaluation_request_id] = {
+        id: payload.evaluation_request_id,
+        snapshot_id: payload.snapshot_id,
+        expected_head: payload.expected_head,
+        status: 'OPEN',
+        findings: []
+      };
+    } else if (event.type === 'evaluation_claimed') {
+      const evaluation = state.evaluations[payload.evaluation_request_id];
+      if (evaluation) {
+        evaluation.status = 'CLAIMED';
+        evaluation.child_agent_hash = payload.child_agent_hash;
+        const childId = `child_agent_${sha256(`${capsule.run_id}\0${payload.child_agent_hash}`).slice(0, 24)}`;
+        const child = childById(childId);
+        if (child) child.role = 'evaluator';
+      }
+    } else if (event.type === 'evaluation_finding') {
+      const evaluation = state.evaluations[payload.evaluation_request_id];
+      if (evaluation) {
+        const alreadyFailedIntegrity = evaluation.status === 'CHECKOUT_INTEGRITY_EXCEPTION';
+        evaluation.findings.push(payload);
+        evaluation.status = payload.checkout_integrity === 'CONSISTENT_CLEAN' && !alreadyFailedIntegrity
+          ? 'RECORDED'
+          : 'CHECKOUT_INTEGRITY_EXCEPTION';
+      }
+    } else if (event.type === 'child_started') {
+      state.children[payload.child_id] = {
+        id: payload.child_id,
+        role: payload.role,
+        status: payload.status,
+        start_event_ref: event.event_hash,
+        stop_event_ref: null,
+        receipt_id: null
+      };
+    } else if (event.type === 'child_stop_observed') {
+      const child = childById(payload.child_id);
+      if (child) {
+        child.role = payload.role;
+        child.status = payload.status;
+        child.stop_event_ref = event.event_hash;
+      }
+    } else if (event.type === 'child_receipt_sealed') {
+      state.child_receipts[payload.receipt_id] = {
+        id: payload.receipt_id,
+        role: payload.role,
+        status: payload.status,
+        content_hash: payload.content_ref,
+        retrieved: false
+      };
+      const evaluation = Object.values(state.evaluations)
+        .find((item) => `child_${item.id}` === payload.receipt_id);
+      if (evaluation) {
+        evaluation.child_receipt_id = payload.receipt_id;
+        const childId = evaluation.child_agent_hash
+          ? `child_agent_${sha256(`${capsule.run_id}\0${evaluation.child_agent_hash}`).slice(0, 24)}`
+          : null;
+        const child = childId ? childById(childId) : null;
+        if (child) {
+          child.role = payload.role;
+          child.receipt_id = payload.receipt_id;
+        }
+      }
+      const child = childById(payload.receipt_id);
+      if (child) child.receipt_id = payload.receipt_id;
+    } else if (event.type === 'child_receipt_retrieved') {
+      const receipt = state.child_receipts[payload.receipt_id];
+      if (receipt) receipt.retrieved = true;
+      const evaluation = Object.values(state.evaluations)
+        .find((item) => item.child_receipt_id === payload.receipt_id);
+      if (evaluation) evaluation.child_receipt_retrieved = true;
+    } else if (event.type === 'close_requested') {
+      state.close_requested = payload;
+    } else if (event.type === 'run_sealed') {
+      state.sealed = true;
+    }
+  }
+  return state;
+}
+
+function refoldArchivedContinuation(capsule, events, foldVersion) {
+  return buildContinuation(stateAtArchivedStop(capsule, events), events, foldVersion);
+}
+
 /**
  * Which fold generation wrote this packet.
  *
@@ -356,32 +484,59 @@ export function verifyLineage(priorDirectory, currentDirectory) {
           && archivedCount <= priorChain.events.length
           && priorChain.events[archivedCount - 1]?.event_hash === archivedTip;
         if (archived.value.run_id === published.run_id && prefixTipMatches) {
-          // Classify the inherited capsule from ITS OWN anchor — the event its fold rode on, which
-          // by the tip binding is exactly the event at the position it names. A packet can span
-          // fold generations (a v0 checkpoint, an upgrade, a v1 face): the face's classification
-          // must not speak for the archive, or a legacy inherited capsule reads as current and the
-          // superseded-semantics warning about its claims is silently suppressed.
-          //
-          // The classification GATES acceptance. An anchor declaring a generation this checker
-          // does not implement means the inherited fold cannot be verified at all — recording that
-          // as report metadata after accepting the archive would return LINKED on a fold nothing
-          // checked, which is the fail-safe rule inverted. Unknown is NOT_RUN, never a pass.
-          const inheritedAnchor = priorChain.events[archivedCount - 1];
-          const declaredInherited = inheritedAnchor?.payload?.continuation_fold_version;
-          let inheritedFold = null;
-          if (declaredInherited !== undefined) {
-            inheritedFold = KNOWN_FOLD_VERSIONS.includes(declaredInherited) ? declaredInherited : null;
-          } else {
-            const inheritedCandidates = foldCandidatesForRenderer(inheritedAnchor?.payload?.receipt_renderer);
-            inheritedFold = inheritedCandidates ? (inheritedCandidates.length === 1 ? inheritedCandidates[0] : inheritedCandidates.join('|')) : null;
+          // The prefix anchor selects a CLOSED candidate set; the archived bytes must then re-fold
+          // from that prefix to decide which generation actually wrote them. Reading the anchor
+          // alone is insufficient for 0.1.30, and using the current state cache leaks later work
+          // backward into the historical fold.
+          const prefix = priorChain.events.slice(0, archivedCount);
+          const inheritedFold = foldVersionForPacket(prefix);
+          let matchedInheritedFold = null;
+          if (inheritedFold.ok) {
+            for (const candidate of inheritedFold.candidates) {
+              const refolded = refoldArchivedContinuation(archived.value, prefix, candidate);
+              const { signature: _archivedSignature, ...archivedCore } = archived.value;
+              const { signature: _refoldedSignature, ...refoldedCore } = refolded;
+              if (canonicalJson(refoldedCore) === canonicalJson(archivedCore)) {
+                matchedInheritedFold = candidate;
+                break;
+              }
+            }
           }
-          if (inheritedFold === null) {
-            inheritedFoldUnknown = `not run — the inherited archived fold's anchor declares generation "${declaredInherited ?? inheritedAnchor?.payload?.receipt_renderer ?? 'none'}", which this checker cannot place, so the inherited edge cannot be verified`;
+          if (!inheritedFold.ok) {
+            inheritedFoldUnknown = `not run — this checker cannot place the inherited archived fold: ${inheritedFold.detail}; the inherited edge cannot be verified`;
+          } else if (matchedInheritedFold === null) {
+            inheritedFoldUnknown = `not run — the inherited archive does not re-fold from its own ledger prefix under any candidate generation (tried ${inheritedFold.candidates.join(', ')}), so the inherited edge cannot be verified`;
+            const refoldCheck = checks.find((item) => item.name === 'prior_continuation_refolds');
+            if (refoldCheck) {
+              refoldCheck.ok = false;
+              refoldCheck.status = 'FAIL';
+              refoldCheck.detail += '; inherited archive does not reproduce from its own ledger prefix';
+            }
           } else {
             inheritanceTarget = archived.value;
-            report.inherited_fold_version = inheritedFold;
-            if (inheritedFold !== CURRENT_FOLD_VERSION) report.prior_claim_semantics = 'SUPERSEDED';
-            inheritanceVia = `an archived fold this run later superseded (content-addressed; bound to this ledger at event ${archivedCount}; inherited fold ${inheritedFold})`;
+            report.prior_capsule_ref = archived.value.capsule_ref;
+            report.inherited_fold_version = matchedInheritedFold;
+            report.prior_fold_version = matchedInheritedFold;
+            report.prior_renderer = inheritedFold.renderer;
+            report.prior_claim_semantics = matchedInheritedFold === CURRENT_FOLD_VERSION ? 'CURRENT' : 'SUPERSEDED';
+            inheritanceVia = `an archived fold this run later superseded (content-addressed; bound to this ledger at event ${archivedCount}; re-folded as ${matchedInheritedFold})`;
+
+            const presenceCheck = checks.find((item) => item.name === 'prior_continuation_present');
+            if (presenceCheck) presenceCheck.detail += `; successor selects archived capsule_ref ${archived.value.capsule_ref}`;
+            const refCheck = checks.find((item) => item.name === 'prior_capsule_ref_self_consistent');
+            if (refCheck) refCheck.detail += '; inherited archive capsule_ref also recomputes from its own content';
+            const stateHashCheck = checks.find((item) => item.name === 'prior_state_hash_self_consistent');
+            const archiveStateHash = sha256(canonicalJson(buildCarryForward(archived.value, matchedInheritedFold)));
+            const archiveStateOk = archiveStateHash === archived.value.state_hash;
+            if (stateHashCheck) {
+              stateHashCheck.ok = stateHashCheck.ok && archiveStateOk;
+              stateHashCheck.status = stateHashCheck.ok ? 'PASS' : 'FAIL';
+              stateHashCheck.detail += archiveStateOk
+                ? `; inherited archive state_hash recomputes under prefix fold ${matchedInheritedFold}`
+                : `; inherited archive state_hash does not recompute under prefix fold ${matchedInheritedFold}`;
+            }
+            const refoldCheck = checks.find((item) => item.name === 'prior_continuation_refolds');
+            if (refoldCheck) refoldCheck.detail += `; inherited archive re-folds from its ledger prefix under fold ${matchedInheritedFold}`;
           }
         }
       }

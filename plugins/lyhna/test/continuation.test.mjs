@@ -441,6 +441,12 @@ test('the handoff never presents a resolving reference as cleared', (t) => {
   assert.match(markdown, /never evaluated — a resolving reference is not verification/);
   assert.match(markdown, /\| Reference check \| Claim \| Evidence cited \|/);
   assert.doesNotMatch(markdown, /\| Support \|/, 'the column must not claim a judgment the system does not make');
+  const claim = capsule.claims.at(-1);
+  assert.match(
+    capsule.next.find((item) => item.ref === claim.ref)?.statement ?? '',
+    /re-check.*relevance|relevance.*re-check/i,
+    'the machine-readable next action must require the same relevance check as the handoff'
+  );
 });
 
 test('a handoff taken before the run\'s final Stop still resolves and verifies', (t) => {
@@ -683,6 +689,7 @@ test('an inherited legacy checkpoint is classified by its own anchor, not the up
   const parent = mintSession({ sessionId: 'mixed' });
   const run = beginRun(parent, { mode: 'full', objective: 'Mixed-generation packet.' });
   recordClaim(parent, 'legacy-era work', []);
+  evaluateAndRetrieve('mixed', parent, stableSnapshot, 'mixed-evaluator');
   checkpointOrSeal(parent, 'mixed-stop-1');
   const directory = getRunForTesting(run.id).directory;
   const stopOneCount = readFileSync(join(directory, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).length;
@@ -739,6 +746,9 @@ test('an inherited legacy checkpoint is classified by its own anchor, not the up
 
   const report = verifyLineage(directory, successorDir);
   assert.ok(report.ok, `mixed packet must verify:\n${report.checks.filter((c) => c.status !== 'PASS').map((c) => `${c.status} ${c.name}: ${c.detail}`).join('\n')}`);
+  assert.equal(report.prior_capsule_ref, legacyCapsule.capsule_ref, 'the report names the inherited fold');
+  assert.equal(report.prior_fold_version, 'v0', 'the prior fold field classifies the inherited archive');
+  assert.equal(report.prior_renderer, '0.1.31');
   assert.equal(report.inherited_fold_version, 'v0', 'the inherited capsule is classified by its own anchor');
   assert.equal(
     report.prior_claim_semantics,
