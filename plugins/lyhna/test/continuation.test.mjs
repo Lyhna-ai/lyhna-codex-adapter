@@ -14,6 +14,7 @@ import {
   mintSession,
   readSealedReceipt,
   recordClaim,
+  verifySealedRun,
   recordEvaluation,
   requestClose,
   sealChildByAgent
@@ -353,6 +354,65 @@ test('the handoff never presents a resolving reference as cleared', (t) => {
   assert.match(markdown, /never evaluated — a resolving reference is not verification/);
   assert.match(markdown, /\| Reference check \| Claim \| Evidence cited \|/);
   assert.doesNotMatch(markdown, /\| Support \|/, 'the column must not claim a judgment the system does not make');
+});
+
+test('a handoff taken before the run\'s final Stop still resolves and verifies', (t) => {
+  isolatedData(t);
+  // continuation.json is the run's CURRENT face and every later Stop overwrites it — so a handoff
+  // taken at Stop N used to stop resolving the moment Stop N+1 ran. Each fold is now archived
+  // immutably under its content-addressed ref, which is self-authenticating: a file either hashes
+  // to its own name or it is not that capsule.
+  const parent = mintSession({ sessionId: 'multi' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Long open window.' });
+  recordClaim(parent, 'first stretch', []);
+  checkpointOrSeal(parent, 'multi-stop-1');
+  const directory = getRunForTesting(run.id).directory;
+  const refA = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8')).capsule_ref;
+
+  // The prior run keeps working past the fold that was handed off, so by the time the successor
+  // opens, continuation.json no longer carries refA.
+  recordClaim(parent, 'second stretch', []);
+  checkpointOrSeal(parent, 'multi-stop-2');
+  const refB = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8')).capsule_ref;
+  assert.notEqual(refA, refB, 'the run face moved past the handed-off fold');
+
+  const next = mintSession({ sessionId: 'multi-next' });
+  const successor = beginRun(next, { mode: 'full', objective: 'From the first handoff.', continuesFrom: refA });
+  checkpointOrSeal(next, 'multi-next-stop');
+
+  assert.equal(
+    getRunForTesting(successor.id).state.inherits.resolution,
+    'RESOLVED_LOCAL_ARCHIVE',
+    'a superseded fold resolves from its immutable archive, never UNRESOLVED_LOCALLY'
+  );
+  const report = verifyLineage(directory, getRunForTesting(successor.id).directory);
+  assert.deepEqual(report.checks.map((item) => item.name), LINEAGE_CHECKS);
+  assert.ok(report.ok, `the archived edge must verify:\n${report.checks.filter((c) => c.status !== 'PASS').map((c) => `${c.status} ${c.name}: ${c.detail}`).join('\n')}`);
+  assert.match(
+    report.checks.find((item) => item.name === 'inheritance_capsule_ref_matches').detail,
+    /archived fold this run later superseded/,
+    'which fold matched is stated, not hidden'
+  );
+});
+
+test('a sealed packet that lost its handoff tail is repaired by seal verification', (t) => {
+  const root = isolatedData(t);
+  const { run, sealed, directory } = runWindow({ sessionId: 'sealtail', objective: 'Seals, then crashes mid-tail.' });
+
+  // The crash window after run_sealed became durable: receipts and anchor exist, the handoff tail
+  // does not. checkpointOrSeal excludes sealed runs, so repairSeal is the only path that ever
+  // revisits this packet — and it previously stopped at the receipts.
+  rmSync(join(directory, 'continuation.json'));
+  rmSync(join(directory, 'HANDOFF.md'));
+  rmSync(join(root, 'capsule-index'), { recursive: true, force: true });
+
+  verifySealedRun(run.id);
+  assert.ok(existsSync(join(directory, 'continuation.json')), 'seal verification must restore the capsule');
+  assert.ok(existsSync(join(directory, 'HANDOFF.md')), 'and the handoff');
+
+  const next = mintSession({ sessionId: 'sealtail-next' });
+  const successor = beginRun(next, { mode: 'full', objective: 'Successor.', continuesFrom: sealed.capsule_ref });
+  assert.equal(getRunForTesting(successor.id).state.inherits.resolution, 'RESOLVED_LOCAL_PACKET');
 });
 
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {

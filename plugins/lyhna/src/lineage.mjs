@@ -317,19 +317,37 @@ export function verifyLineage(priorDirectory, currentDirectory) {
       }
     } else {
       checks.push(check('current_declares_inheritance', true, `declares capsule_ref ${inherits.capsule_ref}`));
+      // The prior run may have kept working after this handoff was taken: continuation.json is the
+      // run's CURRENT face, and every fold is also archived immutably under its content-addressed
+      // ref. An archived capsule whose bytes hash to the committed ref IS that capsule — accepting
+      // it invents nothing, because forging the file would require content hashing to a ref the
+      // successor already sealed into its own chain. The comparison target is therefore the
+      // committed fold, current or archived; which one it was is stated, not hidden.
+      let target = published;
+      let via = 'the prior packet\'s capsule';
+      if (inherits.capsule_ref !== published.capsule_ref) {
+        const archivePath = join(priorDirectory, 'capsules', `${inherits.capsule_ref}.json`);
+        if (existsSync(archivePath)) {
+          const archived = readJsonObject(archivePath);
+          if (archived.ok && deriveCapsuleRef(archived.value) === inherits.capsule_ref) {
+            target = archived.value;
+            via = 'an archived fold this run later superseded (verified content-addressed)';
+          }
+        }
+      }
       checks.push(check(
         'inheritance_capsule_ref_matches',
-        inherits.capsule_ref === published.capsule_ref,
-        inherits.capsule_ref === published.capsule_ref
-          ? 'the committed capsule_ref is the prior packet\'s capsule'
-          : `committed capsule_ref ${inherits.capsule_ref} is not the prior packet's ${published.capsule_ref}`
+        inherits.capsule_ref === target.capsule_ref,
+        inherits.capsule_ref === target.capsule_ref
+          ? `the committed capsule_ref is ${via}`
+          : `committed capsule_ref ${inherits.capsule_ref} is not the prior packet's ${published.capsule_ref}, and no archived fold matches it`
       ));
       checks.push(check(
         'inheritance_state_hash_matches',
-        inherits.state_hash === published.state_hash,
-        inherits.state_hash === published.state_hash
-          ? 'the committed state_hash is the prior packet\'s carry-forward state'
-          : `committed state_hash ${inherits.state_hash} is not the prior packet's ${published.state_hash}`
+        inherits.state_hash === target.state_hash,
+        inherits.state_hash === target.state_hash
+          ? `the committed state_hash is the carry-forward state of ${via}`
+          : `committed state_hash ${inherits.state_hash} is not the prior packet's ${target.state_hash}`
       ));
     }
   }

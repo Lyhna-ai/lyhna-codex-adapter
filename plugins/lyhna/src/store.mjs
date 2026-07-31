@@ -123,6 +123,13 @@ function writeContinuationArtifacts(runId, state, events, foldVersion = CURRENT_
   }
   atomicWriteText(join(runDir(runId), 'continuation.json'), canonicalJson(published, true));
   atomicWriteText(join(runDir(runId), 'HANDOFF.md'), renderHandoffMarkdown(published));
+  // Archive this fold immutably under its own ref. continuation.json is the run's CURRENT face and
+  // is overwritten by every later Stop — so a handoff taken at Stop N stopped resolving the moment
+  // Stop N+1 ran, and a successor holding that exact ref recorded UNRESOLVED_LOCALLY. The archive
+  // is self-authenticating: the ref is content-addressed, so a file here either hashes to its own
+  // name or it is not that capsule. Never overwritten — immutability is the point.
+  const archivePath = capsuleArchivePath(runId, published.capsule_ref);
+  if (!existsSync(archivePath)) atomicWriteText(archivePath, canonicalJson(published, true));
   // Index here, at the single choke point that writes a capsule, rather than only at the seal.
   // Indexing on seal alone made every OPEN capsule unresolvable: a successor handed the exact
   // capsule_ref recorded UNRESOLVED_LOCALLY with a null state_hash, so its inheritance commitment
@@ -170,6 +177,11 @@ function capsuleIndexPath(capsuleRef) {
   return join(root(), 'capsule-index', `${sha256(capsuleRef)}.json`);
 }
 
+/** The immutable per-fold archive inside the run packet, keyed by content-addressed ref. */
+function capsuleArchivePath(runId, capsuleRef) {
+  return join(runDir(runId), 'capsules', `${capsuleRef}.json`);
+}
+
 /**
  * Resolve a declared predecessor against what this store can actually see.
  *
@@ -187,15 +199,28 @@ function resolveContinuesFrom(capsuleRef) {
   const indexed = readJson(capsuleIndexPath(ref), null);
   const priorRunId = indexed?.run_id;
   const published = priorRunId ? readJson(join(runDir(priorRunId), 'continuation.json'), null) : null;
-  if (!published || published.capsule_ref !== ref) {
-    return { capsule_ref: ref, run_id: null, state_hash: null, resolution: 'UNRESOLVED_LOCALLY' };
+  if (published && published.capsule_ref === ref) {
+    return {
+      capsule_ref: ref,
+      run_id: priorRunId,
+      state_hash: published.state_hash,
+      resolution: 'RESOLVED_LOCAL_PACKET'
+    };
   }
-  return {
-    capsule_ref: ref,
-    run_id: priorRunId,
-    state_hash: published.state_hash,
-    resolution: 'RESOLVED_LOCAL_PACKET'
-  };
+  // The run's current face has moved past this ref (a later Stop re-folded), but the fold itself
+  // is archived immutably under its content-addressed name. A ref whose archived bytes hash to the
+  // name IS that capsule — resolving from the archive invents nothing, and refusing to would strand
+  // every handoff taken before a run's final Stop.
+  const archived = priorRunId ? readJson(capsuleArchivePath(priorRunId, ref), null) : null;
+  if (archived && archived.capsule_ref === ref) {
+    return {
+      capsule_ref: ref,
+      run_id: priorRunId,
+      state_hash: archived.state_hash,
+      resolution: 'RESOLVED_LOCAL_ARCHIVE'
+    };
+  }
+  return { capsule_ref: ref, run_id: null, state_hash: null, resolution: 'UNRESOLVED_LOCALLY' };
 }
 
 function sessionLockPath(capability) {
@@ -450,6 +475,11 @@ function repairSeal(runId) {
       assert(existsSync(markdownPath) && sha256(readFileSync(markdownPath, 'utf8')) === anchor.receipt_markdown_hash, 'LOCAL_CHAIN_BROKEN');
     }
     dropCheckpointAnchor(runId);
+    // A sealed packet is not whole without its handoff tail. A crash after run_sealed became
+    // durable but before continuation.json / HANDOFF.md / the index landed was previously
+    // unrepairable from here — checkpointOrSeal excludes sealed runs, so this was the only path
+    // that ever revisits the packet, and it stopped at the receipts.
+    ensureStopArtifacts(runId, state);
     return { status: 'ALREADY_SEALED', run_id: runId, receipt_path: markdownPath };
   }
 
@@ -491,6 +521,9 @@ function repairSeal(runId) {
   if (staleCheckpointFile(markdownPath, expected.receipt_markdown_hash, checkpointMarkdownHashes)) atomicWriteText(markdownPath, receiptMarkdown);
   atomicWriteJson(anchorPath(runId), expected);
   dropCheckpointAnchor(runId);
+  // Same tail repair as the anchored branch: an interrupted seal that lost its handoff artifacts
+  // recovers them here or nowhere.
+  ensureStopArtifacts(runId, state);
   return { status: 'ALREADY_SEALED', run_id: runId, receipt_path: markdownPath };
 }
 
