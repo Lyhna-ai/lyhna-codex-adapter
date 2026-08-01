@@ -38,20 +38,123 @@ function countBy(items, key) {
 }
 
 /**
+ * Fold versions. The continuation capsule is not hash-anchored — the lineage checker re-FOLDS it
+ * from the ledger instead of comparing a stored hash, which catches a file regenerated wholesale.
+ * The cost is that changing the fold silently invalidates every packet an earlier build wrote, so
+ * each fold generation is kept and selected explicitly.
+ *
+ *   v0_1_28      the 0.1.28 fold: no privacy_mode or objective_text in capsule/carry-forward.
+ *   v0_1_29_30   the 0.1.29-0.1.30 fold: privacy_mode present, objective_text absent.
+ *   v0            the 0.1.31 fold: privacy_mode and objective_text present.
+ *
+ * All three historical generations share the KNOWN WRONG claim rule: any event could support any
+ * claim, so a claim citing another claim — or citing an unrelated `run_begun` — rendered SUPPORTED
+ * and was promoted into `settled`. Preserved verbatim and never used for new packets, each old
+ * packet still re-folds to its own published bytes and stays historically verifiable.
+ *   v1  0.1.32 onward. A cited reference is only ever reported as RESOLVING, never as supporting,
+ *       and builder claims are never promoted into `settled`.
+ *
+ * Dispatch reads the adapter version from the hash-chained `run_sealed` / `checkpoint_anchor`
+ * event, never from the capsule: the capsule is unanchored, so a `continuation_fold_version` field
+ * read from it would let a forged packet choose the reducer that makes it verify.
+ */
+export const CURRENT_FOLD_VERSION = 'v1';
+export const KNOWN_FOLD_VERSIONS = ['v0_1_28', 'v0_1_29_30', 'v0', 'v1'];
+
+const PRE_DECLARATION_FOLDS = new Set(['v0_1_28', 'v0_1_29_30', 'v0']);
+const LEGACY_CLAIM_FOLDS = PRE_DECLARATION_FOLDS;
+
+function includesPrivacyMode(foldVersion) {
+  return foldVersion !== 'v0_1_28';
+}
+
+function includesObjectiveText(foldVersion) {
+  return foldVersion === 'v0' || foldVersion === 'v1';
+}
+
+/**
+ * Which fold generation a HISTORICAL renderer used — packets from builds that predate the
+ * chained `continuation_fold_version` field. A closed whitelist, deliberately: inferring a fold
+ * from an open-ended version range means a renderer from the future silently gets folded with
+ * current rules, which is exactly the "never guess an unknown fold" requirement inverted. A
+ * renderer not in this list, with no chained fold declaration, is unknown and must be reported.
+ * Each listed renderer maps to the reducer that reproduces its actual continuation and
+ * carry-forward shape byte-for-byte. Versions 0.1.28 and 0.1.29 require their own historical
+ * reducers; mapping either to v0 would falsely report an untampered packet as changed.
+ */
+const HISTORICAL_RENDERER_FOLDS = {
+  '0.1.28': ['v0_1_28'],
+  '0.1.29': ['v0_1_29_30'],
+  // "0.1.30" is one renderer STRING spanning two shipped shapes: objective_text entered the
+  // carry-forward mid-version, before the release was cut. The published 0.1.30 bundle — the only
+  // 0.1.30 artifact with real packets in the wild — folds the v0 shape; the short-lived pre-release
+  // commits folded v0_1_29_30. The string cannot distinguish them, so both are candidates and the
+  // packet's own bytes decide: the checker accepts whichever reducer reproduces the published
+  // capsule byte-for-byte. This is content-addressed dispatch over a closed set of legitimate
+  // shipped shapes — NOT "the reducer that makes it verify": the candidates share identical claim
+  // semantics, the set is fixed here rather than by anything in the packet, and a forged packet
+  // gains nothing because matching still requires bytes that actually refold from the ledger.
+  '0.1.30': ['v0', 'v0_1_29_30'],
+  '0.1.31': ['v0']
+};
+
+/** All fold generations a historical renderer string could have shipped, most likely first. */
+export function foldCandidatesForRenderer(renderer) {
+  return HISTORICAL_RENDERER_FOLDS[String(renderer ?? '')] ?? null;
+}
+
+/**
  * Claimed-vs-actual, at the handoff layer.
  *
- * A builder claim is agent-reported by construction. Support is decided here, structurally, by
- * asking whether the claim's cited evidence resolves to an event hash in THIS run's ledger:
+ * A builder claim is agent-reported by construction. What this system can establish about it is
+ * narrow and worth stating exactly:
  *
- *   SUPPORTED           every cited reference resolves to a witnessed event in this run
- *   UNSUPPORTED         the claim cites no evidence at all
+ *   REFERENCES_RESOLVE  every cited reference resolves to an event this run witnessed
+ *   UNSUPPORTED         nothing is cited, or everything cited is the agent's own narration
  *   UNRESOLVED_EVIDENCE at least one cited reference does not resolve within configured coverage
  *
- * UNRESOLVED_EVIDENCE is deliberately distinct from UNSUPPORTED: a reference this run cannot
- * resolve may still be valid elsewhere (another run, another surface). Calling that "unsupported"
- * would be the overclaim this system exists to prevent.
+ * REFERENCES_RESOLVE deliberately does NOT say the claim is supported. Hash resolution is not
+ * semantic support: "I deployed production" citing `run_begun` resolves perfectly and proves only
+ * that the run began. No allowlist fixes this either — an unrelated but legitimate tool return
+ * still proves the wrong action. The honest ceiling is that the reference points at something real,
+ * and the reader decides whether it bears on the statement.
+ *
+ * UNRESOLVED_EVIDENCE stays distinct from UNSUPPORTED: a reference this run cannot resolve may be
+ * valid elsewhere, and calling that unsupported would be its own overclaim.
  */
-export function labelClaims(events, privacyMode = 'verified_context') {
+function labelClaimsV1(events, privacyMode) {
+  // An agent's own assertion is never evidence for another of its assertions. The ledger witnesses
+  // that a claim was MADE; it never witnesses that it was TRUE.
+  const authored = new Set(
+    events.filter((event) => event.origin === 'agent_reported').map((event) => `sha256:${event.event_hash}`)
+  );
+  const witnessedRefs = new Set(
+    events.filter((event) => event.origin !== 'agent_reported').map((event) => `sha256:${event.event_hash}`)
+  );
+  return events
+    .filter((event) => event.type === 'builder_claim')
+    .map((event) => {
+      const refs = event.payload?.evidence_refs || [];
+      // Resolves to nothing at all. Kept distinct from narration: a ref this run cannot see may be
+      // valid elsewhere, while a ref to narration resolves perfectly well and still is not evidence.
+      const unresolved = refs.filter((ref) => !witnessedRefs.has(ref) && !authored.has(ref)).sort(codepointCompare);
+      const resolving = refs.filter((ref) => witnessedRefs.has(ref));
+      // Citing only narration is evidentially identical to citing nothing, so it lands on
+      // UNSUPPORTED rather than UNRESOLVED_EVIDENCE — the ref did resolve, and saying otherwise
+      // would be its own small overclaim.
+      const support = unresolved.length > 0
+        ? 'UNRESOLVED_EVIDENCE'
+        : resolving.length === 0 ? 'UNSUPPORTED' : 'REFERENCES_RESOLVE';
+      return finishClaim(event, refs, unresolved, support, privacyMode);
+    })
+    .sort((a, b) => a.seq - b.seq);
+}
+
+/**
+ * The 0.1.31 fold, preserved so packets written by that build still verify against themselves.
+ * Do not "fix" it — its wrongness is the historical fact a v0 packet is entitled to reproduce.
+ */
+function labelClaimsV0(events, privacyMode) {
   const witnessedRefs = new Set(events.map((event) => `sha256:${event.event_hash}`));
   return events
     .filter((event) => event.type === 'builder_claim')
@@ -61,28 +164,35 @@ export function labelClaims(events, privacyMode = 'verified_context') {
       const support = refs.length === 0
         ? 'UNSUPPORTED'
         : unresolved.length > 0 ? 'UNRESOLVED_EVIDENCE' : 'SUPPORTED';
-      // Verified Context is the default because the owner reading their own machine should see
-      // their own claim. Proof Mode projects the text away for a packet that leaves the machine —
-      // the support label and its evidence refs survive either way, so a content-blind packet is
-      // still auditable, just not readable.
-      const claim = {
-        seq: event.seq,
-        ref: `sha256:${event.event_hash}`,
-        statement: event.payload?.statement ?? '',
-        statement_ref: event.payload?.statement_ref ?? null,
-        evidence_refs: [...refs].sort(codepointCompare),
-        unresolved_refs: unresolved,
-        support
-      };
-      if (privacyMode !== 'proof' && event.payload?.statement_text) {
-        claim.statement_text = event.payload.statement_text;
-      }
-      return claim;
+      return finishClaim(event, refs, unresolved, support, privacyMode);
     })
     .sort((a, b) => a.seq - b.seq);
 }
 
-/** What a human should read for this claim: the words when retained, the shape when projected away. */
+/** Shared claim shape. Identical across folds — only the support decision differs. */
+function finishClaim(event, refs, unresolved, support, privacyMode) {
+  // Verified Context is the default because the owner reading their own machine should see their
+  // own claim. Proof Mode projects the text away for a packet that leaves the machine — the support
+  // label and its evidence refs survive either way, so a content-blind packet is still auditable.
+  const claim = {
+    seq: event.seq,
+    ref: `sha256:${event.event_hash}`,
+    statement: event.payload?.statement ?? '',
+    statement_ref: event.payload?.statement_ref ?? null,
+    evidence_refs: [...refs].sort(codepointCompare),
+    unresolved_refs: unresolved,
+    support
+  };
+  if (privacyMode !== 'proof' && event.payload?.statement_text) {
+    claim.statement_text = event.payload.statement_text;
+  }
+  return claim;
+}
+
+export function labelClaims(events, privacyMode = 'verified_context', foldVersion = CURRENT_FOLD_VERSION) {
+  return LEGACY_CLAIM_FOLDS.has(foldVersion) ? labelClaimsV0(events, privacyMode) : labelClaimsV1(events, privacyMode);
+}
+
 export function claimText(claim) {
   return claim.statement_text || claim.statement;
 }
@@ -114,7 +224,7 @@ function entry(statement, ref) {
  * SETTLED — terminal, witnessed facts the next window may rely on without redoing the work.
  * Every line is derived from a structural fact already in the ledger or sealed state.
  */
-function buildSettled(state, events, claims) {
+function buildSettled(state, events, claims, foldVersion) {
   const settled = [];
   const sealEvent = events.find((event) => event.type === 'run_sealed');
   if (state.sealed && sealEvent) {
@@ -134,9 +244,17 @@ function buildSettled(state, events, claims) {
       evaluation.id
     ));
   }
-  for (const claim of claims) {
-    if (claim.support !== 'SUPPORTED') continue;
-    settled.push(entry(`Builder claim supported by witnessed evidence: ${claimText(claim)}`, claim.ref));
+  // v1 promotes NO builder claim into settled. Settled means terminal, witnessed facts a successor
+  // may rely on without redoing the work, and no structural check can establish that an agent's
+  // statement is true — only that a reference it cited points at something real. The claims list
+  // carries every claim with its label; that is where a reader judges them. Under a historical fold
+  // the promotion is reproduced exactly as it happened, because an old packet is entitled to
+  // re-fold to its own bytes.
+  if (LEGACY_CLAIM_FOLDS.has(foldVersion)) {
+    for (const claim of claims) {
+      if (claim.support !== 'SUPPORTED') continue;
+      settled.push(entry(`Builder claim supported by witnessed evidence: ${claimText(claim)}`, claim.ref));
+    }
   }
   return settled;
 }
@@ -178,6 +296,13 @@ function buildOpen(state, events, claims) {
   }
   for (const claim of claims) {
     if (claim.support === 'SUPPORTED') continue;
+    if (claim.support === 'REFERENCES_RESOLVE') {
+      // Not settled, and not silent either. The references point at real witnessed events; whether
+      // they bear on the statement was never evaluated, and the successor must be told so rather
+      // than left to read absence-from-open as cleared.
+      open.push(entry(`Builder claim cites references that resolve, but their relevance to the claim was never evaluated: ${claimText(claim)}`, claim.ref));
+      continue;
+    }
     open.push(entry(`Builder claim is ${claim.support} within configured coverage: ${claimText(claim)}`, claim.ref));
   }
   return open;
@@ -194,6 +319,11 @@ function buildNext(open) {
     }
     if (item.statement.startsWith('Builder claim is UNRESOLVED_EVIDENCE')) {
       return entry('Resolve this claim\'s cited evidence, or treat the claim as unverified in this window.', item.ref);
+    }
+    if (item.statement.startsWith('Builder claim cites references that resolve')) {
+      // Not a sealing blocker, and not cleared either: the references point at real events, and
+      // whether they bear on the statement is exactly what was never evaluated.
+      return entry('Re-check whether the cited events actually support this claim before relying on it; resolution was verified, relevance was not.', item.ref);
     }
     if (item.statement.startsWith('Evaluation ')) {
       return entry('Complete or re-run this evaluation and retrieve its sealed receipt before relying on its findings.', item.ref);
@@ -213,14 +343,14 @@ function buildNext(open) {
  * this capsule happened to be rendered. `inherits_state_hash` in a successor run commits to THIS
  * value, which is why it must exclude presentation-only fields.
  */
-export function buildCarryForward(capsule) {
+export function buildCarryForward(capsule, foldVersion = CURRENT_FOLD_VERSION) {
   return {
     run_id: capsule.run_id,
     mode: capsule.mode,
-    privacy_mode: capsule.privacy_mode,
+    ...(includesPrivacyMode(foldVersion) ? { privacy_mode: capsule.privacy_mode } : {}),
     status: capsule.status,
     objective: capsule.objective,
-    objective_text: capsule.objective_text ?? null,
+    ...(includesObjectiveText(foldVersion) ? { objective_text: capsule.objective_text ?? null } : {}),
     objective_origin: capsule.objective_origin,
     ledger_tip: capsule.witnessed.ledger_tip,
     event_count: capsule.witnessed.event_count,
@@ -230,8 +360,8 @@ export function buildCarryForward(capsule) {
   };
 }
 
-export function deriveStateHash(capsule) {
-  return sha256(canonicalJson(buildCarryForward(capsule)));
+export function deriveStateHash(capsule, foldVersion = CURRENT_FOLD_VERSION) {
+  return sha256(canonicalJson(buildCarryForward(capsule, foldVersion)));
 }
 
 /**
@@ -246,25 +376,31 @@ export function deriveCapsuleRef(capsule) {
   return sha256(canonicalJson(rest));
 }
 
-export function buildContinuation(state, events) {
+export function buildContinuation(state, events, foldVersion = CURRENT_FOLD_VERSION) {
   const privacyMode = state.privacy_mode || 'verified_context';
-  const claims = labelClaims(events, privacyMode);
+  const claims = labelClaims(events, privacyMode, foldVersion);
   const open = buildOpen(state, events, claims);
   const capsule = {
     schema: CONTINUATION_VERSION,
+    // Declared for a reader's benefit only. Verification NEVER dispatches on this field — the
+    // capsule is unanchored, so trusting it would let a forged packet pick the reducer that makes
+    // it verify. The checker reads the renderer from the hash-chained anchor and cross-checks.
+    ...(PRE_DECLARATION_FOLDS.has(foldVersion) ? {} : { continuation_fold_version: foldVersion }),
     run_id: state.id,
     mode: state.mode,
-    privacy_mode: privacyMode,
+    ...(includesPrivacyMode(foldVersion) ? { privacy_mode: privacyMode } : {}),
     status: state.sealed ? 'SEALED' : state.close_requested ? 'CLOSE_REQUESTED_NOT_SEALED' : 'OPEN',
     objective: state.objective,
-    ...(privacyMode !== 'proof' && state.objective_text ? { objective_text: state.objective_text } : {}),
+    ...(includesObjectiveText(foldVersion) && privacyMode !== 'proof' && state.objective_text
+      ? { objective_text: state.objective_text }
+      : {}),
     objective_origin: state.objective_origin,
     // The lineage edge: which prior capsule this run declared it continues from. Sealed into the
     // run_begun event, therefore inside the hash chain, therefore covered by the seal anchor.
     inherits: state.inherits || null,
     witnessed: buildWitnessed(state, events),
     claims,
-    settled: buildSettled(state, events, claims),
+    settled: buildSettled(state, events, claims, foldVersion),
     open,
     next: buildNext(open),
     limitations: [
@@ -274,7 +410,7 @@ export function buildContinuation(state, events) {
       'Nothing here approves, blocks, certifies, or judges correctness.'
     ]
   };
-  capsule.state_hash = deriveStateHash(capsule);
+  capsule.state_hash = deriveStateHash(capsule, foldVersion);
   capsule.capsule_ref = deriveCapsuleRef(capsule);
   return capsule;
 }

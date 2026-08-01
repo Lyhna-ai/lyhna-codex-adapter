@@ -36,7 +36,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { canonicalJson, sha256 } from './util.mjs';
-import { buildContinuation, buildCarryForward, deriveCapsuleRef } from './continuation.mjs';
+import { buildContinuation, buildCarryForward, deriveCapsuleRef, CURRENT_FOLD_VERSION, KNOWN_FOLD_VERSIONS, foldCandidatesForRenderer } from './continuation.mjs';
 import { verifyCapsuleSignature } from './signing.mjs';
 
 const ZERO_HASH = '0'.repeat(64);
@@ -159,13 +159,198 @@ export function verifyLedgerChain(directory) {
   return { ok: true, detail: `${events.length} event(s) chain-validated`, events, tip: previous };
 }
 
-/** Re-fold a packet's ledger into a continuation capsule, independent of whatever it published. */
-function refoldContinuation(directory, events) {
+/**
+ * Read the packet's own state cache — the independently retained source for the fields the chain
+ * deliberately does not carry (the objective stays out of the ledger for privacy). NEVER the
+ * capsule under verification: a refold seeded from the thing it is checking makes those fields
+ * circular, and a forged capsule would reproduce itself.
+ */
+function readTrustedState(directory) {
   const statePath = join(directory, 'state.json');
   if (!existsSync(statePath)) return { ok: false, detail: 'prior packet has no state.json to re-fold from', value: null };
   const state = readJsonObject(statePath);
   if (!state.ok) return { ok: false, detail: `prior packet's state.json ${state.detail}, so there is nothing to re-fold`, value: null };
-  return { ok: true, detail: 'read', value: buildContinuation(state.value, events) };
+  return { ok: true, detail: 'read', value: state.value };
+}
+
+/** Re-fold a packet's ledger into a continuation capsule, independent of whatever it published. */
+function refoldContinuation(trusted, events, foldVersion) {
+  if (!trusted.ok) return trusted;
+  return { ok: true, detail: 'read', value: buildContinuation(trusted.value, events, foldVersion) };
+}
+
+/**
+ * Rebuild only the state projection a continuation fold reads at an archived Stop. Every field is
+ * taken from the hash-chained run_begun payload where the chain carries it, and from the packet's
+ * state cache where it does not (the objective fields are immutable from begin_run on, so the
+ * current cache holds their value at every prefix). Nothing comes from the capsule being verified:
+ * those bytes are the QUESTION, and a reconstruction that consulted them would answer it with
+ * itself — the exact laundering this checker exists to catch.
+ */
+function stateAtArchivedStop(trusted, events) {
+  const begun = events.find((event) => event.type === 'run_begun');
+  const state = {
+    schema: 'lyhna.codex.run.v0',
+    id: trusted.id,
+    mode: begun?.payload?.mode ?? trusted.mode,
+    privacy_mode: begun?.payload?.privacy_mode ?? trusted.privacy_mode ?? 'verified_context',
+    sealed: false,
+    objective: trusted.objective,
+    objective_text: trusted.objective_text ?? '',
+    objective_origin: begun?.payload?.objective_origin ?? trusted.objective_origin,
+    inherits: begun?.payload?.inherits ?? null,
+    ledger_count: events.length,
+    ledger_tip: events.at(-1)?.event_hash ?? ZERO_HASH,
+    close_requested: null,
+    pr_snapshots: {},
+    evaluations: {},
+    children: {},
+    child_receipts: {}
+  };
+
+  const childById = (id) => Object.values(state.children).find((item) => item.id === id);
+  for (const event of events) {
+    const payload = event.payload ?? {};
+    if (event.type === 'pr_snapshot') {
+      state.pr_snapshots[payload.id] = {
+        id: payload.id,
+        repository: payload.repository,
+        pr_number: payload.pr_number,
+        head_after: payload.head_after,
+        status: payload.status
+      };
+    } else if (event.type === 'pr_refreshed') {
+      const snapshot = state.pr_snapshots[payload.snapshot_id];
+      if (snapshot) {
+        snapshot.current_head = payload.observed_head;
+        if (payload.status === 'STALE') snapshot.status = 'STALE';
+      }
+      if (payload.status === 'STALE') {
+        for (const evaluation of Object.values(state.evaluations)) {
+          if (evaluation.snapshot_id === payload.snapshot_id) evaluation.status = 'STALE';
+        }
+      }
+    } else if (event.type === 'evaluation_requested') {
+      state.evaluations[payload.evaluation_request_id] = {
+        id: payload.evaluation_request_id,
+        snapshot_id: payload.snapshot_id,
+        expected_head: payload.expected_head,
+        status: 'OPEN',
+        findings: []
+      };
+    } else if (event.type === 'evaluation_claimed') {
+      const evaluation = state.evaluations[payload.evaluation_request_id];
+      if (evaluation) {
+        evaluation.status = 'CLAIMED';
+        evaluation.child_agent_hash = payload.child_agent_hash;
+        const childId = `child_agent_${sha256(`${state.id}\0${payload.child_agent_hash}`).slice(0, 24)}`;
+        const child = childById(childId);
+        if (child) child.role = 'evaluator';
+      }
+    } else if (event.type === 'evaluation_finding') {
+      const evaluation = state.evaluations[payload.evaluation_request_id];
+      if (evaluation) {
+        const alreadyFailedIntegrity = evaluation.status === 'CHECKOUT_INTEGRITY_EXCEPTION';
+        evaluation.findings.push(payload);
+        evaluation.status = payload.checkout_integrity === 'CONSISTENT_CLEAN' && !alreadyFailedIntegrity
+          ? 'RECORDED'
+          : 'CHECKOUT_INTEGRITY_EXCEPTION';
+      }
+    } else if (event.type === 'child_started') {
+      state.children[payload.child_id] = {
+        id: payload.child_id,
+        role: payload.role,
+        status: payload.status,
+        start_event_ref: event.event_hash,
+        stop_event_ref: null,
+        receipt_id: null
+      };
+    } else if (event.type === 'child_stop_observed') {
+      const child = childById(payload.child_id);
+      if (child) {
+        child.role = payload.role;
+        child.status = payload.status;
+        child.stop_event_ref = event.event_hash;
+      }
+    } else if (event.type === 'child_receipt_sealed') {
+      state.child_receipts[payload.receipt_id] = {
+        id: payload.receipt_id,
+        role: payload.role,
+        status: payload.status,
+        content_hash: payload.content_ref,
+        retrieved: false
+      };
+      const evaluation = Object.values(state.evaluations)
+        .find((item) => `child_${item.id}` === payload.receipt_id);
+      if (evaluation) {
+        evaluation.child_receipt_id = payload.receipt_id;
+        const childId = evaluation.child_agent_hash
+          ? `child_agent_${sha256(`${state.id}\0${evaluation.child_agent_hash}`).slice(0, 24)}`
+          : null;
+        const child = childId ? childById(childId) : null;
+        if (child) {
+          child.role = payload.role;
+          child.receipt_id = payload.receipt_id;
+        }
+      }
+      const child = childById(payload.receipt_id);
+      if (child) child.receipt_id = payload.receipt_id;
+    } else if (event.type === 'child_receipt_retrieved') {
+      const receipt = state.child_receipts[payload.receipt_id];
+      if (receipt) receipt.retrieved = true;
+      const evaluation = Object.values(state.evaluations)
+        .find((item) => item.child_receipt_id === payload.receipt_id);
+      if (evaluation) evaluation.child_receipt_retrieved = true;
+    } else if (event.type === 'close_requested') {
+      state.close_requested = payload;
+    } else if (event.type === 'run_sealed') {
+      state.sealed = true;
+    }
+  }
+  return state;
+}
+
+function refoldArchivedContinuation(trusted, events, foldVersion) {
+  if (!trusted.ok) return trusted;
+  return { ok: true, detail: 'refolded', value: buildContinuation(stateAtArchivedStop(trusted.value, events), events, foldVersion) };
+}
+
+/**
+ * Which fold generation wrote this packet.
+ *
+ * Read from the HASH-CHAINED anchor (`run_sealed`, else the latest `checkpoint_anchor`), never from
+ * the capsule. The capsule is deliberately unanchored, so a `continuation_fold_version` field read
+ * from it would let a forged packet select the reducer under which it verifies — the same
+ * cache-selects-a-weaker-path defect this codebase has closed twice elsewhere.
+ *
+ * An adapter version we have no reducer for is reported, never guessed at with current code.
+ */
+function foldVersionForPacket(events) {
+  const sealed = events.find((event) => event.type === 'run_sealed');
+  const anchor = sealed || [...events].reverse().find((event) => event.type === 'checkpoint_anchor');
+  if (!anchor) return { ok: false, version: null, renderer: null, detail: 'the prior ledger commits to no anchor, so its fold generation is unknown' };
+  const renderer = anchor.payload?.receipt_renderer ?? null;
+  // First choice: the fold generation the chain itself commits to (0.1.32 onward writes it into
+  // the anchor payload). A declared generation this checker does not implement is reported, never
+  // approximated with current code.
+  const declared = anchor.payload?.continuation_fold_version;
+  if (declared !== undefined) {
+    if (!KNOWN_FOLD_VERSIONS.includes(declared)) {
+      return { ok: false, candidates: null, renderer, detail: `the prior ledger commits to fold generation "${declared}", which this checker does not implement` };
+    }
+    return { ok: true, candidates: [declared], renderer, detail: `chained fold ${declared}` };
+  }
+  // No chained declaration: a historical packet. Dispatch ONLY off the closed whitelist of
+  // renderers that actually shipped before the field existed. No range inference — an open-ended
+  // "anything below X is v0, anything else is current" rule silently folds a renderer from the
+  // future with today's reducer, which is the one outcome that must never happen. A renderer may
+  // map to MORE THAN ONE shipped shape (0.1.30 changed its carry-forward mid-version, before the
+  // release): the packet's own bytes pick between them, and the report states which matched.
+  const candidates = foldCandidatesForRenderer(renderer);
+  if (!candidates) {
+    return { ok: false, candidates: null, renderer, detail: `the prior ledger commits to renderer "${renderer ?? 'none'}" with no fold declaration, which this checker cannot place` };
+  }
+  return { ok: true, candidates, renderer, detail: `renderer ${renderer} → fold candidate(s) ${candidates.join(', ')}` };
 }
 
 /**
@@ -181,6 +366,10 @@ export function verifyLineage(priorDirectory, currentDirectory) {
     current_packet: currentDirectory,
     prior_capsule_ref: null,
     prior_signed_by: null,
+    prior_fold_version: null,
+    prior_renderer: null,
+    prior_claim_semantics: null,
+    inherited_fold_version: null,
     current_run_id: null,
     checks,
     trust_notice: LINEAGE_TRUST_NOTICE
@@ -207,32 +396,109 @@ export function verifyLineage(priorDirectory, currentDirectory) {
     recomputedRef === published.capsule_ref,
     recomputedRef === published.capsule_ref ? 'capsule_ref recomputes from its own content' : `capsule_ref mismatch: content hashes to ${recomputedRef}`
   ));
-  const recomputedStateHash = sha256(canonicalJson(buildCarryForward(published)));
-  checks.push(check(
-    'prior_state_hash_self_consistent',
-    recomputedStateHash === published.state_hash,
-    recomputedStateHash === published.state_hash ? 'state_hash recomputes from the carry-forward core' : `state_hash mismatch: core hashes to ${recomputedStateHash}`
-  ));
-
-  // 2. The prior packet's chain is the trust root, not its rendered files.
+  // 2. The prior packet's chain is the trust root, not its rendered files. Resolve its fold before
+  // checking state_hash: shipped generations hashed different carry-forward shapes, and the
+  // unanchored capsule must never select the reducer used to validate itself.
   const priorChain = verifyLedgerChain(priorDirectory);
+  const fold = priorChain.ok
+    ? foldVersionForPacket(priorChain.events)
+    : { ok: false, candidates: null, renderer: null, detail: 'the prior ledger does not chain-validate' };
+  // Where a renderer maps to several shipped shapes, the packet's own bytes decide which one wrote
+  // it: the matched generation is the candidate whose refold reproduces the published capsule.
+  // Matching runs once here and feeds both the state-hash and refold rows, so the two can never
+  // disagree about which generation they judged the packet under.
+  let matchedFold = null;
+  let refoldOutcome = null;
+  let faceFold = fold;
+  const trustedState = readTrustedState(priorDirectory);
+  if (priorChain.ok && fold.ok) {
+    // run_sealed is terminal — the same invariant repairSeal enforces. A validly hash-chained
+    // event AFTER the seal is corruption, not activity, and the prefix treatment below must never
+    // slice it away into a LINKED verdict the store itself would refuse. Fail closed first.
+    const sealIndex = priorChain.events.findIndex((event) => event.type === 'run_sealed');
+    if (sealIndex !== -1 && sealIndex !== priorChain.events.length - 1) {
+      refoldOutcome = { ok: false, detail: 'the ledger continues past run_sealed — a sealed packet is terminal, and a post-seal tail is corruption this checker must not slice away' };
+    }
+  }
+  if (priorChain.ok && fold.ok && !refoldOutcome) {
+    // A handoff already issued must not be invalidated by later activity. A face whose committed
+    // boundary is a genuine anchored PREFIX of the ledger — its tip sits at exactly the position it
+    // names, before the current tip — is the fold of that earlier Stop, byte-identical to its own
+    // archive: a single post-Stop event would otherwise flip prior_continuation_refolds on a packet
+    // nobody touched. Verify such a face against its own prefix, exactly as its archived copy is.
+    // The boundary must land on the chain (position-checked hash), so a forged count cannot select
+    // an arbitrary prefix; anything that is not a genuine prefix still folds against the full
+    // ledger and fails honestly.
+    const faceCount = published.witnessed?.event_count;
+    const facePrefix = Number.isInteger(faceCount)
+      && faceCount >= 1
+      && faceCount < priorChain.events.length
+      && priorChain.events[faceCount - 1]?.event_hash === published.witnessed?.ledger_tip
+      // Only an OPEN checkpoint boundary earns prefix treatment: a run continues past a
+      // checkpoint by design, and past a seal only by corruption (rejected above).
+      && priorChain.events[faceCount - 1]?.type === 'checkpoint_anchor'
+      ? priorChain.events.slice(0, faceCount)
+      : null;
+    const foldEvents = facePrefix ?? priorChain.events;
+    if (facePrefix) {
+      faceFold = foldVersionForPacket(facePrefix);
+    }
+    if (!faceFold.ok) {
+      refoldOutcome = { ok: false, detail: `the face's own Stop prefix cannot be classified — ${faceFold.detail}` };
+    } else {
+      for (const candidate of faceFold.candidates) {
+        const refolded = facePrefix
+          ? refoldArchivedContinuation(trustedState, facePrefix, candidate)
+          : refoldContinuation(trustedState, priorChain.events, candidate);
+        if (!refolded.ok) { refoldOutcome = refolded; break; }
+        const { signature: _publishedSignature, ...publishedCore } = published;
+        const { signature: _refoldedSignature, ...refoldedCore } = refolded.value;
+        if (canonicalJson(refoldedCore) === canonicalJson(publishedCore)) {
+          matchedFold = candidate;
+          break;
+        }
+      }
+    }
+  }
+  const judgedFold = matchedFold ?? faceFold.candidates?.[0] ?? fold.candidates?.[0] ?? null;
+  report.prior_fold_version = matchedFold ?? (fold.ok ? fold.candidates.join('|') : null);
+  report.prior_renderer = fold.renderer;
+  report.prior_claim_semantics = judgedFold === null ? null : judgedFold === CURRENT_FOLD_VERSION ? 'CURRENT' : 'SUPERSEDED';
+  if (!priorChain.ok || !fold.ok) {
+    checks.push(notRun('prior_state_hash_self_consistent', `not run — ${fold.detail}`));
+  } else {
+    const recomputedStateHash = sha256(canonicalJson(buildCarryForward(published, judgedFold)));
+    checks.push(check(
+      'prior_state_hash_self_consistent',
+      recomputedStateHash === published.state_hash,
+      recomputedStateHash === published.state_hash
+        ? `state_hash recomputes from the carry-forward core (fold ${judgedFold})`
+        : `state_hash mismatch under fold ${judgedFold}: core hashes to ${recomputedStateHash}`
+    ));
+  }
   checks.push(check('prior_chain_valid', priorChain.ok, priorChain.detail));
 
   // 3. Non-circular value binding — re-derive rather than believe.
-  if (priorChain.ok) {
-    const refolded = refoldContinuation(priorDirectory, priorChain.events);
-    if (!refolded.ok) {
-      checks.push(check('prior_continuation_refolds', false, refolded.detail));
+  //
+  // Two separate questions, deliberately not conflated: does this packet reproduce the fold it
+  // declared (historical integrity), and do its claim labels still mean what today's rules mean
+  // (current-policy trust)? A packet written by an older fold can be perfectly intact and still
+  // carry labels this build would not issue. Only the first gates the verdict.
+  if (priorChain.ok && !fold.ok) {
+    checks.push(notRun('prior_continuation_refolds', `not run — ${fold.detail}`));
+  } else if (priorChain.ok) {
+    // The candidate matching above already re-folded and compared without the signature block — a
+    // fresh fold has no signature and the signature is checked separately below, so the re-fold
+    // stays a test of the CONTENT.
+    if (refoldOutcome && !refoldOutcome.ok) {
+      checks.push(check('prior_continuation_refolds', false, refoldOutcome.detail));
     } else {
-      // Compare WITHOUT the signature block: a fresh fold has no signature, and the signature is
-      // checked separately below. Stripping it here keeps the re-fold a test of the CONTENT.
-      const { signature: _publishedSignature, ...publishedCore } = published;
-      const { signature: _refoldedSignature, ...refoldedCore } = refolded.value;
-      const matches = canonicalJson(refoldedCore) === canonicalJson(publishedCore);
       checks.push(check(
         'prior_continuation_refolds',
-        matches,
-        matches ? 're-folding the prior ledger reproduces the published continuation exactly' : 'the published continuation does not match a fresh fold of its own ledger'
+        matchedFold !== null,
+        matchedFold !== null
+          ? `re-folding the prior ledger under fold ${matchedFold} reproduces the published continuation exactly`
+          : `the published continuation does not match a fresh fold of its own ledger under any candidate generation (tried ${fold.candidates.join(', ')})`
       ));
     }
   } else {
@@ -242,22 +508,122 @@ export function verifyLineage(priorDirectory, currentDirectory) {
     ));
   }
 
-  // Signature: who folded this, and has a byte changed since. An UNSIGNED capsule is reported as
-  // such rather than failed — a packet can be complete and hash-verifiable without a key, and
-  // calling that tampered would be the overclaim. A signature that is PRESENT and BAD does fail.
-  const signatureResult = verifyCapsuleSignature(published);
+  // Read the successor chain now so signature verification can target the capsule it ACTUALLY
+  // inherited. The check row remains later in the fixed report order; computing the input early
+  // does not make an invalid current chain pass.
+  const currentChain = verifyLedgerChain(currentDirectory);
+  const currentRunBegun = currentChain.ok
+    ? currentChain.events.find((event) => event.type === 'run_begun')
+    : null;
+  const currentInherits = currentRunBegun?.payload?.inherits || null;
+  let inheritanceTarget = published;
+  let inheritanceVia = 'the prior packet\'s capsule';
+  let inheritedFoldUnknown = null;
+  if (currentInherits && currentInherits.capsule_ref !== published.capsule_ref) {
+    const archivePath = join(priorDirectory, 'capsules', `${currentInherits.capsule_ref}.json`);
+    if (existsSync(archivePath)) {
+      const archived = readJsonObject(archivePath);
+      // The content-addressed ref authenticates what the archive IS; it says nothing about WHOSE
+      // it is. A valid, signed archive copied from another run's packet passes the ref and
+      // signature checks perfectly — so the archive must also be bound to THIS packet's ledger:
+      // its run_id must be the prior chain's run_id, and the ledger tip it committed to must
+      // actually appear at the position it names in this chain. Both fields live inside the bytes
+      // the committed ref covers, so a forger cannot adjust them without breaking the ref match.
+      if (archived.ok && deriveCapsuleRef(archived.value) === currentInherits.capsule_ref) {
+        const archivedCount = archived.value.witnessed?.event_count;
+        const archivedTip = archived.value.witnessed?.ledger_tip;
+        // The decisive bond: the ledger tip this fold committed to must actually BE the event hash
+        // at the position it names in THIS packet's chain. Hash chains from different runs share no
+        // event hashes, so a planted archive cannot satisfy this. run_id is cross-checked against
+        // the published capsule (itself refold-verified against this ledger) as a second stitch.
+        // Residence proves the boundary is IN this chain; only a checkpoint_anchor there proves a
+        // Stop actually PUBLISHED a fold at it. Anyone can fold an arbitrary prefix of an open
+        // ledger and plant the result under its own honest content hash — the same boundary rule
+        // the face-prefix path enforces applies here, and a sealed fold never arrives this way
+        // because its ref IS the face's ref.
+        const prefixTipMatches = priorChain.ok
+          && Number.isInteger(archivedCount)
+          && archivedCount >= 1
+          && archivedCount <= priorChain.events.length
+          && priorChain.events[archivedCount - 1]?.event_hash === archivedTip
+          && priorChain.events[archivedCount - 1]?.type === 'checkpoint_anchor';
+        if (archived.value.run_id === published.run_id && prefixTipMatches) {
+          // The prefix anchor selects a CLOSED candidate set; the archived bytes must then re-fold
+          // from that prefix to decide which generation actually wrote them. Reading the anchor
+          // alone is insufficient for 0.1.30, and using the current state cache leaks later work
+          // backward into the historical fold.
+          const prefix = priorChain.events.slice(0, archivedCount);
+          const inheritedFold = foldVersionForPacket(prefix);
+          let matchedInheritedFold = null;
+          if (inheritedFold.ok) {
+            for (const candidate of inheritedFold.candidates) {
+              const refolded = refoldArchivedContinuation(trustedState, prefix, candidate);
+              if (!refolded.ok) break;
+              const { signature: _archivedSignature, ...archivedCore } = archived.value;
+              const { signature: _refoldedSignature, ...refoldedCore } = refolded.value;
+              if (canonicalJson(refoldedCore) === canonicalJson(archivedCore)) {
+                matchedInheritedFold = candidate;
+                break;
+              }
+            }
+          }
+          if (!inheritedFold.ok) {
+            inheritedFoldUnknown = `not run — this checker cannot place the inherited archived fold: ${inheritedFold.detail}; the inherited edge cannot be verified`;
+          } else if (matchedInheritedFold === null) {
+            inheritedFoldUnknown = `not run — the inherited archive does not re-fold from its own ledger prefix under any candidate generation (tried ${inheritedFold.candidates.join(', ')}), so the inherited edge cannot be verified`;
+            const refoldCheck = checks.find((item) => item.name === 'prior_continuation_refolds');
+            if (refoldCheck) {
+              refoldCheck.ok = false;
+              refoldCheck.status = 'FAIL';
+              refoldCheck.detail += '; inherited archive does not reproduce from its own ledger prefix';
+            }
+          } else {
+            inheritanceTarget = archived.value;
+            report.prior_capsule_ref = archived.value.capsule_ref;
+            report.inherited_fold_version = matchedInheritedFold;
+            report.prior_fold_version = matchedInheritedFold;
+            report.prior_renderer = inheritedFold.renderer;
+            report.prior_claim_semantics = matchedInheritedFold === CURRENT_FOLD_VERSION ? 'CURRENT' : 'SUPERSEDED';
+            inheritanceVia = `an archived fold this run later superseded (content-addressed; bound to this ledger at event ${archivedCount}; re-folded as ${matchedInheritedFold})`;
+
+            const presenceCheck = checks.find((item) => item.name === 'prior_continuation_present');
+            if (presenceCheck) presenceCheck.detail += `; successor selects archived capsule_ref ${archived.value.capsule_ref}`;
+            const refCheck = checks.find((item) => item.name === 'prior_capsule_ref_self_consistent');
+            if (refCheck) refCheck.detail += '; inherited archive capsule_ref also recomputes from its own content';
+            const stateHashCheck = checks.find((item) => item.name === 'prior_state_hash_self_consistent');
+            const archiveStateHash = sha256(canonicalJson(buildCarryForward(archived.value, matchedInheritedFold)));
+            const archiveStateOk = archiveStateHash === archived.value.state_hash;
+            if (stateHashCheck) {
+              stateHashCheck.ok = stateHashCheck.ok && archiveStateOk;
+              stateHashCheck.status = stateHashCheck.ok ? 'PASS' : 'FAIL';
+              stateHashCheck.detail += archiveStateOk
+                ? `; inherited archive state_hash recomputes under prefix fold ${matchedInheritedFold}`
+                : `; inherited archive state_hash does not recompute under prefix fold ${matchedInheritedFold}`;
+            }
+            const refoldCheck = checks.find((item) => item.name === 'prior_continuation_refolds');
+            if (refoldCheck) refoldCheck.detail += `; inherited archive re-folds from its ledger prefix under fold ${matchedInheritedFold}`;
+          }
+        }
+      }
+    }
+  }
+
+  // Signature: who folded the capsule selected by the successor, and has a byte changed since. An
+  // UNSIGNED capsule is reported as such rather than failed — a packet can be complete and
+  // hash-verifiable without a key, and calling that tampered would be the overclaim. A signature
+  // that is PRESENT and BAD does fail.
+  const signatureResult = verifyCapsuleSignature(inheritanceTarget);
   report.prior_signed_by = signatureResult.public_key;
-  if (!published.signature) {
-    checks.push(check('prior_signature', true, 'unsigned capsule — identity not attested, content still hash-verified'));
+  if (!inheritanceTarget.signature) {
+    checks.push(check('prior_signature', true, `unsigned capsule — identity not attested, content still hash-verified (${inheritanceVia})`));
   } else {
-    checks.push(check('prior_signature', signatureResult.ok, `${signatureResult.reason} (key_id ${signatureResult.key_id})`));
+    checks.push(check('prior_signature', signatureResult.ok, `${signatureResult.reason} (key_id ${signatureResult.key_id}; ${inheritanceVia})`));
   }
 
   // 4. The current packet's inheritance commitment, read from inside its own hash chain.
-  const currentChain = verifyLedgerChain(currentDirectory);
   checks.push(check('current_chain_valid', currentChain.ok, currentChain.detail));
   if (currentChain.ok) {
-    const runBegun = currentChain.events.find((event) => event.type === 'run_begun');
+    const runBegun = currentRunBegun;
     report.current_run_id = runBegun ? currentChain.events[0]?.run_id ?? null : null;
     const inherits = runBegun?.payload?.inherits || null;
     if (!inherits) {
@@ -267,19 +633,35 @@ export function verifyLineage(priorDirectory, currentDirectory) {
       }
     } else {
       checks.push(check('current_declares_inheritance', true, `declares capsule_ref ${inherits.capsule_ref}`));
+      // The prior run may have kept working after this handoff was taken: continuation.json is the
+      // run's CURRENT face, and every fold is also archived immutably under its content-addressed
+      // ref. An archived capsule whose bytes hash to the committed ref IS that capsule — accepting
+      // it invents nothing, because forging the file would require content hashing to a ref the
+      // successor already sealed into its own chain. The comparison target is therefore the
+      // committed fold, current or archived; which one it was is stated, not hidden.
+      const target = inheritanceTarget;
+      const via = inheritanceVia;
+      if (inheritedFoldUnknown) {
+        // A ref-matched, ledger-bound archive whose generation this checker does not implement:
+        // the edge exists but cannot be verified. NOT_RUN, never a pass — and never a FAIL either,
+        // which would read as tampering the packet does not have.
+        checks.push(notRun('inheritance_capsule_ref_matches', inheritedFoldUnknown));
+        checks.push(notRun('inheritance_state_hash_matches', inheritedFoldUnknown));
+        return finalize(report, checks);
+      }
       checks.push(check(
         'inheritance_capsule_ref_matches',
-        inherits.capsule_ref === published.capsule_ref,
-        inherits.capsule_ref === published.capsule_ref
-          ? 'the committed capsule_ref is the prior packet\'s capsule'
-          : `committed capsule_ref ${inherits.capsule_ref} is not the prior packet's ${published.capsule_ref}`
+        inherits.capsule_ref === target.capsule_ref,
+        inherits.capsule_ref === target.capsule_ref
+          ? `the committed capsule_ref is ${via}`
+          : `committed capsule_ref ${inherits.capsule_ref} is not the prior packet's ${published.capsule_ref}, and no archived fold matches it`
       ));
       checks.push(check(
         'inheritance_state_hash_matches',
-        inherits.state_hash === published.state_hash,
-        inherits.state_hash === published.state_hash
-          ? 'the committed state_hash is the prior packet\'s carry-forward state'
-          : `committed state_hash ${inherits.state_hash} is not the prior packet's ${published.state_hash}`
+        inherits.state_hash === target.state_hash,
+        inherits.state_hash === target.state_hash
+          ? `the committed state_hash is the carry-forward state of ${via}`
+          : `committed state_hash ${inherits.state_hash} is not the prior packet's ${target.state_hash}`
       ));
     }
   }
@@ -297,6 +679,14 @@ export function renderLineageMarkdown(report) {
     `- Current packet: \`${report.current_packet}\``,
     `- Prior capsule ref: \`${report.prior_capsule_ref ?? 'none'}\``,
     `- Signed by: ${report.prior_signed_by ? `\`${report.prior_signed_by}\`` : '_unsigned_'}`,
+    `- Prior fold: ${report.prior_fold_version ? `\`${report.prior_fold_version}\` (renderer ${report.prior_renderer})` : '_unknown_'}`,
+    ...(report.prior_claim_semantics === 'SUPERSEDED'
+      ? ['', '> **Claim labels in the prior packet were written under superseded semantics.** That packet'
+          + ' is re-folded and verified under the rules it was written by, so a LINKED result here is a'
+          + ' statement about its integrity, not an endorsement of its labels. Under current rules a cited'
+          + ' reference is only ever reported as resolving, never as supporting a claim, and no builder'
+          + ' claim is promoted into `settled`. Re-read those claims before relying on them.']
+      : []),
     '',
     '## Checks',
     ''

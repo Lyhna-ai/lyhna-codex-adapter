@@ -1,1 +1,1 @@
-export const ADAPTER_VERSION = '0.1.31';
+export const ADAPTER_VERSION = '0.1.32';
