@@ -159,28 +159,46 @@ export function verifyLedgerChain(directory) {
   return { ok: true, detail: `${events.length} event(s) chain-validated`, events, tip: previous };
 }
 
-/** Re-fold a packet's ledger into a continuation capsule, independent of whatever it published. */
-function refoldContinuation(directory, events, foldVersion) {
+/**
+ * Read the packet's own state cache — the independently retained source for the fields the chain
+ * deliberately does not carry (the objective stays out of the ledger for privacy). NEVER the
+ * capsule under verification: a refold seeded from the thing it is checking makes those fields
+ * circular, and a forged capsule would reproduce itself.
+ */
+function readTrustedState(directory) {
   const statePath = join(directory, 'state.json');
   if (!existsSync(statePath)) return { ok: false, detail: 'prior packet has no state.json to re-fold from', value: null };
   const state = readJsonObject(statePath);
   if (!state.ok) return { ok: false, detail: `prior packet's state.json ${state.detail}, so there is nothing to re-fold`, value: null };
-  return { ok: true, detail: 'read', value: buildContinuation(state.value, events, foldVersion) };
+  return { ok: true, detail: 'read', value: state.value };
 }
 
-/** Rebuild only the state projection a continuation fold reads at an archived Stop. */
-function stateAtArchivedStop(capsule, events) {
+/** Re-fold a packet's ledger into a continuation capsule, independent of whatever it published. */
+function refoldContinuation(trusted, events, foldVersion) {
+  if (!trusted.ok) return trusted;
+  return { ok: true, detail: 'read', value: buildContinuation(trusted.value, events, foldVersion) };
+}
+
+/**
+ * Rebuild only the state projection a continuation fold reads at an archived Stop. Every field is
+ * taken from the hash-chained run_begun payload where the chain carries it, and from the packet's
+ * state cache where it does not (the objective fields are immutable from begin_run on, so the
+ * current cache holds their value at every prefix). Nothing comes from the capsule being verified:
+ * those bytes are the QUESTION, and a reconstruction that consulted them would answer it with
+ * itself — the exact laundering this checker exists to catch.
+ */
+function stateAtArchivedStop(trusted, events) {
   const begun = events.find((event) => event.type === 'run_begun');
   const state = {
     schema: 'lyhna.codex.run.v0',
-    id: capsule.run_id,
-    mode: begun?.payload?.mode ?? capsule.mode,
-    privacy_mode: begun?.payload?.privacy_mode ?? capsule.privacy_mode ?? 'verified_context',
+    id: trusted.id,
+    mode: begun?.payload?.mode ?? trusted.mode,
+    privacy_mode: begun?.payload?.privacy_mode ?? trusted.privacy_mode ?? 'verified_context',
     sealed: false,
-    objective: capsule.objective,
-    objective_text: capsule.objective_text ?? '',
-    objective_origin: begun?.payload?.objective_origin ?? capsule.objective_origin,
-    inherits: begun?.payload?.inherits ?? capsule.inherits ?? null,
+    objective: trusted.objective,
+    objective_text: trusted.objective_text ?? '',
+    objective_origin: begun?.payload?.objective_origin ?? trusted.objective_origin,
+    inherits: begun?.payload?.inherits ?? null,
     ledger_count: events.length,
     ledger_tip: events.at(-1)?.event_hash ?? ZERO_HASH,
     close_requested: null,
@@ -225,7 +243,7 @@ function stateAtArchivedStop(capsule, events) {
       if (evaluation) {
         evaluation.status = 'CLAIMED';
         evaluation.child_agent_hash = payload.child_agent_hash;
-        const childId = `child_agent_${sha256(`${capsule.run_id}\0${payload.child_agent_hash}`).slice(0, 24)}`;
+        const childId = `child_agent_${sha256(`${state.id}\0${payload.child_agent_hash}`).slice(0, 24)}`;
         const child = childById(childId);
         if (child) child.role = 'evaluator';
       }
@@ -267,7 +285,7 @@ function stateAtArchivedStop(capsule, events) {
       if (evaluation) {
         evaluation.child_receipt_id = payload.receipt_id;
         const childId = evaluation.child_agent_hash
-          ? `child_agent_${sha256(`${capsule.run_id}\0${evaluation.child_agent_hash}`).slice(0, 24)}`
+          ? `child_agent_${sha256(`${state.id}\0${evaluation.child_agent_hash}`).slice(0, 24)}`
           : null;
         const child = childId ? childById(childId) : null;
         if (child) {
@@ -292,8 +310,9 @@ function stateAtArchivedStop(capsule, events) {
   return state;
 }
 
-function refoldArchivedContinuation(capsule, events, foldVersion) {
-  return buildContinuation(stateAtArchivedStop(capsule, events), events, foldVersion);
+function refoldArchivedContinuation(trusted, events, foldVersion) {
+  if (!trusted.ok) return trusted;
+  return { ok: true, detail: 'refolded', value: buildContinuation(stateAtArchivedStop(trusted.value, events), events, foldVersion) };
 }
 
 /**
@@ -391,6 +410,7 @@ export function verifyLineage(priorDirectory, currentDirectory) {
   let matchedFold = null;
   let refoldOutcome = null;
   let faceFold = fold;
+  const trustedState = readTrustedState(priorDirectory);
   if (priorChain.ok && fold.ok) {
     // run_sealed is terminal — the same invariant repairSeal enforces. A validly hash-chained
     // event AFTER the seal is corruption, not activity, and the prefix treatment below must never
@@ -428,8 +448,8 @@ export function verifyLineage(priorDirectory, currentDirectory) {
     } else {
       for (const candidate of faceFold.candidates) {
         const refolded = facePrefix
-          ? { ok: true, value: refoldArchivedContinuation(published, facePrefix, candidate) }
-          : refoldContinuation(priorDirectory, priorChain.events, candidate);
+          ? refoldArchivedContinuation(trustedState, facePrefix, candidate)
+          : refoldContinuation(trustedState, priorChain.events, candidate);
         if (!refolded.ok) { refoldOutcome = refolded; break; }
         const { signature: _publishedSignature, ...publishedCore } = published;
         const { signature: _refoldedSignature, ...refoldedCore } = refolded.value;
@@ -516,11 +536,17 @@ export function verifyLineage(priorDirectory, currentDirectory) {
         // at the position it names in THIS packet's chain. Hash chains from different runs share no
         // event hashes, so a planted archive cannot satisfy this. run_id is cross-checked against
         // the published capsule (itself refold-verified against this ledger) as a second stitch.
+        // Residence proves the boundary is IN this chain; only a checkpoint_anchor there proves a
+        // Stop actually PUBLISHED a fold at it. Anyone can fold an arbitrary prefix of an open
+        // ledger and plant the result under its own honest content hash — the same boundary rule
+        // the face-prefix path enforces applies here, and a sealed fold never arrives this way
+        // because its ref IS the face's ref.
         const prefixTipMatches = priorChain.ok
           && Number.isInteger(archivedCount)
           && archivedCount >= 1
           && archivedCount <= priorChain.events.length
-          && priorChain.events[archivedCount - 1]?.event_hash === archivedTip;
+          && priorChain.events[archivedCount - 1]?.event_hash === archivedTip
+          && priorChain.events[archivedCount - 1]?.type === 'checkpoint_anchor';
         if (archived.value.run_id === published.run_id && prefixTipMatches) {
           // The prefix anchor selects a CLOSED candidate set; the archived bytes must then re-fold
           // from that prefix to decide which generation actually wrote them. Reading the anchor
@@ -531,9 +557,10 @@ export function verifyLineage(priorDirectory, currentDirectory) {
           let matchedInheritedFold = null;
           if (inheritedFold.ok) {
             for (const candidate of inheritedFold.candidates) {
-              const refolded = refoldArchivedContinuation(archived.value, prefix, candidate);
+              const refolded = refoldArchivedContinuation(trustedState, prefix, candidate);
+              if (!refolded.ok) break;
               const { signature: _archivedSignature, ...archivedCore } = archived.value;
-              const { signature: _refoldedSignature, ...refoldedCore } = refolded;
+              const { signature: _refoldedSignature, ...refoldedCore } = refolded.value;
               if (canonicalJson(refoldedCore) === canonicalJson(archivedCore)) {
                 matchedInheritedFold = candidate;
                 break;

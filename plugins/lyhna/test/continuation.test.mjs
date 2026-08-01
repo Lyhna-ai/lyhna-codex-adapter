@@ -22,6 +22,7 @@ import {
 import {
   buildContinuation,
   deriveCapsuleRef,
+  deriveStateHash,
   foldCandidatesForRenderer,
   labelClaims
 } from '../src/continuation.mjs';
@@ -999,6 +1000,85 @@ test('a post-seal tail fails closed; the prefix treatment never slices it away',
     report.checks.find((item) => item.name === 'prior_continuation_refolds').detail,
     /continues past run_sealed/
   );
+});
+
+test('a forged archive cannot vouch for itself: the refold is seeded from the packet, not the archive', (t) => {
+  const dataRoot = isolatedData(t);
+  // The archived-Stop refold once seeded objective and objective_text from the archive under
+  // verification — circular. Forge both fields, recompute state_hash and capsule_ref (honest
+  // hashes OF the forgery), plant the archive and its index entry, mint a successor from the
+  // forged ref: every check passed. The refold must be seeded from the packet's own retained
+  // state, which still holds the objective the run actually began with.
+  const parent = mintSession({ sessionId: 'forge-objective' });
+  const run = beginRun(parent, { mode: 'full', objective: 'The objective the run began with.' });
+  recordClaim(parent, 'first stretch', []);
+  checkpointOrSeal(parent, 'forge-objective-stop-1');
+  const directory = getRunForTesting(run.id).directory;
+  const refA = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8')).capsule_ref;
+  recordClaim(parent, 'second stretch', []);
+  checkpointOrSeal(parent, 'forge-objective-stop-2');
+
+  const forged = JSON.parse(readFileSync(join(directory, 'capsules', `${refA}.json`), 'utf8'));
+  delete forged.signature;
+  forged.objective = 'An objective the run never had.';
+  forged.objective_text = 'An objective the run never had.';
+  forged.state_hash = deriveStateHash(forged);
+  forged.capsule_ref = deriveCapsuleRef(forged);
+  writeFileSync(join(directory, 'capsules', `${forged.capsule_ref}.json`), canonicalJson(forged, true));
+  mkdirSync(join(dataRoot, 'capsule-index'), { recursive: true });
+  writeFileSync(join(dataRoot, 'capsule-index', `${sha256(forged.capsule_ref)}.json`), JSON.stringify({ run_id: run.id, capsule_ref: forged.capsule_ref }));
+
+  const next = mintSession({ sessionId: 'forge-objective-next' });
+  const successor = beginRun(next, { mode: 'full', objective: 'Successor.', continuesFrom: forged.capsule_ref });
+  checkpointOrSeal(next, 'forge-objective-next-stop');
+  const report = verifyLineage(directory, getRunForTesting(successor.id).directory);
+  assert.equal(report.ok, false, 'a self-vouching forged archive must not verify');
+  assert.match(
+    report.checks.find((item) => item.name === 'prior_continuation_refolds').detail,
+    /inherited archive does not reproduce/
+  );
+
+  // The genuine archived fold at the same boundary keeps verifying.
+  const honest = mintSession({ sessionId: 'forge-objective-honest' });
+  const honestRun = beginRun(honest, { mode: 'full', objective: 'Honest successor.', continuesFrom: refA });
+  checkpointOrSeal(honest, 'forge-objective-honest-stop');
+  const honestReport = verifyLineage(directory, getRunForTesting(honestRun.id).directory);
+  assert.ok(honestReport.ok, `the genuine archived fold must still verify:\n${honestReport.checks.filter((c) => c.status !== 'PASS').map((c) => `${c.status} ${c.name}: ${c.detail}`).join('\n')}`);
+});
+
+test('an archived fold is only inheritable at a boundary a Stop published', (t) => {
+  const dataRoot = isolatedData(t);
+  // Residence proves the archive's committed tip is IN the chain; it does not prove any Stop
+  // published a fold there. Fold the open ledger's prefix ending at a post-checkpoint
+  // builder_claim — honest bytes, honest content hash, a boundary no Stop anchored — plant it
+  // with an index entry, and mint a successor: every check passed. The boundary event must be a
+  // checkpoint_anchor, the same rule the face-prefix path enforces.
+  const parent = mintSession({ sessionId: 'midclaim' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Open run folded mid-claim by hand.' });
+  checkpointOrSeal(parent, 'midclaim-stop-1');
+  recordClaim(parent, 'claim recorded after the checkpoint', []);
+  checkpointOrSeal(parent, 'midclaim-stop-2');
+  const directory = getRunForTesting(run.id).directory;
+
+  const events = readFileSync(join(directory, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  const boundary = events.findIndex((event) => event.type === 'builder_claim') + 1;
+  assert.ok(boundary > 0, 'the fixture needs a builder_claim to fold at');
+  const state = JSON.parse(readFileSync(join(directory, 'state.json'), 'utf8'));
+  state.sealed = false;
+  state.close_requested = null;
+  state.ledger_count = boundary;
+  state.ledger_tip = events[boundary - 1].event_hash;
+  const crafted = buildContinuation(state, events.slice(0, boundary));
+  writeFileSync(join(directory, 'capsules', `${crafted.capsule_ref}.json`), canonicalJson(crafted, true));
+  mkdirSync(join(dataRoot, 'capsule-index'), { recursive: true });
+  writeFileSync(join(dataRoot, 'capsule-index', `${sha256(crafted.capsule_ref)}.json`), JSON.stringify({ run_id: run.id, capsule_ref: crafted.capsule_ref }));
+
+  const next = mintSession({ sessionId: 'midclaim-next' });
+  const successor = beginRun(next, { mode: 'full', objective: 'Successor.', continuesFrom: crafted.capsule_ref });
+  checkpointOrSeal(next, 'midclaim-next-stop');
+  const report = verifyLineage(directory, getRunForTesting(successor.id).directory);
+  assert.equal(report.ok, false, 'a fold no Stop published must not be inheritable');
+  assert.equal(report.checks.find((item) => item.name === 'inheritance_capsule_ref_matches').ok, false);
 });
 
 test('sealing writes a handoff that carries the unsupported claims forward', (t) => {
