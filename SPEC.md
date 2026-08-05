@@ -4,7 +4,10 @@
 
 Prove one Codex-only customer-zero slice in which `@lyhna` starts a local witnessed run where work already happens, preserves supported action evidence through Codex hooks and an MCP tool surface, and closes with an evidence-scoped receipt. The same plugin must also examine an existing pull request retrospectively while stating that no witnessed build record exists.
 
-The adapter records what was observed. It never approves, blocks, certifies, merges, or declares the work commercially, architecturally, legally, or operationally correct.
+The adapter records what was observed. It never approves, certifies, merges, deploys, or declares
+the work commercially, architecturally, legally, or operationally correct. For an explicitly
+declared claim contract, it may refuse an unsupported Lyhna claim or successful seal; it does not
+block the underlying external action.
 
 ## Repository boundary
 
@@ -127,7 +130,10 @@ The adapter records what was observed. It never approves, blocks, certifies, mer
 12. Windows local execution uses ordinary files and loopback/process stdio only; no Unix-domain socket is required.
 13. Ledger mutation, reordering, middle deletion, and sealed-tail deletion surface `LOCAL_CHAIN_BROKEN` rather than a normal receipt.
 14. The complete diff receives an independent Codex review against this specification and all material findings are closed on the final head.
-15. The final GitHub pull request remains unmerged for Adam's decision.
+15. Pull requests remain unmerged for Adam's decision unless Adam gives a narrower explicit merge
+    authorization. On 2026-08-05 Adam authorized Codex to squash-merge only claim-compiler PR #13
+    and its four named implementation slices after every declared exact-head gate is terminal and
+    clean. This is not standing merge, release, deployment, or production-mutation authority.
 
 ## Non-goals for v0
 

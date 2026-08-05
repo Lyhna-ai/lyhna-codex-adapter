@@ -1,232 +1,295 @@
-# PROPOSAL — Lyhna Witness claim compiler
+# RATIFIED SPEC — Lyhna Witness claim compiler
 
-**Status: QUARANTINED PROPOSAL. Ratification is Adam's. Nothing in this document changes runtime
-behavior, the shipped SPEC.md contract, or any released packet format until Adam ratifies it and
-the slices below are built and accepted.**
+**Status: RATIFIED by Adam on 2026-08-05.** This document is the build contract for the v0.1.33+
+claim-compiler line. It changes no runtime behavior by itself. Runtime behavior changes only through
+the four independently verified implementation slices below.
 
-## Provenance
+## Provenance and product boundary
 
-This proposal merges three convergent diagnoses of one recurring failure, produced on 2026-08-05
-while examining a failed Homestead phase build:
+This contract merges three diagnoses of one recurring failure:
 
-- **The control failure** (Codex): completion is narrated by the builder, not compiled from
-  terminal evidence. A merge proceeded while a requested reviewer was still running; a completion
-  summary claimed zero unresolved findings nine seconds before two real P2 defects arrived.
-- **The decay failure** (Fable): prose lessons do not hold under context pressure; only enforced
-  lessons hold. The same failure was logged three times as three "first observations" because
-  recurrence detection was itself prose.
-- **The architecture requirement** (Adam): contradictions must be caught inline, during the build,
-  as evidence arrives — not discovered at the end of a phase by the owner acting as the
-  integration test.
+- completion was narrated while requested evidence was still pending;
+- prose lessons decayed and recurring failures were logged as new observations;
+- contradictions arrived after the owner had already been told the work was complete.
 
-The synthesis in one sentence: **compile the strongest completion claim that current terminal
-evidence supports, inline, and refuse any claim that exceeds it at a declared gate.**
+The resulting capability is: **compile the strongest completion claim current primary evidence
+supports, surface a changed contradiction inline, and refuse an unsupported Lyhna seal at a
+declared gate.**
 
-This is not a new product bolted onto Lyhna. It is the adapter's existing theorem at a larger
-radius. `REFERENCES_RESOLVE` exists because "cites something real" must not read as "verified."
-The claim compiler applies the same rule one level up: "has repo-side evidence" must not read as
-"works in production." Same collapse, same cure — a deterministic fold over witnessed evidence,
-with the agent's narration never accepted as proof of anything.
+Lyhna remains an independent, cross-project Codex plugin. Homestead is a customer, never a
+dependency. No Homestead concept enters the core schema. Lyhna does not approve work, certify
+correctness, merge, deploy, or prevent an external action. It may refuse to issue an unsupported
+Lyhna claim or successful seal.
 
-## Goal
+## Hard invariants
 
-An independent, cross-project capability of the Lyhna Witness plugin: the user activates a
-witnessed session with a declared goal, completion class, reviewers, and gates; hooks — not the
-agent's memory — carry the loop; a deterministic compiler folds evidence into the highest
-supportable completion state as evidence arrives; contradictions surface inline during work and
-fail closed at declared gates; the sealed receipt states the compiled class, never the narrated
-one.
+1. **Primary-evidence firewall.** Only primary events emitted through registered supervisor-owned
+   boundaries may satisfy profile requirements. Compiler, gate, diagnostic, receipt, recurrence,
+   and other derived events are never eligible evidence, even when their bytes and hashes are valid.
+2. **Ledger-backed control state.** Close attempts, primary frontiers, input digests, diagnostic
+   emission and resolution, quiet-period samples, cursors, and deduplication state are events on the
+   existing ledger. Hook-process memory is never authoritative.
+3. **Sealing is terminal.** Nothing is appended after `run_sealed`. A post-seal tail is corruption
+   and fails closed. Later contradictory evidence belongs to a successor run linked through
+   `capsule_ref`; `claim_superseded` is written only in that successor.
+4. **Honest failure seals.** The first and second unchanged unsupported Stop attempts continue the
+   parent with a generated diagnostic. The third unchanged attempt seals `CLOSED_UNSUPPORTED`,
+   releases the session, and permits a new run. It never promotes the requested state.
+5. **Immutable contract.** A contract is declared once per run. A changed objective or profile
+   requires an honest close and a new run; no in-run amendment tool exists.
+6. **One origin taxonomy.** New origins extend the existing evidence-origin enum. There is no
+   parallel trust vocabulary.
+7. **No generic evidence submission.** An agent may request a registered producer but cannot submit
+   a production probe receipt or arbitrary evidence payload.
+8. **Determinism.** Compiler and continuation reducers use no clock, model, network, or randomness.
+   They consume witnessed timestamps and cursors from their inputs.
+9. **Local honesty ceiling.** Hash-chain verification detects ordinary local mutation and deletion;
+   it does not authenticate production reality or custody against the machine owner.
+10. **Orchestration stays outside the product.** Watchdogs, worker replacement, and PR-driving
+    machinery are build-process controls, not claim-compiler features.
 
-Homestead is the first demanding customer and the acceptance environment. It is never a
-dependency: no Homestead concept (Door, Librarian, Keep, Cards, organ heartbeats) enters the core
-schema. Homestead supplies a profile and probe implementations, exactly as any other project would.
+## Profile and contract model
 
-## What this is not — the honesty ceiling, preserved
+The compiler accepts a validated prerequisite graph. Node identifiers and display strings are
+profile-defined. The first bundled profile is `software_release/v1`:
 
-The shipped contract says the adapter "never approves, blocks, certifies, merges, or declares the
-work … correct." That line survives this proposal intact, resolved as follows:
+1. `BUILT` — exact source identity plus declared executable checks at that identity.
+2. `MERGED` — the exact source identity or its merge commit observed on the named base.
+3. `DEPLOYED` — the configured producer observed a running artifact identity matching the merged
+   identity and required configuration presence, never configuration values.
+4. `LIVE_PROVEN` — a dated registered canary observed the bounded terminal effect and any
+   profile-required reconciliation or replay behavior.
 
-- **The compiler blocks the claim, not the action.** At a declared gate it refuses to seal a run
-  whose stated completion class exceeds its compiled class — or seals it with the honest
-  downgraded class stated in the record. It does not merge, deploy, or prevent merging or
-  deploying. External enforcement (branch protection, deploy scripts, CI gates) consumes the
-  machine-readable verdict where action blocking is wanted.
-- **It never judges correctness.** `LIVE_PROVEN` means "a dated real canary proved this bounded
-  scenario at this time," not "the work is right." Reviewers (Codex, Fable, humans) remain the
-  judges of reasoning; the compiler only records whether their judgments are requested, running,
-  terminal, at which exact head, with what findings, and whether later evidence superseded them.
-- **A verdict is a statement about evidence relationships**, in the exact form: "the available
-  evidence supports BUILT, not LIVE_PROVEN," with the missing producers named.
+These nodes are not a universal ladder. Other projects provide validated profiles with their own
+nodes and prerequisites. A profile snapshot is canonicalized, hashed, and anchored into the
+contract. A locally declared profile states the chosen requirements; it does not prove those
+requirements are sufficient.
 
-## Claim classes — the surface vocabulary
+An immutable contract contains:
 
-Four classes, each requiring named terminal evidence. The bare word "works" is forbidden output at
-every class:
-
-1. **BUILT** — exact source head identified; declared executable checks green at that head.
-2. **MERGED** — that exact head (or its merge commit) proven present on the named remote base.
-3. **DEPLOYED** — running artifact identity proven equal to the merged head, with required
-   configuration proven present (presence, never values).
-4. **LIVE_PROVEN** — a dated, real (non-mock) canary proved the end-to-end effect: durable
-   resulting object or terminal state, reconciliation result, and replay behavior where the
-   profile requires idempotency.
-
-Generated language always states class, scope, and date — "Live-proven for arrival → judgment →
-durable effect as of 2026-08-05" — never an unbounded predicate.
-
-Internally the compiler models a **prerequisite graph, not a universal ladder**. The eight-state
-Homestead sequence (implemented → tested → reviewed → merged → deployed → configured →
-live-exercised → reconciled) is one project's release profile. Other profiles may order
-configuration before deployment, omit review, or add domain states. The four surface classes are
-projections of whatever graph the active profile declares.
-
-## Evidence contract extensions
-
-All compiler evidence lands on the **existing hash-chained ledger** as new witnessed event types —
-no second ledger. Candidate types (names settled at build time, versioned like every event):
-`claim_contract_declared`, `producer_requested`, `producer_terminal`, `check_observed`,
-`merge_identity_observed`, `deploy_identity_observed`, `config_presence_observed`,
-`probe_receipt`, `gate_evaluated`, `claim_compiled`.
-
-Standing rules, inherited from the existing contract and extended:
-
-- **Witnessed, never narrated.** An agent statement about evidence ("I ran the canary," "the
-  reviewer finished") is `agent_reported` and satisfies no requirement — ever. Requirements are
-  satisfied only by producer receipts: adapter probes whose raw outputs are hashed into the chain
-  with their origin stated.
-- **Mocks cannot satisfy production requirements.** Every DEPLOYED/LIVE_PROVEN producer receipt
-  carries identity binding — deployed artifact hash tied to the merged head, canary tied to the
-  deployed identity — the same authentication pattern the capsule archives use (content ref plus
-  residence in the chain). A mock proves logic under BUILT; it cannot mint a production identity.
-- **Append-only invalidation.** Later evidence never rewrites an earlier compiled state or
-  learning entry; it appends a superseding disposition that names what it invalidates. Historical
-  claims remain readable exactly as they were made.
-- **Currentness is explicit.** Every compiled state carries the evidence timestamps it rests on.
-  A profile may declare staleness horizons; a stale LIVE_PROVEN automatically reads as
-  "was live-proven as of <date>," never as present tense.
-
-## The compiler
-
-A pure, deterministic, fold-versioned reducer over the chain — the same species as the
-continuation folds, subject to the same discipline learned across twelve adversarial review
-rounds:
-
-- Input: the declared claim contract plus all witnessed evidence events. Output:
-  `highest_supported_state`, `missing` (named absent producers), `pending_producers` (requested
-  but non-terminal), `contradictions`, `currentness`, and the exact next verifier.
-- **No LLM anywhere in the compiler.** Not for evidence relationships, not for recurrence
-  identity, not for gate decisions. The moment a model judges "done," narration has re-entered at
-  the exact point this exists to remove it.
-- The agent does not select its own completion class. The reducer does. The agent may state a
-  *requested* class; the compiled class is what the record carries.
-- Compiler outputs are themselves witnessed events, so the receipt, handoff, and lineage
-  machinery render and verify them with zero new trust surface.
-
-## Gates and the join barrier
-
-- **During work:** a contradiction or staleness produces one de-duplicated inline advisory
-  (`PostToolUse` / `SubagentStop` transport). Unchanged evidence never repeats the warning; fresh
-  proof resolves it. Work is not blocked.
-- **At a declared gate** (merge, deploy, done/seal — the profile names them): missing or pending
-  required evidence **fails closed**. No gate passes while any requested producer — reviewer,
-  check, sync hook — is non-terminal.
-- **The quiet-period contract is deterministic:** two samples separated by a configured interval,
-  with unchanged head, reviewer set, check set, unresolved-thread state, and evidence-producer
-  cursors. Both samples are witnessed events. (This is the codified form of the loop run by hand
-  on this repo's own PR #12: exact-head re-requests, reviewer terminal before round closure,
-  resample after the last producer finishes.)
-- **At Stop:** the existing seal path additionally compares declared goal-class against compiled
-  class. A materially false closeout is refused or sealed with the downgraded class stated —
-  "Built, with mocked delivery — never Deployed, never Live-proven" is a legal sealed sentence;
-  "works" is not.
-
-## Packaging
-
-```
-lyhna-codex-adapter (this repo)
-├── Skill          — activation: goal, requested class, reviewers, gates, caps, exact verifier
-├── Hooks          — existing transport; carries the loop after activation
-├── Claim compiler — deterministic evidence-state engine (new fold)
-├── Ledger         — the existing hash-chained events.jsonl; evidence events are new types on it
-├── Gate profiles  — declarative requirements per class per gate; generic core vocabulary
-└── Receipt        — existing renderer, extended to carry compiled class and evidence map
+```text
+contract_id
+profile_id and profile_hash
+requested_state
+declared_gate_ids
+named producer IDs and expected identities
+objective_ref
+verifier
+caps
+privacy_mode
 ```
 
-Core vocabulary stays generic: `claim`, `required_evidence`, `observed_evidence`,
-`pending_producer`, `contradiction`, `currentness`, `highest_supported_state`,
-`missing_verifier`, `gate_result`. Customer concepts live in profiles and adapters only.
+The official completion result is a generated closeout envelope. Free-form prose is neither parsed
+nor accepted as completion evidence. Generated language always states profile, state, scope, and
+evidence frontier and never emits the bare word "works."
 
-## Profile and adapter contract
+## Public and supervisor interfaces
 
-- A **profile** declares, per gate, the required evidence for each claim class, orderings in the
-  prerequisite graph, staleness horizons, and idempotency requirements. Profiles are data, not
-  code, and are witnessed into the run at activation.
-- An **adapter** produces evidence: tests, GitHub review/check state at exact heads, deployment
-  identity, configuration presence, live probes, business receipts. Adapters run outside the
-  compiler and submit receipts through the witnessed surface; the compiler never fetches.
-- First-party adapter for Slice 3: **GitHub** — reviewer requested/running/terminal, verdict,
-  exact head reviewed, findings as structured data (a review job that executed green while posting
-  findings is *not* a clean review), unresolved threads, merge identity.
-- The Homestead Librarian profile (arrival → authenticated receiver → judgment → durable effect →
-  terminal state → sync → replay) lives in Homestead's repo, as the first customer profile.
+Agent-facing tools:
+
+```text
+declare_claim_contract(session_capability, contract)
+request_claim_producer(session_capability, contract_id, producer_id)
+evaluate_claim_gate(session_capability, contract_id, gate_id)
+request_close(session_capability, reason)
+```
+
+`request_close.reason` remains narration only. It asks the supervisor to evaluate the already
+declared contract. There is no agent-facing `submit_evidence`, `record_probe`, or contract-amendment
+tool.
+
+Evidence enters through supervisor-owned hooks, the GitHub observer, or registered project probe
+adapters. A producer request is not evidence.
+
+## Ledger event contract
+
+Primary event families:
+
+```text
+claim_contract_declared
+producer_requested
+producer_terminal
+evidence_observed
+gate_sample_observed
+closeout_attempted
+claim_superseded
+```
+
+Derived, permanently non-evidentiary event families:
+
+```text
+claim_compiled
+gate_evaluated
+diagnostic_emitted
+diagnostic_resolved
+closeout_envelope_generated
+enforcement_required
+```
+
+Every derived event carries `claim_contract_ref`, `fold_version`, `input_digest`, and the primary
+frontier it summarized. A fresh fold recomputes only from eligible primary events. Unchanged input
+does not append another compile result, diagnostic, or resolution.
+
+The existing origin enum is extended to exactly:
+
+```text
+mcp_routed
+runtime_hook
+agent_reported
+evaluator_reported
+github_observed
+imported
+unobserved
+registered_probe
+mock_or_test
+```
+
+Profiles name accepted origins, event kinds, producer identities, and identity bindings for every
+requirement. `mock_or_test` can exercise logic but cannot satisfy production requirements. An
+agent-reported payload marked production remains agent-reported and ineligible.
+
+## Deterministic compiler output
+
+The pure compiler returns:
+
+```text
+contract_id
+profile_ref
+requested_state
+highest_supported_state
+state_results
+missing
+pending_producers
+contradictions
+currentness
+next_verifier
+primary_frontier
+input_digest
+```
+
+Currentness uses adapter-observed timestamps and source cursors already present in primary events.
+Missing, malformed, or conflicting time yields `CURRENTNESS_UNPROVEN`.
+
+## Inline diagnostics, reviewers, and join barrier
+
+`PostToolUse` may return one bounded model-visible advisory when the ledger-backed diagnostic state
+changes. `SubagentStop` is a persistence boundary, not a promised direct parent-context channel;
+the next parent `PostToolUse` or `Stop` surfaces the persisted delta.
+
+A requested reviewer records expected actor, reviewer type, exact head, and terminal verdict schema.
+Two requirements cannot be satisfied by one actor unless the profile explicitly declares that
+identity for both. Terminal verdicts are:
+
+```text
+CLEAN
+FINDINGS
+INVALID
+STALE
+```
+
+A successful review job with findings is `FINDINGS`, not `CLEAN`. Free-form review prose is not a
+terminal structured verdict.
+
+The default software-release quiet barrier requires two primary samples at least 120 witnessed
+seconds apart with identical profile and contract hashes, exact head, producer statuses, reviewer
+actors and verdicts, checks, unresolved-thread state, source cursors, and local verifier result.
+Any change restarts the barrier.
+
+At an unsupported Stop, `diagnostic_id` is derived from contract, gate, normalized blocker set, and
+primary frontier. The persisted `closeout_attempted` event records whether that diagnostic is
+unchanged. Attempts one and two return `decision: "block"`; attempt three appends the generated
+non-success envelope and terminal seal.
+
+## Privacy projection
+
+Privacy projection occurs before canonical hashing.
+
+- `full` mode retains bounded contract and diagnostic text according to the existing redaction
+  contract.
+- `proof` mode withholds objective-like prose, contract text, diagnostic prose, and closeout
+  narrative. It retains stable labels, state IDs, profile references, evidence references, producer
+  identities, digests, and deterministic `text_withheld` markers.
+
+Proof-mode events, capsules, receipts, handoffs, and continuation prompts must not contain the
+withheld text. The retained structural fields must still permit compilation, deduplication, lineage
+verification, and continuation.
+
+## Continuation fold v2
+
+The implementation must:
+
+- add `v2` to `KNOWN_FOLD_VERSIONS`;
+- set `CURRENT_FOLD_VERSION` to `v2` for new anchors;
+- add a v2 reducer to the lineage verifier;
+- keep every existing legacy fixture byte-identical;
+- carry the contract, compiled state, pending producers, diagnostic state, close-attempt frontier,
+  and gate samples in the v2 capsule;
+- inherit an open contract as open across a window boundary;
+- never reopen a sealed contract.
+
+A later contradiction opens a successor observation run. The previous sealed packet remains an
+immutable as-of result, while the successor links it by `capsule_ref` and may record
+`claim_superseded`.
 
 ## Recurrence reducer
 
-- Every failure candidate carries a stable, deterministic `failure_class_id` assigned by rule,
-  not by model judgment.
-- A confirmed recurrence of the same class becomes `ENFORCEMENT_REQUIRED`: an appended build
-  obligation naming the gate that must exist. It is never silently re-logged as a first
-  observation, and the reducer never autonomously builds or deploys the control — it opens the
-  obligation for a human-sequenced build.
-- Standing meta-rule, already ratified by Adam in the Homestead lane and adopted here: any lesson
-  that recurs twice graduates from prose to enforcement in the next build cycle.
+Profiles register stable `failure_class_id` values. An incident supplies a distinct incident
+reference and eligible primary evidence references. The reducer reconstructs recurrence from the
+validated ledgers rather than a second mutable database.
 
-## Build order — four slices, one PR each, DONE WHEN proven by deliberate mutation
+One initial incident plus two distinct confirmed recurrences emits one derived
+`ENFORCEMENT_REQUIRED` obligation. Replay emits no duplicate. The reducer does not edit code,
+policy, infrastructure, or deployment.
 
-1. **Contract + compiler + Stop gate.** Claim contract declaration, evidence event types, the
-   deterministic compiler, compiled-class rendering in receipt/handoff, Stop-gate downgrade.
-   DONE WHEN the Librarian incident, replayed from its actual evidence, compiles to exactly
-   "BUILT — missing: configured receiver, real canary, durable effect, terminal state, replay
-   proof," and a closeout claiming LIVE_PROVEN is refused.
-2. **Join barrier.** Pending-producer tracking, gate fail-closed, deterministic quiet period.
-   DONE WHEN a seeded merge-during-review is refused; a late finding invalidates a prior clean
-   state exactly once by appended disposition; unchanged evidence produces no repeated warning.
-3. **Production-proof envelope + GitHub adapter.** Identity-bound deploy/config/canary receipt
-   schema; the GitHub evidence adapter. DONE WHEN a seeded green-executing review job carrying a
-   P2 finding fails the gate, and a mocked canary cannot satisfy a LIVE_PROVEN requirement.
-4. **Recurrence reducer.** DONE WHEN three seeded candidates of one failure class yield one
-   `ENFORCEMENT_REQUIRED` obligation — not three first observations.
+## Build order and kill gate
 
-Caps, per Codex's bound and adopted here: one week, twelve repair turns, zero model calls inside
-the compiler, two no-progress cycles. Stop conditions: it becomes a dashboard, a
-receipt-formatter, another reviewer agent, or needs an LLM to determine evidence relationships.
+Before runtime code, a disposable clean-install transport spike must prove actual host behavior:
 
-## Acceptance
+- `PostToolUse` delivers model-visible additional context;
+- `Stop` can return `decision: "block"` and continue the parent;
+- `SubagentStop` evidence persists for a later supported parent boundary;
+- deduplication and counters survive separate hook processes.
 
-- Every slice goes through the same adversarial protocol that produced v0.1.32: independent Codex
-  review at exact heads, every finding reproduced before fixing, every fix pinned by a fixture
-  proven red on the previous head, loop until clean. The compiler that gates claims must itself
-  be Codex-clean before it gates anything.
-- Adversarial fixtures are first-class: forged producer receipts, planted evidence with honest
-  content hashes, stale verdicts presented as current, rewritten history, mocks dressed as
-  production — all must fail closed, by the same "the gate must precede the grant" discipline.
-- If Slice 1 cannot stop the exact Librarian false claim before closeout, the product bet ends
-  there.
+Failure of the first two transports terminates the build as `BLOCKED_TRANSPORT`.
 
-## Repository boundary
+The four versioned slices are:
 
-- Engine, plugin surface, generic profiles, and the GitHub adapter live in
-  `Lyhna-ai/lyhna-codex-adapter`. `lyhna-witness`, `lyhna-mcp-proxy`, and `lyhna-core` remain
-  untouched.
-- Customer profiles and probes (Homestead first) live in customer repositories.
-- Naming, per the review consensus: the product is **Lyhna Witness**; the capability is the
-  **claim compiler** (evidence compiler); the customer integration is a **completion gate**.
-  "Truth Gate" is rejected — this proves evidence relationships, not truth.
+1. `0.1.33` — contract, compiler, fold v2, privacy projection, and sealed unsupported closeout.
+2. `0.1.34` — inline diagnostics, named joins, quiet barrier, and successor supersession.
+3. `0.1.35` — paginated GitHub evidence and registered-probe identity envelopes.
+4. `0.1.36` — recurrence reducer and one enforcement obligation.
 
-## Decisions that are Adam's
+The Slice 1 kill fixture uses only `software_release/v1` vocabulary: source identity and checks are
+present; deployment identity, configuration presence, registered canary, terminal effect, and
+required replay are absent. It must compile exactly `BUILT`, warn inline, and refuse a higher seal.
 
-1. Ratify this proposal (with or without amendment) as the v0.1.33+ line of this repo.
-2. Sequencing against the parked slices (Slice B / CZ-14 blind-reader field gates, Slice C):
-   recommendation — Slice 1 next, field gates unchanged in their parked state.
-3. Whether the recurrence meta-rule is promoted into this repo's own working agreements now or
-   at Slice 4.
+## Acceptance and authorized merge policy
+
+Every slice requires executable tests, mutation proof, clean Windows CI, fresh independent review
+at the exact final head, zero unresolved actionable threads, and two unchanged remote-state samples
+120 seconds apart. A changed head invalidates every earlier review.
+
+Required mutations include derived self-evidence, forged production payloads, production-shaped
+mocks, actor and head mismatch, pending and late-finding reviewers, decisive page-two GitHub data,
+cross-process diagnostic deduplication and resolution, three cross-process Stop attempts, post-seal
+append corruption, successor supersession, proof-mode text leakage, open-contract continuation,
+free-form completion narration, and three distinct recurrence incidents.
+
+Adam authorizes Codex to squash-merge exactly these five PRs when their declared gates are terminal
+and clean: this ratification PR #13 and the four implementation slices. This supersedes the shipped
+SPEC acceptance check that previously required the final PR to remain unmerged. It is not standing
+authorization for unrelated merges, releases, package publication, deployment, credentials, or
+production mutation.
+
+PR #13 is spec-only and does not change the package version. Version bumps begin with Slice 1.
+
+## Loop contract
+
+```text
+verifier: targeted mutation tests; npm test; npm run validate:plugin; clean-install host smoke;
+          sealed/successor lineage verification; exact-head independent reviews; Windows CI
+exit: VERIFIED_GREEN or 12 repair cycles or 7 days or two no-progress cycles
+spend: no purchase, top-up, plan upgrade, or new paid service
+irreversible effects: only the five named squash merges are pre-authorized; all others remain gated
+stop if: transport fails, the compiler needs an LLM, or the build becomes an orchestration framework
+```
