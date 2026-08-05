@@ -23,10 +23,12 @@ Lyhna claim or successful seal.
 
 ## Hard invariants
 
-1. **Primary-evidence firewall.** Only primary events emitted through registered supervisor-owned
-   boundaries may satisfy profile requirements. Compiler, gate, diagnostic, receipt, recurrence,
-   and other derived events are never eligible evidence, even when their bytes and hashes are valid.
-2. **Ledger-backed control state.** Close attempts, primary frontiers, input digests, diagnostic
+1. **Closed evidence-eligibility firewall.** Only `evidence_observed` envelopes emitted through a
+   registered supervisor-owned observer or probe may satisfy profile requirements. Contract,
+   producer-lifecycle, close, supersession, compiler, gate, diagnostic, receipt, recurrence, and
+   narration events are control/history only, even when their bytes and hashes are valid. Profiles
+   cannot widen this closed eligibility matrix.
+2. **Ledger-backed control state.** Close attempts, eligible-evidence frontiers, input digests, diagnostic
    emission and resolution, quiet-period samples, cursors, and deduplication state are events on the
    existing ledger. Hook-process memory is never authoritative.
 3. **Sealing is terminal.** Nothing is appended after `run_sealed`. A post-seal tail is corruption
@@ -61,9 +63,16 @@ profile-defined. The first bundled profile is `software_release/v1`:
    profile-required reconciliation or replay behavior.
 
 These nodes are not a universal ladder. Other projects provide validated profiles with their own
-nodes and prerequisites. A profile snapshot is canonicalized, hashed, and anchored into the
-contract. A locally declared profile states the chosen requirements; it does not prove those
-requirements are sufficient.
+internal prerequisite DAGs. Every profile must also declare an unambiguous ordered surface
+projection. Multiple incomparable supported internal nodes are returned as
+`maximal_supported_nodes`; `highest_supported_state` is populated only by the unique ordered
+surface projection. A profile with an ambiguous or missing projection is rejected before use.
+
+A profile snapshot is canonicalized and stored as ledger-owned immutable bytes in
+`claim_contract_declared`; its hash is the profile identity. The v2 capsule carries the canonical
+snapshot, so deleting or editing a project profile after declaration cannot change offline
+continuation or refolding. A locally declared profile states the chosen requirements; it does not
+prove those requirements are sufficient.
 
 An immutable contract contains:
 
@@ -85,35 +94,48 @@ evidence frontier and never emits the bare word "works."
 
 ## Public and supervisor interfaces
 
-Agent-facing tools:
+The existing ten agent-facing tools remain unchanged. The claim compiler adds exactly three tools:
 
 ```text
 declare_claim_contract(session_capability, contract)
 request_claim_producer(session_capability, contract_id, producer_id)
 evaluate_claim_gate(session_capability, contract_id, gate_id)
-request_close(session_capability, reason)
 ```
 
-`request_close.reason` remains narration only. It asks the supervisor to evaluate the already
-declared contract. There is no agent-facing `submit_evidence`, `record_probe`, or contract-amendment
-tool.
+The shipped `request_close.reason` remains narration only. It asks the supervisor to evaluate the
+already declared contract. There is no agent-facing `submit_evidence`, `record_probe`, or
+contract-amendment tool. `tools/list` must retain all ten shipped tools and expose the three
+additions with backward-compatible existing schemas.
 
 Evidence enters through supervisor-owned hooks, the GitHub observer, or registered project probe
 adapters. A producer request is not evidence.
 
 ## Ledger event contract
 
-Primary event families:
+Ledger event families are classified independently of their hash-chain integrity. Control/history
+events are never requirement-eligible:
 
 ```text
 claim_contract_declared
 producer_requested
 producer_terminal
-evidence_observed
 gate_sample_observed
 closeout_attempted
 claim_superseded
 ```
+
+The only requirement-eligible family is:
+
+```text
+evidence_observed
+```
+
+An eligible envelope must have an event kind from the closed observer/probe registry, an allowed
+origin, a registered producer identity, the profile-required identity bindings, and a source
+cursor. `agent_reported`, `evaluator_reported`, `producer_requested`, `producer_terminal`,
+`gate_sample_observed`, `closeout_attempted`, and `claim_superseded` never satisfy a requirement.
+Reviewer conclusions become eligible only through an `evidence_observed` envelope bound to a
+separately sealed evaluator child receipt; evaluator narration alone remains ineligible.
 
 Derived, permanently non-evidentiary event families:
 
@@ -126,9 +148,11 @@ closeout_envelope_generated
 enforcement_required
 ```
 
-Every derived event carries `claim_contract_ref`, `fold_version`, `input_digest`, and the primary
-frontier it summarized. A fresh fold recomputes only from eligible primary events. Unchanged input
-does not append another compile result, diagnostic, or resolution.
+Every derived event carries `claim_contract_ref`, `fold_version`, `input_digest`, and the eligible
+evidence frontier it summarized. The frontier is the canonical digest of requirement-eligible
+`evidence_observed` projections only; control/history events do not advance it. A fresh fold
+recomputes only from eligible envelopes. Unchanged input does not append another compile result,
+diagnostic, or resolution.
 
 The existing origin enum is extended to exactly:
 
@@ -144,9 +168,11 @@ registered_probe
 mock_or_test
 ```
 
-Profiles name accepted origins, event kinds, producer identities, and identity bindings for every
-requirement. `mock_or_test` can exercise logic but cannot satisfy production requirements. An
-agent-reported payload marked production remains agent-reported and ineligible.
+Profiles choose only from the closed eligible observer/probe registry and name accepted origins,
+producer identities, and identity bindings for every requirement. Profile validation rejects any
+requirement that names a control/history or derived event family. `mock_or_test` can exercise logic
+but cannot satisfy production requirements. An agent-reported payload marked production remains
+agent-reported and ineligible.
 
 ## Deterministic compiler output
 
@@ -157,13 +183,14 @@ contract_id
 profile_ref
 requested_state
 highest_supported_state
+maximal_supported_nodes
 state_results
 missing
 pending_producers
 contradictions
 currentness
 next_verifier
-primary_frontier
+eligible_evidence_frontier
 input_digest
 ```
 
@@ -176,9 +203,13 @@ Missing, malformed, or conflicting time yields `CURRENTNESS_UNPROVEN`.
 changes. `SubagentStop` is a persistence boundary, not a promised direct parent-context channel;
 the next parent `PostToolUse` or `Stop` surfaces the persisted delta.
 
-A requested reviewer records expected actor, reviewer type, exact head, and terminal verdict schema.
-Two requirements cannot be satisfied by one actor unless the profile explicitly declares that
-identity for both. Terminal verdicts are:
+A requested reviewer records expected actor, reviewer type, exact head, and terminal verdict
+schema. Its actor and hook-issued child capability must differ from the builder/parent. An eligible
+review envelope must bind to a separately sealed child receipt containing the frozen head, detached
+checkout evidence, clean tracked tree before and after, commands actually run, and terminal
+verdict. A builder-attributed verdict, same-capability review, attached checkout, dirty checkout,
+or head mismatch is `INVALID` and cannot satisfy a gate. Two requirements cannot be satisfied by
+one actor unless the profile explicitly declares that identity for both. Terminal verdicts are:
 
 ```text
 CLEAN
@@ -195,24 +226,29 @@ seconds apart with identical profile and contract hashes, exact head, producer s
 actors and verdicts, checks, unresolved-thread state, source cursors, and local verifier result.
 Any change restarts the barrier.
 
-At an unsupported Stop, `diagnostic_id` is derived from contract, gate, normalized blocker set, and
-primary frontier. The persisted `closeout_attempted` event records whether that diagnostic is
-unchanged. Attempts one and two return `decision: "block"`; attempt three appends the generated
-non-success envelope and terminal seal.
+At an unsupported Stop, `blocker_fingerprint` is derived from contract, gate, normalized blocker
+set, and the eligible evidence frontier. Control events never change it. The persisted
+`closeout_attempted` event records that fingerprint and the next ordinal for its uninterrupted
+occurrence. Attempts one and two return `decision: "block"`; attempt three appends the generated
+non-success envelope and terminal seal. A changed eligible evidence frontier recomputes blockers
+and resets the ordinal for the resulting fingerprint.
 
 ## Privacy projection
 
-Privacy projection occurs before canonical hashing.
+The canonical privacy enum remains the shipped `verified_context | proof`.
 
-- `full` mode retains bounded contract and diagnostic text according to the existing redaction
-  contract.
-- `proof` mode withholds objective-like prose, contract text, diagnostic prose, and closeout
-  narrative. It retains stable labels, state IDs, profile references, evidence references, producer
-  identities, digests, and deterministic `text_withheld` markers.
+- `verified_context` retains bounded, redacted contract and diagnostic text for the owner.
+- `proof` follows the existing at-egress projection model: the local ledger retains the same
+  bounded redacted source text, while capsule, receipt, handoff, continuation prompt, and exported
+  packet project objective-like prose, contract text, diagnostic prose, and closeout narrative
+  away before those artifact hashes are derived. Stable labels, state IDs, canonical profile
+  snapshot, evidence references, producer identities, digests, and deterministic `text_withheld`
+  markers remain.
 
-Proof-mode events, capsules, receipts, handoffs, and continuation prompts must not contain the
-withheld text. The retained structural fields must still permit compilation, deduplication, lineage
-verification, and continuation.
+Proof-mode exported artifacts must not contain the withheld text. The local ledger is protected by
+the existing local-data boundary and redaction rules; proof mode is not represented as an at-write
+storage guarantee. The v2 anchor seals the selected privacy mode, and the retained structural
+fields must still permit compilation, deduplication, lineage verification, and continuation.
 
 ## Continuation fold v2
 
@@ -222,14 +258,15 @@ The implementation must:
 - set `CURRENT_FOLD_VERSION` to `v2` for new anchors;
 - add a v2 reducer to the lineage verifier;
 - keep every existing legacy fixture byte-identical;
-- carry the contract, compiled state, pending producers, diagnostic state, close-attempt frontier,
-  and gate samples in the v2 capsule;
+- carry the canonical profile snapshot, contract, compiled state, pending producers, diagnostic
+  state, close-attempt frontier, and gate samples in the v2 capsule;
 - inherit an open contract as open across a window boundary;
 - never reopen a sealed contract.
 
-A later contradiction opens a successor observation run. The previous sealed packet remains an
-immutable as-of result, while the successor links it by `capsule_ref` and may record
-`claim_superseded`.
+A later contradiction does not open a run automatically. After a new explicit Lyhna invocation,
+the shipped `begin_run(..., continues_from: capsule_ref)` path opens the successor. The previous
+sealed packet remains an immutable as-of result, while the successor links it by `capsule_ref` and
+may record `claim_superseded`. Post-seal activity without explicit invocation creates no Lyhna run.
 
 ## Recurrence reducer
 
@@ -269,15 +306,31 @@ Every slice requires executable tests, mutation proof, clean Windows CI, fresh i
 at the exact final head, zero unresolved actionable threads, and two unchanged remote-state samples
 120 seconds apart. A changed head invalidates every earlier review.
 
-Required mutations include derived self-evidence, forged production payloads, production-shaped
-mocks, actor and head mismatch, pending and late-finding reviewers, decisive page-two GitHub data,
-cross-process diagnostic deduplication and resolution, three cross-process Stop attempts, post-seal
-append corruption, successor supersession, proof-mode text leakage, open-contract continuation,
-free-form completion narration, and three distinct recurrence incidents.
+Required mutations include derived self-evidence, a profile attempting to accept a control event,
+forged control events and production payloads, production-shaped mocks, builder/same-capability/
+attached-checkout review, actor and head mismatch, pending and late-finding reviewers, decisive
+page-two GitHub data, a diamond profile with ambiguous surface projection, deletion of a declared
+custom profile, cross-process diagnostic deduplication and resolution, three cross-process Stop
+attempts with one stable blocker fingerprint, eligible evidence resetting that fingerprint,
+post-seal append corruption, explicit successor supersession, proof-mode export leakage,
+open-contract continuation, free-form completion narration, full backward-compatible `tools/list`,
+and three distinct recurrence incidents.
 
-Adam authorizes Codex to squash-merge exactly these five PRs when their declared gates are terminal
-and clean: this ratification PR #13 and the four implementation slices. This supersedes the shipped
-SPEC acceptance check that previously required the final PR to remain unmerged. It is not standing
+Adam authorizes Codex to squash-merge this ratification PR #13 and four future slices only when
+their declared gates are terminal and clean. The future targets are fixed as repository
+`Lyhna-ai/lyhna-codex-adapter`, base `main`, and branches:
+
+```text
+codex/claim-compiler-contract   -> Slice 1 / 0.1.33
+codex/claim-compiler-join       -> Slice 2 / 0.1.34
+codex/claim-compiler-evidence   -> Slice 3 / 0.1.35
+codex/claim-compiler-recurrence -> Slice 4 / 0.1.36
+```
+
+Before each merge, the coordinator records a gate mapping containing repository, PR number, base,
+slice ID, branch, exact reviewed head, expected version, and this authorization reference. A
+mismatch, missing mapping, or changed head blocks the merge. This supersedes the shipped SPEC
+acceptance check that previously required the final PR to remain unmerged. It is not standing
 authorization for unrelated merges, releases, package publication, deployment, credentials, or
 production mutation.
 

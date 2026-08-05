@@ -131,9 +131,13 @@ block the underlying external action.
 13. Ledger mutation, reordering, middle deletion, and sealed-tail deletion surface `LOCAL_CHAIN_BROKEN` rather than a normal receipt.
 14. The complete diff receives an independent Codex review against this specification and all material findings are closed on the final head.
 15. Pull requests remain unmerged for Adam's decision unless Adam gives a narrower explicit merge
-    authorization. On 2026-08-05 Adam authorized Codex to squash-merge only claim-compiler PR #13
-    and its four named implementation slices after every declared exact-head gate is terminal and
-    clean. This is not standing merge, release, deployment, or production-mutation authority.
+    authorization. On 2026-08-05 Adam authorized Codex to squash-merge claim-compiler PR #13 and
+    four implementation slices in this repository, based on `main`, with exact branches
+    `codex/claim-compiler-contract`, `codex/claim-compiler-join`,
+    `codex/claim-compiler-evidence`, and `codex/claim-compiler-recurrence`, after every declared
+    exact-head gate is terminal and clean. Before each future merge, the recorded gate mapping must
+    match repository, PR, base, slice, branch, reviewed head, and expected version. This is not
+    standing merge, release, deployment, or production-mutation authority.
 
 ## Non-goals for v0
 
