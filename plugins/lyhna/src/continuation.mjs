@@ -77,9 +77,15 @@ function includesObjectiveText(foldVersion) {
 function buildClaimCompilerProjection(events) {
   const contractEvent = events.find((event) => event.type === 'claim_contract_declared');
   if (!contractEvent) return null;
-  const compiledEvent = [...events].reverse().find((event) => event.type === 'claim_compiled');
   const producerRequests = events.filter((event) => event.type === 'producer_requested');
   const claimContractRef = `sha256:${contractEvent.event_hash}`;
+  const compiledBindings = events.filter((event) => (
+    event.type === 'claim_compiled'
+    && event.origin === 'runtime_hook'
+    && event.payload?.claim_contract_ref === claimContractRef
+    && event.payload?.fold_version === 'v2'
+  ));
+  const compiledEvent = compiledBindings.at(-1);
   const producerTerminals = new Map();
   for (const event of events) {
     const producer = contractEvent.payload?.profile_structural?.producers?.[event.payload?.producer_id];
@@ -94,9 +100,24 @@ function buildClaimCompilerProjection(events) {
     producerTerminals.set(event.payload?.producer_id, event.payload?.status);
   }
   const diagnostics = new Map();
+  const diagnosticIsBound = (event) => {
+    if (event.origin !== 'runtime_hook'
+      || event.payload?.claim_contract_ref !== claimContractRef
+      || event.payload?.fold_version !== 'v2'
+      || typeof event.payload?.diagnostic_id !== 'string'
+      || typeof event.payload?.blocker_fingerprint !== 'string') return false;
+    const expectedStatus = event.type === 'diagnostic_emitted' ? 'OPEN' : 'RESOLVED';
+    if (event.payload?.diagnostic_status !== expectedStatus) return false;
+    return compiledBindings.some((compiled) => (
+      compiled.seq < event.seq
+      && compiled.payload?.input_digest === event.payload?.input_digest
+      && compiled.payload?.eligible_evidence_frontier === event.payload?.eligible_evidence_frontier
+      && compiled.payload?.material_control_frontier === event.payload?.material_control_frontier
+    ));
+  };
   for (const event of events) {
-    if (event.type === 'diagnostic_emitted') diagnostics.set(event.payload?.diagnostic_id, { ...event.payload, event_ref: `sha256:${event.event_hash}` });
-    if (event.type === 'diagnostic_resolved' && diagnostics.has(event.payload?.diagnostic_id)) {
+    if (event.type === 'diagnostic_emitted' && diagnosticIsBound(event)) diagnostics.set(event.payload?.diagnostic_id, { ...event.payload, event_ref: `sha256:${event.event_hash}` });
+    if (event.type === 'diagnostic_resolved' && diagnosticIsBound(event) && diagnostics.has(event.payload?.diagnostic_id)) {
       diagnostics.set(event.payload.diagnostic_id, { ...diagnostics.get(event.payload.diagnostic_id), status: 'RESOLVED', resolved_ref: `sha256:${event.event_hash}` });
     }
   }

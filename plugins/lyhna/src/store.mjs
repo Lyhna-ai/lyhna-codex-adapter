@@ -104,6 +104,45 @@ function proofSafeGitObjectId(value) {
   return typeof value === 'string' && GIT_OBJECT_ID_SHAPE.test(value) ? value : null;
 }
 
+function assertCurrentCompiledBinding(state, payload, code) {
+  const compiled = state.compiled_claim;
+  assert(state.claim_contract && compiled, code);
+  assert(payload.claim_contract_ref === state.claim_contract.claim_contract_ref, code);
+  assert(payload.fold_version === CURRENT_FOLD_VERSION, code);
+  assert(payload.input_digest === compiled.input_digest, code);
+  assert(payload.eligible_evidence_frontier === compiled.eligible_evidence_frontier, code);
+  assert(payload.material_control_frontier === compiled.material_control_frontier, code);
+}
+
+function validateCloseoutEnvelopeBinding(state, origin, payload) {
+  const code = 'INVALID_CLOSEOUT_ENVELOPE';
+  assert(origin === 'runtime_hook', code);
+  assertCurrentCompiledBinding(state, payload, code);
+  const required = [
+    'envelope_id', 'outcome', 'profile_id', 'requested_state', 'supported_state',
+    'scope_ref', 'eligible_evidence_frontier', 'material_control_frontier', 'input_digest',
+    'claim_contract_ref', 'fold_version', 'blockers', 'next_verifier'
+  ];
+  assert(required.every((key) => Object.hasOwn(payload, key)), code);
+  assert(typeof payload.envelope_id === 'string' && payload.envelope_id.length > 0, code);
+  assert(payload.profile_id === state.claim_contract.profile_id, code);
+  assert(payload.requested_state === state.claim_contract.requested_state, code);
+  assert(payload.supported_state === state.compiled_claim.highest_supported_state, code);
+  assert(payload.scope_ref === state.claim_contract.objective_ref, code);
+  assert(payload.next_verifier === state.compiled_claim.next_verifier, code);
+  assert(Array.isArray(payload.blockers) && payload.blockers.every((item) => typeof item === 'string'), code);
+  assert(payload.outcome === 'SUPPORTED' || payload.outcome === 'CLOSED_UNSUPPORTED', code);
+  if (payload.outcome === 'SUPPORTED') {
+    assert(state.compiled_claim.state_results?.[state.claim_contract.requested_state]?.supported === true, code);
+    assert(state.compiled_claim.currentness === 'AS_WITNESSED', code);
+    assert(state.compiled_claim.pending_producers.length === 0, code);
+    assert(state.compiled_claim.contradictions.length === 0, code);
+    assert(payload.blockers.length === 0, code);
+  } else {
+    assert(payload.blockers.length > 0, code);
+  }
+}
+
 function root() {
   const value = dataRoot();
   mkdirSync(value, { recursive: true });
@@ -487,6 +526,34 @@ export function activeRunFor(capability, { includeSealed = false } = {}) {
   return record.run_id;
 }
 
+function locateOpenClaimRunForParent(capability) {
+  const active = activeRunFor(capability);
+  if (active) return active;
+  const parent = getCapability(capability);
+  assert(parent.kind === 'parent', 'PARENT_CAPABILITY_REQUIRED');
+  const callerRef = sha256(capability);
+  const index = readJson(sessionRunsPath(parent.session_hash), { run_ids: [] });
+  for (const runId of [...(index.run_ids || [])].reverse()) {
+    try {
+      const parsed = parseLedger(runId);
+      if (parsed.events.some((event) => event.type === 'run_sealed')) continue;
+      if (!parsed.events.some((event) => event.type === 'claim_contract_declared')) continue;
+      const lease = [...parsed.events].reverse().find((event) => event.type === 'continuation_lease_transferred');
+      if (lease) {
+        if (lease.payload?.successor_parent_ref !== callerRef) continue;
+      } else {
+        const cached = readJson(statePath(runId), null);
+        if (cached?.parent_capability_hash && cached.parent_capability_hash !== callerRef) continue;
+      }
+      return runId;
+    } catch {
+      const cached = readJson(statePath(runId), null);
+      if (cached?.claim_contract && !cached.sealed && cached.parent_capability_hash === callerRef) return runId;
+    }
+  }
+  return null;
+}
+
 function loadState(runId) {
   const state = readJson(statePath(runId), null);
   assert(state, 'RUN_NOT_FOUND');
@@ -529,12 +596,31 @@ function parseLedger(runId) {
 function reconstructClaimControl(events) {
   const contractEvent = events.find((event) => event.type === 'claim_contract_declared');
   const contractRef = contractEvent ? `sha256:${contractEvent.event_hash}` : null;
-  const compiledEvent = [...events].reverse().find((event) => (
-    event.type === 'claim_compiled' && event.payload?.claim_contract_ref === contractRef
+  const compiledBindings = events.filter((event) => (
+    event.type === 'claim_compiled'
+    && event.origin === 'runtime_hook'
+    && event.payload?.claim_contract_ref === contractRef
+    && event.payload?.fold_version === CURRENT_FOLD_VERSION
   ));
+  const diagnosticIsBound = (event) => {
+    if (event.origin !== 'runtime_hook'
+      || event.payload?.claim_contract_ref !== contractRef
+      || event.payload?.fold_version !== CURRENT_FOLD_VERSION
+      || typeof event.payload?.diagnostic_id !== 'string'
+      || typeof event.payload?.blocker_fingerprint !== 'string') return false;
+    const expectedStatus = event.type === 'diagnostic_emitted' ? 'OPEN' : 'RESOLVED';
+    if (event.payload?.diagnostic_status !== expectedStatus) return false;
+    return compiledBindings.some((compiled) => (
+      compiled.seq < event.seq
+      && compiled.payload?.input_digest === event.payload?.input_digest
+      && compiled.payload?.eligible_evidence_frontier === event.payload?.eligible_evidence_frontier
+      && compiled.payload?.material_control_frontier === event.payload?.material_control_frontier
+    ));
+  };
+  const compiledEvent = compiledBindings.at(-1);
   const emitted = new Map();
   for (const event of events) {
-    if (event.type === 'diagnostic_emitted') {
+    if (event.type === 'diagnostic_emitted' && diagnosticIsBound(event)) {
       emitted.set(event.payload?.diagnostic_id, {
         diagnostic_id: event.payload?.diagnostic_id,
         status: event.payload?.diagnostic_status || 'OPEN',
@@ -542,7 +628,7 @@ function reconstructClaimControl(events) {
         event_seq: event.seq,
         ...(event.payload?.blocker_fingerprint ? { blocker_fingerprint: event.payload.blocker_fingerprint } : {})
       });
-    } else if (event.type === 'diagnostic_resolved' && emitted.has(event.payload?.diagnostic_id)) {
+    } else if (event.type === 'diagnostic_resolved' && diagnosticIsBound(event) && emitted.has(event.payload?.diagnostic_id)) {
       emitted.set(event.payload.diagnostic_id, {
         ...emitted.get(event.payload.diagnostic_id),
         status: 'RESOLVED',
@@ -908,6 +994,27 @@ function validateEventPayloadStructure(state, type, origin, payload) {
         && payload.evidence_refs.every((ref) => /^sha256:[a-f0-9]{64}$/.test(String(ref)))), 'INVALID_PRODUCER_TERMINAL');
   }
 
+  if (type === 'diagnostic_emitted' || type === 'diagnostic_resolved') {
+    const code = 'INVALID_CLAIM_DIAGNOSTIC';
+    assert(origin === 'runtime_hook', code);
+    assertCurrentCompiledBinding(state, payload, code);
+    assert(typeof payload.diagnostic_id === 'string' && payload.diagnostic_id.length > 0, code);
+    assert(typeof payload.blocker_fingerprint === 'string' && payload.blocker_fingerprint.length > 0, code);
+    assert(payload.diagnostic_status === (type === 'diagnostic_emitted' ? 'OPEN' : 'RESOLVED'), code);
+    if (type === 'diagnostic_emitted') {
+      const gateId = state.claim_contract.declared_gate_ids[0];
+      assert(payload.blocker_fingerprint === blockerFingerprint(state.claim_contract, gateId, state.compiled_claim), code);
+      assert(payload.supported_state === state.compiled_claim.highest_supported_state, code);
+      assert(payload.requested_state === state.claim_contract.requested_state, code);
+      assert(canonicalJson(payload.missing) === canonicalJson(state.compiled_claim.missing), code);
+      assert(payload.next_verifier === state.compiled_claim.next_verifier, code);
+    }
+  }
+
+  if (type === 'closeout_envelope_generated') {
+    validateCloseoutEnvelopeBinding(state, origin, payload);
+  }
+
   if (type === 'pr_snapshot') {
     const countKeys = ['files', 'checks', 'reviews', 'review_comments', 'issue_comments'];
     const counts = payload.counts || {};
@@ -987,6 +1094,9 @@ function projectEventPayloadForPrivacy(state, type, payload) {
       text_withheld: true
     };
   }
+  if (type === 'evaluation_requested') {
+    return { ...payload, expected_head: proofSafeGitObjectId(payload.expected_head) };
+  }
   if (type === 'close_requested') {
     return { request_id: payload.request_id, text_withheld: true };
   }
@@ -1005,12 +1115,17 @@ function projectEventPayloadForPrivacy(state, type, payload) {
   if (type === 'pr_snapshot') {
     return {
       ...payload,
+      head_before: proofSafeGitObjectId(payload.head_before),
+      head_after: proofSafeGitObjectId(payload.head_after),
       failures: (payload.failures || []).map((failure) => ({
         object: String(failure?.object || ''),
         error_ref: reference(String(failure?.error || '')),
         text_withheld: true
       }))
     };
+  }
+  if (type === 'pr_refreshed') {
+    return { ...payload, observed_head: proofSafeGitObjectId(payload.observed_head) };
   }
   if (type === 'evidence_observed') {
     const requirement = state.claim_profile?.requirements?.find((item) => item.requirement_id === payload.requirement_id);
@@ -1515,10 +1630,10 @@ function snapshotOccurrenceIndex(base, id) {
 
 export function addPrSnapshot(capability, snapshot) {
   const { runId } = requireParent(capability);
-  const base = snapshot.id || `pr_${sha256(canonicalJson({ runId, snapshot })).slice(0, 24)}`;
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
-    assert(!state.sealed && state.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
+    assertParentLeaseUnlocked(runId, state, capability);
+    const base = snapshot.id || `pr_${sha256(canonicalJson({ runId, snapshot })).slice(0, 24)}`;
     // Prior observations recorded under this deterministic base id (the same id recurs when the head
     // is force-pushed away and back). The latest one is the observation a re-snapshot is compared to.
     const priorOccurrences = Object.values(state.pr_snapshots)
@@ -1572,7 +1687,15 @@ export function addPrSnapshot(capability, snapshot) {
     // Plain retry keeps the existing record untouched (no status resurrection, no lost refresh state);
     // a new (base or occurrence) observation is stored as itself.
     const storedSnapshot = state.privacy_mode === 'proof'
-      ? { ...normalized, failures: snapshotEvent.payload.failures || [] }
+      ? {
+          ...normalized,
+          id: snapshotEvent.payload.id,
+          base_sha: proofSafeGitObjectId(normalized.base_sha),
+          head_before: snapshotEvent.payload.head_before,
+          head_after: snapshotEvent.payload.head_after,
+          current_head: proofSafeGitObjectId(normalized.current_head),
+          failures: snapshotEvent.payload.failures || []
+        }
       : normalized;
     if (latest && !diverged) state.pr_snapshots[id] ||= storedSnapshot;
     else state.pr_snapshots[id] = storedSnapshot;
@@ -1725,7 +1848,8 @@ export function markSnapshotRefreshed(capability, snapshotId, currentHead) {
     assertParentLeaseUnlocked(runId, current, capability);
     const snapshot = current.pr_snapshots[snapshotId];
     assert(snapshot, 'SNAPSHOT_NOT_FOUND');
-    const stale = currentHead !== snapshot.head_after;
+    const storedCurrentHead = current.privacy_mode === 'proof' ? proofSafeGitObjectId(currentHead) : currentHead;
+    const stale = storedCurrentHead === null || storedCurrentHead !== snapshot.head_after;
     // A refresh after new evaluation activity is a distinct observation — the CURRENT label
     // depends on a pr_refreshed event later in the ledger than the final evaluation event
     // (requested OR finding), so the idempotency key carries both the evaluation count and the
@@ -1738,10 +1862,10 @@ export function markSnapshotRefreshed(capability, snapshotId, currentHead) {
     appendEventUnlocked(runId, current, {
       type: 'pr_refreshed',
       origin: 'github_observed',
-      payload: { snapshot_id: snapshotId, observed_head: currentHead, status: stale ? 'STALE' : 'CURRENT_AT_REFRESH' },
-      idempotencyKey: `refresh:${snapshotId}:${currentHead}:e${evaluationCount}f${findingCount}`
+      payload: { snapshot_id: snapshotId, observed_head: storedCurrentHead, status: stale ? 'STALE' : 'CURRENT_AT_REFRESH' },
+      idempotencyKey: `refresh:${snapshotId}:${storedCurrentHead ?? 'invalid'}:e${evaluationCount}f${findingCount}`
     });
-    current.pr_snapshots[snapshotId].current_head = currentHead;
+    current.pr_snapshots[snapshotId].current_head = storedCurrentHead;
     current.pr_snapshots[snapshotId].status = stale ? 'STALE' : current.pr_snapshots[snapshotId].status;
     if (stale) {
       for (const evaluation of Object.values(current.evaluations)) {
@@ -1749,7 +1873,7 @@ export function markSnapshotRefreshed(capability, snapshotId, currentHead) {
       }
     }
     saveState(current);
-    return { stale, current_head: currentHead };
+    return { stale, current_head: storedCurrentHead };
   });
 }
 
@@ -2207,7 +2331,7 @@ function finalizeRunSealUnlocked(runId, current, terminalStatus = 'SEALED', seal
 }
 
 export function checkpointOrSeal(capability, deliveryKey = null) {
-  const runId = activeRunFor(capability);
+  const runId = locateOpenClaimRunForParent(capability);
   if (!runId) return { status: 'NO_ACTIVE_RUN' };
   let claimBoundary = false;
   try {
@@ -2236,6 +2360,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     const current = loadState(runId);
     recoverClaimControlStateUnlocked(runId, current, parsedBeforeState);
     assert(current.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
+    atomicWriteJson(activePath(capability), { run_id: runId });
     // Adopt a durable terminal run_sealed (crash after the seal append, before state/anchor) BEFORE the
     // replay guard, which would otherwise short-circuit and leave an unsealed run no later Stop repairs.
     const { events: preEvents } = adoptTerminalLedgerSeal(runId, current);
@@ -2248,7 +2373,8 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     const pendingEnvelope = [...preEvents].reverse().find((event) => event.type === 'closeout_envelope_generated');
     if (pendingEnvelope) {
       const outcome = pendingEnvelope.payload?.outcome;
-      assert(outcome === 'CLOSED_UNSUPPORTED' || outcome === 'SUPPORTED', 'INVALID_CLOSEOUT_ENVELOPE');
+      assert(pendingEnvelope.seq === preEvents.at(-1)?.seq, 'CLOSEOUT_ENVELOPE_TAIL');
+      validateCloseoutEnvelopeBinding(current, pendingEnvelope.origin, pendingEnvelope.payload);
       current.closeout_envelope = { ...pendingEnvelope.payload, event_ref: `sha256:${pendingEnvelope.event_hash}` };
       return finalizeRunSealUnlocked(runId, current, outcome === 'CLOSED_UNSUPPORTED' ? 'CLOSED_UNSUPPORTED' : 'SEALED', {
         claim_contract_ref: current.claim_contract?.claim_contract_ref || null,
@@ -2836,7 +2962,10 @@ export function recordRejectedClaim(capability) {
     if (runId && mapped && !mapped.sealed) {
       return withLock(lockPath(runId), () => {
         const current = loadState(runId);
-        if (current.sealed) return writeRejectedClaimMarker(capabilityRef, kind);
+        recoverClaimControlStateUnlocked(runId, current);
+        if (current.sealed || current.parent_capability_hash !== capabilityRef) {
+          return writeRejectedClaimMarker(capabilityRef, kind);
+        }
         appendEventUnlocked(runId, current, {
           type: 'claim_rejected',
           origin: 'mcp_routed',

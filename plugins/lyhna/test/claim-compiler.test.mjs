@@ -15,18 +15,20 @@ import {
   evaluateClaimGate,
   getCapability,
   getRunForTesting,
+  markSnapshotRefreshed,
   mintChild,
   mintSession,
   readSealedReceipt,
   recordClaim,
   recordEvaluation,
+  recordRejectedClaim,
   requestClaimProducer,
   requestClose,
   sealChildByAgent,
   verifySealedRun
 } from '../src/store.mjs';
 import { isolatedData } from './helpers.mjs';
-import { sha256 } from '../src/util.mjs';
+import { canonicalJson, sha256 } from '../src/util.mjs';
 import { compileClaim, profileRequirementsHash, SOFTWARE_RELEASE_PROFILE, validateProfile } from '../src/claim-compiler.mjs';
 import { buildContinuation } from '../src/continuation.mjs';
 
@@ -77,6 +79,25 @@ function observe(runId, declared, requirementId, eventKind, origin, producerId, 
 function seedBuilt(runId, declared) {
   observe(runId, declared, 'source_identity', 'source_identity_observed', 'mock_or_test', 'software_release/local', { source_ref: 'sha256:source' });
   observe(runId, declared, 'checks_terminal', 'checks_terminal_observed', 'mock_or_test', 'software_release/local', { source_ref: 'sha256:source', checks_ref: 'sha256:checks' });
+}
+
+function appendRawLedgerEventForRecoveryTest(packet, { type, origin, payload, key }) {
+  const path = join(packet.directory, 'events.jsonl');
+  const existing = readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  const prior = existing.at(-1);
+  const event = {
+    schema: 'lyhna.codex.event.v0',
+    seq: prior.seq + 1,
+    prev_hash: prior.event_hash,
+    idempotency_key: key,
+    content_hash: sha256(canonicalJson({ origin, payload, type })),
+    type,
+    origin,
+    payload
+  };
+  event.event_hash = sha256(canonicalJson(event));
+  writeFileSync(path, `${readFileSync(path, 'utf8')}${canonicalJson(event)}\n`);
+  return event;
 }
 
 const REGISTERED_EVENT_TYPES = [
@@ -247,6 +268,49 @@ test('a changed blocker frontier resolves the prior diagnostic exactly once befo
     assert.match(diagnostic.payload.material_control_frontier, /^[a-f0-9]{64}$/);
     assert.match(diagnostic.payload.input_digest, /^[a-f0-9]{64}$/);
   }
+});
+
+test('unbound diagnostics are rejected at write and ignored by v2 recovery', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-diagnostic-binding-firewall', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Do not let narration suppress guidance.' });
+  const declared = declareClaimContract(parent, contract());
+  seedBuilt(run.id, declared);
+  const packet = getRunForTesting(run.id);
+  const forgedCompile = {
+    ...packet.state.compiled_claim,
+    highest_supported_state: 'LIVE_PROVEN',
+    maximal_supported_nodes: ['LIVE_PROVEN'],
+    state_results: {
+      ...packet.state.compiled_claim.state_results,
+      LIVE_PROVEN: { ...packet.state.compiled_claim.state_results.LIVE_PROVEN, supported: true, missing: [] }
+    },
+    missing: [],
+    next_verifier: 'none'
+  };
+  delete forgedCompile.compiled_event_ref;
+  appendRawLedgerEventForRecoveryTest(packet, {
+    type: 'claim_compiled', origin: 'agent_reported', payload: forgedCompile, key: 'unbound-compile-recovery'
+  });
+  const malformed = {
+    diagnostic_id: 'diag_unbound', diagnostic_status: 'OPEN',
+    claim_contract_ref: 'sha256:wrong', input_digest: packet.state.compiled_claim.input_digest,
+    blocker_fingerprint: 'unbound', supported_state: 'LIVE_PROVEN', requested_state: 'LIVE_PROVEN',
+    missing: [], next_verifier: 'none', message: 'Suppress the real advisory.'
+  };
+  assert.throws(() => appendEvent(run.id, {
+    type: 'diagnostic_emitted', origin: 'agent_reported', payload: malformed, idempotencyKey: 'unbound-diagnostic-write'
+  }), /INVALID_CLAIM_DIAGNOSTIC/);
+  appendRawLedgerEventForRecoveryTest(packet, {
+    type: 'diagnostic_emitted', origin: 'agent_reported', payload: malformed, key: 'unbound-diagnostic-recovery'
+  });
+  assert.match(claimInlineAdvisory(parent), /Lyhna inline claim check/);
+  const recovered = getRunForTesting(run.id);
+  assert.equal(recovered.state.compiled_claim.highest_supported_state, 'BUILT');
+  assert.equal(recovered.state.claim_diagnostic.diagnostic_id === 'diag_unbound', false);
+  const capsule = buildContinuation(recovered.state, recovered.events, 'v2');
+  assert.equal(capsule.claim_compiler.compiled_state.highest_supported_state, 'BUILT');
+  assert.equal(capsule.claim_compiler.diagnostics.some((item) => item.diagnostic_id === 'diag_unbound'), false);
 });
 
 test('proof mode projects producer-terminal cursors and rejects unbound control values before hashing', { concurrency: false }, (t) => {
@@ -887,6 +951,32 @@ test('unsupported closeout counts a contiguous fingerprint streak, seals honestl
   assert.equal(fresh.claim_contract, null);
 });
 
+test('an unbound closeout envelope cannot be appended or sealed during crash recovery', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-closeout-envelope-firewall', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Never seal from an unbound derived envelope.' });
+  declareClaimContract(parent, contract());
+  const malformed = { outcome: 'SUPPORTED' };
+  assert.throws(() => appendEvent(run.id, {
+    type: 'closeout_envelope_generated', origin: 'agent_reported', payload: malformed,
+    idempotencyKey: 'unbound-closeout-write'
+  }), /INVALID_CLOSEOUT_ENVELOPE/);
+  const packet = getRunForTesting(run.id);
+  appendRawLedgerEventForRecoveryTest(packet, {
+    type: 'closeout_envelope_generated', origin: 'agent_reported', payload: malformed,
+    key: 'unbound-closeout-recovery'
+  });
+  let failure;
+  try {
+    checkpointOrSeal(parent, 'unbound-closeout-stop');
+  } catch (error) {
+    failure = error;
+  }
+  assert.match(failure?.message || '', /INVALID_CLOSEOUT_ENVELOPE/);
+  assert.equal(failure?.lyhnaClaimBoundary, true);
+  assert.equal(getRunForTesting(run.id).events.some((event) => event.type === 'run_sealed'), false);
+});
+
 test('separate Stop hook processes preserve attempt state and the third seals CLOSED_UNSUPPORTED', { concurrency: false }, (t) => {
   const data = isolatedData(t);
   const env = { ...process.env, LYHNA_CODEX_DATA: data };
@@ -1094,6 +1184,33 @@ test('proof-mode evaluator prose is withheld from state and child receipts, not 
   assert.equal(stored.checkout_head_before, null);
   assert.equal(stored.checkout_head_after, null);
   assert.equal(stored.status, 'CHECKOUT_INTEGRITY_EXCEPTION');
+});
+
+test('proof mode projects snapshot, refresh, and checkout Git identifiers at first write', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const markers = {
+    base: 'BASE_HEAD_RAW_DO_NOT_PERSIST_91A1',
+    before: 'BEFORE_HEAD_RAW_DO_NOT_PERSIST_91A2',
+    after: 'AFTER_HEAD_RAW_DO_NOT_PERSIST_91A3',
+    refresh: 'REFRESH_HEAD_RAW_DO_NOT_PERSIST_91A4'
+  };
+  const parent = mintSession({ sessionId: 'compiler-proof-git-identifiers', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Project untrusted Git identifiers.', privacyMode: 'proof' });
+  const snapshot = addPrSnapshot(parent, {
+    id: 'proof_git_snapshot', repository: 'Lyhna-ai/example', pr_number: 14, base_sha: markers.base,
+    head_before: markers.before, head_after: markers.after, status: 'CONSISTENT',
+    files: [], checks: [], reviews: [], review_comments: [], issue_comments: [], failures: []
+  });
+  assert.equal(snapshot.id, 'proof_git_snapshot');
+  assert.equal(snapshot.base_sha, null);
+  assert.equal(snapshot.head_before, null);
+  assert.equal(snapshot.head_after, null);
+  const refreshed = markSnapshotRefreshed(parent, snapshot.id, markers.refresh);
+  assert.equal(refreshed.stale, true);
+  assert.equal(refreshed.current_head, null);
+  const bytes = readTree(data).join('\n');
+  for (const marker of Object.values(markers)) assert.equal(bytes.includes(marker), false, `raw Git identifier leaked: ${marker}`);
+  assert.equal(getRunForTesting(run.id).events.find((event) => event.type === 'pr_refreshed').payload.observed_head, null);
 });
 
 test('an open v2 contract rotates onto the successor session without a second ledger or lost child route', { concurrency: false }, (t) => {
@@ -1431,6 +1548,10 @@ test('a committed lease-transfer event completes idempotently after projection w
 
   const predecessorPath = join(data, 'capabilities', `${sha256(firstParent)}.json`);
   const predecessorRecord = JSON.parse(readFileSync(predecessorPath, 'utf8'));
+  rmSync(predecessorPath);
+  const rejected = recordRejectedClaim(firstParent);
+  assert.equal(rejected.recorded, 'marker');
+  assert.equal(getRunForTesting(run.id).events.at(-1).type, 'continuation_lease_transferred');
   delete predecessorRecord.revoked;
   writeFileSync(predecessorPath, `${JSON.stringify(predecessorRecord, null, 2)}\n`);
   const staleStop = runHook({
@@ -1482,6 +1603,24 @@ test('an open ledger contract remains a blocking Stop boundary when mutable stat
   const result = runHook({ hook_event_name: 'Stop', session_id: sessionId, event_id: 'missing-state-stop' }, env);
   assert.equal(result.decision, 'block');
   assert.match(result.reason, /^BLOCKED_TRANSPORT:/);
+});
+
+test('a missing active-route cache is recovered from the session index before claim closeout', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const env = { ...process.env, LYHNA_CODEX_DATA: data };
+  const sessionId = 'compiler-stop-missing-active-route';
+  const session = runHook({ hook_event_name: 'SessionStart', session_id: sessionId, cwd: process.cwd() }, env);
+  const parent = session.hookSpecificOutput.additionalContext.match(/LYHNA_SESSION_CAPABILITY=([^\s.]+)/)[1];
+  const run = beginRun(parent, { mode: 'full', objective: 'Recover the durable closeout route.' });
+  declareClaimContract(parent, contract());
+  requestClose(parent, 'Close only through the claim gate.');
+  rmSync(join(data, 'active', `${sha256(parent)}.json`));
+
+  const result = runHook({ hook_event_name: 'Stop', session_id: sessionId, event_id: 'missing-active-route-stop' }, env);
+  assert.equal(result.decision, 'block');
+  assert.match(result.reason, /Lyhna evidence supports/);
+  assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'closeout_attempted').length, 1);
+  assert.equal(JSON.parse(readFileSync(join(data, 'active', `${sha256(parent)}.json`), 'utf8')).run_id, run.id);
 });
 
 test('an unreadable ledger still blocks the cached current owner of an open claim contract', { concurrency: false }, (t) => {
