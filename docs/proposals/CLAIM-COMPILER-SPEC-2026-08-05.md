@@ -109,13 +109,17 @@ recurrence_scope_ref (required only when the profile enables recurrence)
 supplied or overridable by `declare_claim_contract`; an attempted privacy field is rejected by the
 closed tool schema. The run-anchored mode remains the single authority.
 
-Every proof-retained contract value uses a closed structural schema. State and gate IDs must exist
-in the frozen profile; producer and `verifier_id` values must exist in the registered profile
-registry; caps are bounded numeric/enumerated fields; and `contract_id`, `objective_ref`, and
-`recurrence_scope_ref` are strict opaque references issued independently of free text. An objective
-with no independent structural reference uses only `text_withheld`, not a digest of its prose.
-Unknown keys, free-text verifier values, invalid opaque refs, and text smuggled into any structural
-field are rejected before event hashing in `proof` mode.
+Every compiler-retained contract value uses one closed structural schema in both `verified_context`
+and `proof`. State and gate IDs must exist in the frozen profile; producer and `verifier_id` values
+must exist in the registered profile registry; caps are bounded numeric/enumerated fields; and
+`contract_id`, `objective_ref`, and `recurrence_scope_ref` are strict opaque references issued
+independently of free text. An objective with no independent structural reference uses only
+`text_withheld`, not a digest of its prose. Unknown keys, free-text verifier values, invalid opaque
+refs, and text smuggled into any structural field are rejected before event hashing in either mode.
+`verified_context` may retain bounded, redacted display prose in its separate non-authoritative
+display projection, but display fields can never alter or substitute for the validated structural
+state, gates, producers, verifier, IDs, caps, or references consumed by compiling, gating, or
+continuation.
 
 The official completion result is a generated closeout envelope. Free-form prose is neither parsed
 nor accepted as completion evidence. Generated language always states profile, state, scope, and
@@ -285,8 +289,9 @@ bound child. Issuance is persisted before return. `record_evaluation` atomically
 appending `evaluation_submission_consumed` with the resulting finding ID; an agent-chosen, unknown,
 wrong-evaluation, or wrong-child ref is rejected. Replaying a consumed ref ignores the new payload
 and returns the prior finding ID and structured result without another append, while a legitimate
-second finding uses a distinct issued slot. Unused slots prove nothing and expire when the child
-receipt seals. The string finding is human-authored prose: the store writes only a bounded redacted
+second finding uses a distinct issued slot. Unused slots prove nothing and expire at the earlier of
+atomic verdict acceptance or child-receipt sealing. The string finding is human-authored prose: the
+store writes only a bounded redacted
 summary plus a supervisor-generated finding ID derived at
 write time from the evaluator-request event ref, frozen head, review type, and `submission_ref`,
 never from the prose or a future receipt. Severity uses a closed enum and defaults to `UNSPECIFIED`;
@@ -298,14 +303,19 @@ sealed evaluator receipt ref; no ID is rewritten.
 
 The same backward-compatible `record_evaluation` schema accepts an optional structured `verdict`
 with the issued `verdict_submission_ref`; for a v2 verdict submission the prose `finding` field may
-be omitted. Consumption appends one `evaluation_verdict_submitted` control event bound to the
-evaluation request, child capability, exact head, review type, and closed verdict enum. `CLEAN` is
-accepted only when zero finding slots were consumed. `FINDINGS` requires at least one consumed
-finding ID. `INVALID` and `STALE` carry their structural reason code and refs. Replaying the verdict
-ref returns the prior structured result without another append; a different or second verdict ref
-is rejected. If `SubagentStop` occurs before a valid verdict submission, the producer terminates
-`INVALID` with `VERDICT_MISSING`; absence of findings is never interpreted as `CLEAN`. Child sealing
-then binds the submitted verdict and finding IDs to the sealed evaluator receipt.
+be omitted. Consumption runs under the evaluation's run lock and atomically appends one
+`evaluation_verdict_submitted` control event, bound to the evaluation request, child capability,
+exact head, review type, and closed verdict enum, while expiring every still-unused finding slot for
+that evaluation. `CLEAN` is accepted only when zero finding slots have been consumed at that atomic
+point. `FINDINGS` requires at least one consumed finding ID. After any verdict wins, every later
+finding submission is rejected, except that replay of a slot consumed before the verdict returns its
+prior structured result without another append. The verdict-versus-finding race therefore has one
+deterministic serialized winner and can never produce a clean verdict followed by a new finding.
+`INVALID` and `STALE` carry their structural reason code and refs. Replaying the verdict ref returns
+the prior structured result without another append; a different or second verdict ref is rejected.
+If `SubagentStop` occurs before a valid verdict submission, the producer terminates `INVALID` with
+`VERDICT_MISSING`; absence of findings is never interpreted as `CLEAN`. Child sealing then binds the
+submitted verdict and finding IDs to the sealed evaluator receipt.
 
 The default software-release quiet barrier requires two primary samples at least 120 witnessed
 seconds apart with identical profile-requirements and contract hashes, exact head, producer statuses, reviewer
@@ -389,14 +399,20 @@ diagnostics and resolutions, blocker fingerprint and close-attempt ordinal, quie
 gate-sample cursors, and unresolved enforcement refs.
 
 The supervisor then appends one `continuation_lease_transferred` control event to that same open
-ledger, atomically revokes the predecessor session capability, binds the new hook-observed session
-capability, and returns the existing `run_id`. The append guard rejects every later hook or MCP write
-using the revoked capability. The new session reconstructs from the ledger before its first work
-boundary, so compiler state, diagnostics, attempts, joins, quiet samples, scope, and gate enforcement
-continue without reset. The run's sole `claim_contract_declared` event remains authoritative and a
-second declaration is rejected. If the capsule is stale, any contract/control field fails equality,
-the predecessor is not locally available, or revocation and transfer cannot be committed atomically,
-continuation fails closed and no second writable run is opened.
+ledger. Under the same transaction it revokes the predecessor parent-session capability, binds the
+new hook-observed parent session, and migrates every already-registered active child lifecycle route
+to the new run lease without changing that child's capability, child ID, evaluation request, issued
+slots, or expected terminal binding. The old parent capability can perform no general hook or MCP
+write and cannot start a new child after transfer. A terminal lifecycle hook from a migrated active
+child remains admissible exactly once through its existing child capability and appends to the same
+run; replay returns the prior terminal result without a duplicate append. All other writes using the
+revoked parent capability are rejected. The new session reconstructs from the ledger before its
+first work boundary, so compiler state, diagnostics, attempts, joins, quiet samples, active children,
+scope, and gate enforcement continue without reset. The run's sole `claim_contract_declared` event
+remains authoritative and a second declaration is rejected. If the capsule is stale, any
+contract/control field fails equality, the predecessor is not locally available, the active-child
+route set cannot be migrated completely, or revocation, migration, and transfer cannot be committed
+atomically, continuation fails closed and no second writable run is opened.
 
 A later contradiction does not open a run automatically. After a new explicit Lyhna invocation,
 the shipped `begin_run(..., continues_from: capsule_ref)` path opens the successor. The previous
@@ -412,12 +428,16 @@ Profiles register stable failure entries containing `failure_class_id` and a clo
 `required_verifier_id`. A recurrence-enabled contract also declares a
 stable structural `recurrence_scope_ref` for the project or work domain; free-form objective text
 cannot supply it. A counted incident is an `evidence_observed` envelope from the profile-registered
-incident observer or probe, carrying the authorized producer identity, source cursor, failure class,
-and stable incident-subject/occurrence reference required by that profile. The supervisor derives
-`incident_ref` from the canonical structural projection of those fields; neither the agent nor an
-imported narrative may choose it. Re-observing the same source occurrence in another run produces
-the same `incident_ref`, so it counts once, while a missing or conflicting occurrence identity is
-ineligible. The reducer reconstructs recurrence from validated ledgers rather than a second mutable
+incident observer or probe, carrying the authorized observation producer identity, source cursor,
+failure class, and stable incident-subject/occurrence reference required by that profile. The
+producer identity, cursor, evidence refs, run, and ledger tip bind provenance and eligibility but are
+excluded from occurrence identity. The supervisor derives `incident_ref` only from the canonical
+structural tuple `(profile_requirements_hash, recurrence_scope_ref, failure_class_id,
+stable_incident_subject_or_occurrence_ref)`; neither the agent nor an imported narrative may choose
+it. Re-observing the same source occurrence through another authorized producer, cursor, evidence
+envelope, or run therefore produces the same `incident_ref` and counts once, while a distinct stable
+occurrence reference produces a distinct incident and a missing or conflicting occurrence identity
+is ineligible. The reducer reconstructs recurrence from validated ledgers rather than a second mutable
 database. Its immutable aggregate input is the canonical sort of unique records containing
 `profile_requirements_hash`, `recurrence_scope_ref`, `failure_class_id`, `incident_ref`,
 `source_run_id`, `source_contract_ref`, `source_ledger_tip`, and eligible evidence references. The
@@ -490,7 +510,9 @@ invalidates every earlier review. PR #13's gate mapping is repository
 `claude/gatea-witnesslane-reconcile-1zlfsb`, exact reviewed head recorded immediately before merge,
 and package version unchanged at `0.1.32`.
 
-Required mutations include derived self-evidence, a profile attempting to accept a control event,
+Required mutations include identical closed structural contract validation in `verified_context`
+and `proof`, including rejection in both modes of an invalid state or gate, an unregistered producer
+or verifier, and an invalid scope reference; derived self-evidence, a profile attempting to accept a control event,
 forged control events and production payloads, production-shaped mocks, rejection of
 `github_observed`/`mcp_routed` production evidence and wrong registered-probe identities,
 builder/same-capability/
@@ -500,13 +522,17 @@ ambiguous surface projection, deletion of a declared custom profile, cross-proce
 deduplication and resolution, persisted host-issued evaluator submission slots, wrong-child/ref
 rejection, write-time prose-independent finding IDs, sealed-receipt binding, legitimate
 duplicate-text findings, consumed-slot replay deduplication, structured `CLEAN` and `FINDINGS`
-verdict submissions, verdict replay, and `VERDICT_MISSING` on silent child Stop,
+verdict submissions, atomic expiration of all unused finding slots at verdict acceptance, a
+serialized `CLEAN`-versus-finding race with exactly one winner and no post-verdict finding,
+verdict replay, and `VERDICT_MISSING` on silent child Stop,
 three cross-process Stop
 attempts with one stable blocker fingerprint, eligible evidence resetting that fingerprint,
 material control changing compiler state without satisfying evidence, evaluator command/argument
 or finding-prose leakage, recurrence across three sealed source ledgers with no post-seal append,
 privacy-independent structural profile identity, per-failure-class recurrence thresholds,
-supervisor-derived incident identity, cross-run duplicate-incident suppression, and propagation of
+supervisor-derived incident identity, suppression of the same stable occurrence observed under a
+different authorized producer, cursor, envelope, or run, distinct counting for a different stable
+occurrence, cross-run duplicate-incident suppression, and propagation of
 the profile-bound `required_verifier_id` into obligation and continuation,
 recurrence-scope and destination-contract separation, atomic incident/obligation set resampling
 including open incident and obligation runs before their first Stop, concurrent promotion
@@ -519,7 +545,9 @@ supersession rejection, proof-mode removal of objective/statement text and prose
 v2-writer event type plus profile/display and downstream artifact leakage, unknown text-field
 rejection, proof-mode prose smuggling through `objective_ref`, `verifier_id`, caps, or other
 structural contract fields, open-contract same-run lease rotation with complete contract/control reconstruction,
-stale or unavailable predecessor rejection, revoked-capability write rejection, inherited
+stale or unavailable predecessor rejection, atomic migration of a pending child's lifecycle route,
+single acceptance of that child's post-transfer `SubagentStop`, no duplicate terminal append,
+revoked-parent write and new-child rejection, inherited
 diagnostics, attempts, producers, quiet samples, immediate gate enforcement, and second-declaration
 rejection, no-contract v1 close compatibility,
 free-form completion narration,
@@ -548,10 +576,26 @@ PR #13 is spec-only and does not change the package version. Version bumps begin
 
 ## Loop contract
 
+PR #13 exhausted its original twelve-cycle cap at head `2a3a75b`. Adam authorized exactly one
+non-renewing extension repair cycle, limited to: stable recurrence incident identity, active-child
+continuation routing, atomic verdict/finding-slot closure, and privacy-independent structural
+contract validation. After that edit, every exact-head gate reruns. Any remaining or new actionable
+finding ends PR #13 as `CAP_REACHED`; it does not authorize a fourteenth repair.
+
+Implementation slices start with fresh, independent, non-transferable repair budgets: Slice 1 has
+eight completed repair cycles, Slice 2 has six, Slice 3 has six, and Slice 4 has four. Each slice
+starts at zero only on its fixed branch and cannot borrow unused cycles from another slice. Each also
+retains a six-active-hour wall cap, a two-consecutive-no-new-evidence cap, and the no-paid-upgrade
+spend rule. Hitting a slice cap terminates that slice honestly; it does not reopen PR #13 or expand
+scope.
+
 ```text
 verifier: targeted mutation tests; npm test; npm run validate:plugin; clean-install host smoke;
           sealed/successor lineage verification; exact-head independent reviews; Windows CI
-exit: VERIFIED_GREEN or 12 repair cycles or 7 days or two no-progress cycles
+PR #13 exit: VERIFIED_GREEN or its single authorized extension cycle is exhausted
+slice exits: VERIFIED_GREEN or its independent 8 / 6 / 6 / 4 repair cap, six active hours,
+             or two consecutive completed cycles with no new evidence
+overall exit: VERIFIED_GREEN or 7 days
 spend: no purchase, top-up, plan upgrade, or new paid service
 irreversible effects: only the five named squash merges are pre-authorized; all others remain gated
 stop if: transport fails, the compiler needs an LLM, or the build becomes an orchestration framework
