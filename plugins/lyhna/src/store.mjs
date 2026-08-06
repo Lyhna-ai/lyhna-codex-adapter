@@ -23,9 +23,26 @@ import {
 import { renderHandoffMarkdown } from './handoff.mjs';
 import { loadOrCreateKeypair, signCapsule } from './signing.mjs';
 import { ADAPTER_VERSION } from './version.mjs';
+import {
+  blockerFingerprint,
+  compileClaim,
+  getClaimProfile,
+  validateClaimContract
+} from './claim-compiler.mjs';
 
 const ZERO_HASH = '0'.repeat(64);
 const CONFIGURED_HOOKS = ['PermissionRequest', 'PostToolUse', 'PreToolUse', 'SessionStart', 'Stop', 'SubagentStart', 'SubagentStop', 'UserPromptSubmit'];
+const PROOF_EVENT_TYPES = new Set([
+  'builder_claim', 'checkpoint_anchor', 'child_receipt_retrieved', 'child_receipt_sealed',
+  'child_started', 'child_stop_observed', 'claim_compiled', 'claim_contract_declared',
+  'claim_rejected', 'close_deferred', 'close_requested', 'closeout_attempted',
+  'closeout_envelope_generated', 'continuation_lease_transferred', 'diagnostic_emitted',
+  'diagnostic_resolved', 'evaluation_claimed', 'evaluation_finding', 'evaluation_requested',
+  'evidence_observed', 'gate_evaluated', 'hook_permissionrequest', 'hook_posttooluse',
+  'hook_pretooluse', 'hook_subagentstart', 'hook_subagentstop', 'hook_userpromptsubmit',
+  'pr_refreshed', 'pr_snapshot', 'producer_requested', 'producer_terminal', 'run_begun',
+  'run_sealed', 'turn_checkpoint'
+]);
 const EVALUATION_TRIGGERS = new Set(['initial', 'post_fix_reeval', 'gate_audit', 're_examination']);
 // An evaluation is terminal once its outcome is fixed: recorded, checkout-integrity excepted,
 // or superseded by a moved head. Non-terminal (OPEN/CLAIMED) means a retry re-attaches; terminal
@@ -303,6 +320,18 @@ function sessionLockPath(capability) {
   return join(root(), 'session-locks', `${sha256(capability)}.lock`);
 }
 
+function continuationLockPath() {
+  return join(root(), 'continuation-transfer.lock');
+}
+
+function activePathByCapabilityHash(capabilityHash) {
+  return join(root(), 'active', `${capabilityHash}.json`);
+}
+
+function migratedChildRoutePath(sessionHash, agentHash) {
+  return join(root(), 'migrated-child-routes', `${sessionHash}-${agentHash}.json`);
+}
+
 function sessionRunsPath(sessionHash) {
   return join(root(), 'session-runs', `${sessionHash}.json`);
 }
@@ -357,7 +386,9 @@ export function mintChild({ sessionId, agentId, hookPayload = null, hookDelivery
   const capability = deriveCapability('child', parent.session_hash, activeRunId, agentHash);
   withLock(lockPath(activeRunId), () => {
     const current = loadState(activeRunId);
+    recoverClaimControlStateUnlocked(activeRunId, current);
     assert(!current.sealed, 'RUN_SEALED');
+    assert(current.parent_capability_hash === sha256(parentCapability), 'CAPABILITY_RUN_MISMATCH');
     if (!readJson(capabilityPath(capability), null)) {
       writeCapability(capability, {
         kind: 'child',
@@ -451,6 +482,147 @@ function parseLedger(runId) {
   return { events, tip: previous };
 }
 
+function reconstructClaimControl(events) {
+  const contractEvent = events.find((event) => event.type === 'claim_contract_declared');
+  const contractRef = contractEvent ? `sha256:${contractEvent.event_hash}` : null;
+  const compiledEvent = [...events].reverse().find((event) => (
+    event.type === 'claim_compiled' && event.payload?.claim_contract_ref === contractRef
+  ));
+  const emitted = new Map();
+  for (const event of events) {
+    if (event.type === 'diagnostic_emitted') {
+      emitted.set(event.payload?.diagnostic_id, {
+        diagnostic_id: event.payload?.diagnostic_id,
+        status: event.payload?.diagnostic_status || 'OPEN',
+        input_digest: event.payload?.input_digest,
+        event_seq: event.seq,
+        ...(event.payload?.blocker_fingerprint ? { blocker_fingerprint: event.payload.blocker_fingerprint } : {})
+      });
+    } else if (event.type === 'diagnostic_resolved' && emitted.has(event.payload?.diagnostic_id)) {
+      emitted.set(event.payload.diagnostic_id, {
+        ...emitted.get(event.payload.diagnostic_id),
+        status: 'RESOLVED',
+        input_digest: event.payload?.input_digest,
+        event_seq: event.seq
+      });
+    }
+  }
+  let latestDiagnostic = [...emitted.values()].at(-1) || null;
+  const latestAttempt = [...events].reverse().find((event) => event.type === 'closeout_attempted');
+  if (latestAttempt && (!latestDiagnostic || latestAttempt.seq > latestDiagnostic.event_seq)) {
+    latestDiagnostic = [...emitted.values()].find((item) => item.blocker_fingerprint === latestAttempt.payload?.blocker_fingerprint) || latestDiagnostic;
+  }
+  if (latestDiagnostic) {
+    const attempt = [...events].reverse().find((event) => (
+      event.type === 'closeout_attempted' && event.payload?.input_digest === latestDiagnostic.input_digest
+    ));
+    if (attempt?.payload?.blocker_fingerprint) latestDiagnostic.blocker_fingerprint = attempt.payload.blocker_fingerprint;
+    delete latestDiagnostic.event_seq;
+  }
+  const envelopeEvent = [...events].reverse().find((event) => event.type === 'closeout_envelope_generated');
+  const closeEvent = [...events].reverse().find((event) => event.type === 'close_requested');
+  const leaseEvent = [...events].reverse().find((event) => event.type === 'continuation_lease_transferred');
+  const sealEvent = events.find((event) => event.type === 'run_sealed');
+  const compiledPayload = compiledEvent ? { ...compiledEvent.payload } : null;
+  if (compiledPayload) delete compiledPayload.fold_version;
+  return {
+    claim_contract: contractEvent?.payload?.contract
+      ? { ...contractEvent.payload.contract, claim_contract_ref: `sha256:${contractEvent.event_hash}` }
+      : null,
+    claim_profile: contractEvent?.payload?.profile_structural ?? null,
+    compiled_claim: compiledEvent
+      ? { ...compiledPayload, claim_contract_ref: compiledEvent.payload?.claim_contract_ref, compiled_event_ref: `sha256:${compiledEvent.event_hash}` }
+      : null,
+    claim_diagnostic: latestDiagnostic,
+    closeout_envelope: envelopeEvent ? { ...envelopeEvent.payload, event_ref: `sha256:${envelopeEvent.event_hash}` } : null,
+    close_requested: closeEvent?.payload ?? null,
+    terminal_status: sealEvent?.payload?.status ?? null,
+    continuation_lease: leaseEvent ? {
+      capsule_ref: leaseEvent.payload?.capsule_ref,
+      predecessor_parent_ref: leaseEvent.payload?.predecessor_parent_ref,
+      successor_parent_ref: leaseEvent.payload?.successor_parent_ref
+    } : null,
+    lease_event: leaseEvent || null
+  };
+}
+
+function recoverClaimControlStateUnlocked(runId, state, parsed = parseLedger(runId)) {
+  assert(Number.isInteger(state.ledger_count) && state.ledger_count >= 0 && state.ledger_count <= parsed.events.length, 'LOCAL_CHAIN_BROKEN');
+  const prefixTip = state.ledger_count === 0 ? ZERO_HASH : parsed.events[state.ledger_count - 1]?.event_hash;
+  assert(prefixTip === state.ledger_tip, 'LOCAL_CHAIN_BROKEN');
+  const lagging = state.ledger_count < parsed.events.length;
+  const rebuilt = reconstructClaimControl(parsed.events);
+  const fields = ['claim_contract', 'claim_profile', 'compiled_claim', 'claim_diagnostic', 'closeout_envelope', 'close_requested', 'continuation_lease'];
+  if (!lagging) {
+    let repaired = false;
+    for (const field of fields) {
+      if ((state[field] === null || state[field] === undefined) && rebuilt[field] !== null) {
+        state[field] = rebuilt[field];
+        repaired = true;
+      } else {
+        assert(canonicalJson(state[field] ?? null) === canonicalJson(rebuilt[field] ?? null), `LOCAL_CHAIN_BROKEN:${field}`);
+      }
+    }
+    if ((state.terminal_status === null || state.terminal_status === undefined) && rebuilt.terminal_status) {
+      state.terminal_status = rebuilt.terminal_status;
+      repaired = true;
+    } else if (state.claim_contract || state.terminal_status !== undefined) {
+      assert((state.terminal_status ?? null) === rebuilt.terminal_status, 'LOCAL_CHAIN_BROKEN');
+    }
+    if (repaired) saveState(state);
+    if (rebuilt.lease_event) assert(state.parent_capability_hash === rebuilt.lease_event.payload?.successor_parent_ref, 'LOCAL_CHAIN_BROKEN');
+  } else {
+    for (const field of fields) state[field] = rebuilt[field];
+    if (rebuilt.terminal_status) state.terminal_status = rebuilt.terminal_status;
+    if (rebuilt.lease_event) {
+      state.parent_capability_hash = rebuilt.lease_event.payload.successor_parent_ref;
+      state.continuation_lease = rebuilt.continuation_lease;
+    }
+    state.ledger_count = parsed.events.length;
+    state.ledger_tip = parsed.tip;
+    saveState(state);
+  }
+  return { ...parsed, rebuilt };
+}
+
+function completeContinuationLeaseProjectionUnlocked(state, transferEvent) {
+  assert(transferEvent?.type === 'continuation_lease_transferred', 'CONTINUATION_TRANSFER_MISSING');
+  const payload = transferEvent.payload || {};
+  const predecessor = readJson(join(root(), 'capabilities', `${payload.predecessor_parent_ref}.json`), null);
+  const successor = readJson(join(root(), 'capabilities', `${payload.successor_parent_ref}.json`), null);
+  assert(predecessor?.kind === 'parent' && successor?.kind === 'parent', 'CONTINUATION_OWNER_MISSING');
+  const activeAgentHashes = Object.entries(state.children || {})
+    .filter(([, child]) => child.status !== 'STOP_OBSERVED' || !child.receipt_id)
+    .map(([agentHash]) => agentHash)
+    .sort();
+  const childRecords = (payload.active_child_refs || []).map((capabilityHash) => {
+    const path = join(root(), 'capabilities', `${capabilityHash}.json`);
+    const record = readJson(path, null);
+    assert(record?.kind === 'child' && record.parent_run_id === state.id, 'ACTIVE_CHILD_ROUTE_INCOMPLETE');
+    return { path, record };
+  });
+  assert(canonicalJson(childRecords.map((item) => item.record.agent_hash).sort()) === canonicalJson(activeAgentHashes), 'ACTIVE_CHILD_ROUTE_INCOMPLETE');
+  state.parent_capability_hash = payload.successor_parent_ref;
+  state.continuation_lease = {
+    capsule_ref: payload.capsule_ref,
+    predecessor_parent_ref: payload.predecessor_parent_ref,
+    successor_parent_ref: payload.successor_parent_ref
+  };
+  for (const child of childRecords) {
+    atomicWriteJson(child.path, { ...child.record, parent_capability_hash: payload.successor_parent_ref });
+    atomicWriteJson(migratedChildRoutePath(predecessor.session_hash, child.record.agent_hash), {
+      run_id: state.id,
+      agent_hash: child.record.agent_hash,
+      successor_parent_ref: payload.successor_parent_ref
+    });
+  }
+  saveState(state);
+  atomicWriteJson(activePathByCapabilityHash(payload.successor_parent_ref), { run_id: state.id });
+  rmSync(activePathByCapabilityHash(payload.predecessor_parent_ref), { force: true });
+  const index = readJson(sessionRunsPath(successor.session_hash), { run_ids: [] });
+  atomicWriteJson(sessionRunsPath(successor.session_hash), { run_ids: [...new Set([...(index.run_ids || []), state.id])] });
+}
+
 export function readLedger(runId, { allowOpen = true, recoverOpen = true } = {}) {
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
@@ -495,6 +667,7 @@ function adoptTerminalLedgerSeal(runId, state) {
       assert(sealedIndex === parsed.events.length - 1, 'LOCAL_CHAIN_BROKEN');
       stripLegacyChildReceiptPaths(state);
       state.sealed = true;
+      state.terminal_status = parsed.events[sealedIndex].payload?.status || 'SEALED';
       state.ledger_count = parsed.events.length;
       state.ledger_tip = parsed.tip;
       saveState(state);
@@ -614,9 +787,56 @@ function dropCheckpointAnchor(runId) {
   }
 }
 
+// Fold-v2 proof mode is an at-write guarantee. These projections happen before the payload enters
+// canonical hashing, so neither the ledger nor any downstream artifact can recover withheld prose.
+// Legacy ledgers are never rewritten; this function is reached only for new appends.
+function projectEventPayloadForPrivacy(state, type, payload) {
+  if (state.privacy_mode !== 'proof' || !payload || typeof payload !== 'object') return payload;
+  assert(PROOF_EVENT_TYPES.has(type), 'UNREGISTERED_PROOF_EVENT');
+  const only = (allowed) => {
+    const unknown = Object.keys(payload).find((key) => !allowed.includes(key));
+    assert(!unknown, 'UNREGISTERED_PROOF_FIELD');
+  };
+  if (type === 'builder_claim') {
+    only(['builder_claim_id', 'builder_claim_ordinal', 'evidence_refs', 'statement', 'statement_ref', 'statement_text', 'text_withheld']);
+    return {
+      builder_claim_id: payload.builder_claim_id,
+      builder_claim_ordinal: payload.builder_claim_ordinal,
+      evidence_refs: payload.evidence_refs || [],
+      text_withheld: true
+    };
+  }
+  if (type === 'evaluation_finding') {
+    only(['finding_id', 'finding_ordinal', 'statement', 'statement_text', 'statement_ref', 'evidence_refs', 'evaluation_request_id', 'expected_head', 'checkout_head_before', 'checkout_head_after', 'checkout_clean_before', 'checkout_clean_after', 'checkout_detached_before', 'checkout_detached_after', 'checkout_integrity', 'text_withheld']);
+    const { statement: _statement, statement_text: _text, statement_ref: _ref, ...structural } = payload;
+    return { ...structural, text_withheld: true };
+  }
+  if (type === 'close_requested') {
+    only(['request_id', 'reason', 'reason_ref', 'text_withheld']);
+    return { request_id: payload.request_id, text_withheld: true };
+  }
+  if (type === 'claim_contract_declared') {
+    only(['contract', 'profile_structural', 'profile_requirements_hash', 'profile_display', 'contract_display', 'text_withheld']);
+    const { profile_display: _display, contract_display: _contractDisplay, ...structural } = payload;
+    return { ...structural, text_withheld: true };
+  }
+  if (type === 'diagnostic_emitted' || type === 'diagnostic_resolved') {
+    only(['diagnostic_id', 'diagnostic_status', 'claim_contract_ref', 'input_digest', 'blocker_fingerprint', 'supported_state', 'requested_state', 'missing', 'next_verifier', 'message', 'narrative', 'text_withheld']);
+    const { message: _message, narrative: _narrative, ...structural } = payload;
+    return { ...structural, text_withheld: true };
+  }
+  if (type === 'closeout_envelope_generated') {
+    only(['envelope_id', 'outcome', 'profile_id', 'requested_state', 'supported_state', 'scope_ref', 'eligible_evidence_frontier', 'material_control_frontier', 'input_digest', 'blockers', 'next_verifier', 'narrative', 'text_withheld']);
+    const { narrative: _narrative, ...structural } = payload;
+    return { ...structural, text_withheld: true };
+  }
+  return payload;
+}
+
 function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyKey }) {
   assert(ORIGINS.has(origin), 'INVALID_ORIGIN');
   assert(!state.sealed, 'RUN_SEALED');
+  const projectedPayload = projectEventPayloadForPrivacy(state, type, payload);
   const { events, tip } = parseLedger(runId);
   if (events.length > state.ledger_count) {
     const prefixTip = state.ledger_count === 0 ? ZERO_HASH : events[state.ledger_count - 1]?.event_hash;
@@ -625,8 +845,8 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
     state.ledger_tip = tip;
   }
   assert(events.length === state.ledger_count && tip === state.ledger_tip, 'LOCAL_CHAIN_BROKEN');
-  const key = idempotencyKey || sha256(canonicalJson({ origin, payload, type }));
-  const contentHash = sha256(canonicalJson({ origin, payload, type }));
+  const key = idempotencyKey || sha256(canonicalJson({ origin, payload: projectedPayload, type }));
+  const contentHash = sha256(canonicalJson({ origin, payload: projectedPayload, type }));
   const duplicate = events.find((event) => event.idempotency_key === key);
   if (duplicate) {
     assert(contentHash === duplicate.content_hash, 'IDEMPOTENCY_CONFLICT');
@@ -647,7 +867,7 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
     content_hash: contentHash,
     type,
     origin,
-    payload
+    payload: projectedPayload
   };
   event.event_hash = sha256(canonicalJson(event));
   mkdirSync(runDir(runId), { recursive: true });
@@ -660,6 +880,7 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
 export function appendEvent(runId, input) {
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
+    recoverClaimControlStateUnlocked(runId, state);
     const event = appendEventUnlocked(runId, state, input);
     saveState(state);
     return event;
@@ -671,7 +892,16 @@ function requireParent(capability, { mutable = true } = {}) {
   assert(record.kind === 'parent', 'PARENT_CAPABILITY_REQUIRED');
   const runId = activeRunFor(capability, { includeSealed: !mutable });
   assert(runId, 'NO_ACTIVE_RUN');
-  const state = loadState(runId);
+  const state = withLock(lockPath(runId), () => {
+    const current = loadState(runId);
+    recoverClaimControlStateUnlocked(runId, current);
+    adoptTerminalLedgerSeal(runId, current);
+    if (mutable && current.sealed) {
+      repairSeal(runId);
+      assert(false, 'RUN_SEALED');
+    }
+    return current;
+  });
   if (mutable) assert(!state.sealed, 'RUN_SEALED');
   assert(state.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
   return { record, runId, state };
@@ -706,17 +936,98 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
     const pending = readJson(pendingPath, null);
     const current = activeRunFor(capability, { includeSealed: true });
     if (current) {
-      const state = loadState(current);
+      const state = withLock(lockPath(current), () => {
+        const recovered = loadState(current);
+        recoverClaimControlStateUnlocked(current, recovered);
+        adoptTerminalLedgerSeal(current, recovered);
+        return recovered;
+      });
       // A durable terminal run_sealed whose state.sealed lagged (crash after the seal append, before
       // state/anchor) must be adopted here too — begin_run is a likely recovery path. Otherwise
       // reattach hands back a run every mutable tool now rejects with RUN_SEALED, wedging the session;
       // adopt under the run lock like the Stop/verify paths, then fall through to finalize and start fresh.
-      if (!state.sealed) withLock(lockPath(current), () => adoptTerminalLedgerSeal(current, state));
       if (!state.sealed) {
         if (pending) rmSync(pendingPath, { force: true });
         return state;
       }
       if (!existsSync(anchorPath(current))) repairSeal(current);
+    }
+    if (!current && continuesFrom) {
+      const transferred = withLock(continuationLockPath(), () => {
+        const resolved = resolveContinuesFrom(continuesFrom);
+        if (resolved?.resolution !== 'RESOLVED_LOCAL_PACKET' || !resolved.run_id) return null;
+        return withLock(lockPath(resolved.run_id), () => {
+          const prior = loadState(resolved.run_id);
+          if (prior.sealed) return null;
+          // Same-ledger ownership transfer is a v2 claim-contract feature. Legacy and
+          // contract-free continuations retain the historical successor-run edge.
+          const parsed = recoverClaimControlStateUnlocked(resolved.run_id, prior);
+          if (!prior.claim_contract) return null;
+          const newParentHash = sha256(capability);
+          const priorTransfer = [...parsed.events].reverse().find((event) => (
+            event.type === 'continuation_lease_transferred' && event.payload?.capsule_ref === continuesFrom
+          ));
+          if (priorTransfer) {
+            assert(priorTransfer.payload.successor_parent_ref === newParentHash, 'CONTINUATION_ALREADY_TRANSFERRED');
+            completeContinuationLeaseProjectionUnlocked(prior, priorTransfer);
+            return prior;
+          }
+          const packetVerification = verifyOpenPacket(resolved.run_id);
+          assert(packetVerification.status === 'CHECKPOINT_VERIFIED', 'CONTINUATION_PACKET_UNVERIFIED');
+          assert(prior.mode === mode, 'CONTINUATION_MODE_MISMATCH');
+          assert(prior.privacy_mode === privacy, 'CONTINUATION_PRIVACY_MISMATCH');
+          const published = readJson(join(runDir(resolved.run_id), 'continuation.json'), null);
+          if (!published?.claim_compiler) return null;
+          assert(published?.capsule_ref === continuesFrom && deriveCapsuleRef(published) === continuesFrom, 'STALE_CONTINUATION');
+          const { events, tip } = parseLedger(resolved.run_id);
+          assert(events.length === prior.ledger_count && tip === prior.ledger_tip, 'STALE_CONTINUATION');
+          const reconstructed = buildContinuation(prior, events, CURRENT_FOLD_VERSION);
+          assert(reconstructed.capsule_ref === published.capsule_ref && reconstructed.state_hash === published.state_hash, 'STALE_CONTINUATION');
+          assert(canonicalJson(reconstructed.claim_compiler ?? null) === canonicalJson(published.claim_compiler ?? null), 'CONTINUATION_CONTROL_MISMATCH');
+
+          const oldParentHash = prior.parent_capability_hash;
+          assert(oldParentHash !== newParentHash, 'CONTINUATION_ALREADY_OWNED');
+          const oldParentRecord = readJson(join(root(), 'capabilities', `${oldParentHash}.json`), null);
+          assert(oldParentRecord?.kind === 'parent', 'CONTINUATION_OWNER_MISSING');
+          const capabilityFiles = readdirSync(join(root(), 'capabilities'), { withFileTypes: true });
+          const activeAgentHashes = Object.entries(prior.children || {})
+            .filter(([, child]) => child.status !== 'STOP_OBSERVED' || !child.receipt_id)
+            .map(([agentHash]) => agentHash)
+            .sort();
+          const childRecords = [];
+          for (const entry of capabilityFiles) {
+            if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+            const path = join(root(), 'capabilities', entry.name);
+            const record = readJson(path, null);
+            if (record?.kind === 'child' && record.parent_run_id === prior.id && activeAgentHashes.includes(record.agent_hash)) {
+              childRecords.push({ path, record });
+            }
+          }
+          assert(new Set(childRecords.map((item) => item.record.agent_hash)).size === activeAgentHashes.length, 'ACTIVE_CHILD_ROUTE_INCOMPLETE');
+
+          appendEventUnlocked(prior.id, prior, {
+            type: 'continuation_lease_transferred',
+            origin: 'runtime_hook',
+            payload: {
+              capsule_ref: continuesFrom,
+              predecessor_parent_ref: oldParentHash,
+              successor_parent_ref: newParentHash,
+              active_child_refs: childRecords.map((item) => item.record.capability_hash).sort()
+            },
+            idempotencyKey: `continuation-transfer:${continuesFrom}:${newParentHash}`
+          });
+          const transferEvent = parseLedger(resolved.run_id).events.at(-1);
+          completeContinuationLeaseProjectionUnlocked(prior, transferEvent);
+          return prior;
+        });
+      });
+      if (transferred) {
+        const transferredIndex = readJson(sessionRunsPath(parent.session_hash), { run_ids: [] });
+        const runIds = [...new Set([...(transferredIndex.run_ids || []), transferred.id])];
+        atomicWriteJson(sessionRunsPath(parent.session_hash), { run_ids: runIds });
+        if (pending) rmSync(pendingPath, { force: true });
+        return transferred;
+      }
     }
     // CZ-12: observe (never judge) any prior run in this session left OPEN with no close request.
     const sessionIndex = readJson(sessionRunsPath(parent.session_hash), { run_ids: [] });
@@ -736,11 +1047,12 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
       privacy_mode: privacy,
       sealed: false,
       parent_capability_hash: sha256(capability),
-      objective: pending?.summary || promptSynopsis(objective),
+      objective: privacy === 'proof' ? 'Objective withheld.' : pending?.summary || promptSynopsis(objective),
       // Retained alongside the structural summary, exactly as claim text is: the owner's own request,
       // on the owner's own machine. Proof mode projects it away for a packet that leaves.
-      objective_text: pending?.text || objectiveText(objective),
-      objective_ref: pending?.ref || sha256(String(objective || '')),
+      objective_text: privacy === 'proof' ? '' : pending?.text || objectiveText(objective),
+      objective_ref: privacy === 'proof' ? null : pending?.ref || sha256(String(objective || '')),
+      objective_text_withheld: privacy === 'proof',
       objective_origin: pending ? 'runtime_hook' : 'agent_reported',
       configured_hooks: CONFIGURED_HOOKS,
       ledger_count: 0,
@@ -750,13 +1062,25 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
       // The lineage edge to the window this run continues. Resolved locally, never taken on the
       // agent's word; null when no predecessor was declared.
       inherits: resolveContinuesFrom(continuesFrom),
+      claim_contract: null,
+      claim_profile: null,
+      compiled_claim: null,
+      claim_diagnostic: null,
+      closeout_envelope: null,
+      terminal_status: null,
+      continuation_lease: null,
       pr_snapshots: {},
       evaluations: {},
       children: {},
       child_receipts: {}
     };
     mkdirSync(runDir(runId), { recursive: true });
-    const runBegunPayload = { mode, privacy_mode: privacy, objective_origin: state.objective_origin };
+    const runBegunPayload = {
+      mode,
+      privacy_mode: privacy,
+      objective_origin: state.objective_origin,
+      ...(privacy === 'proof' ? { text_withheld: true } : {})
+    };
     if (pending) runBegunPayload.invocation = { matched_form: pending.matched_form, mention_offset: pending.mention_offset };
     if (openPredecessors.length) runBegunPayload.open_predecessors = openPredecessors;
     // Sealed into run_begun, therefore inside the hash chain, therefore covered by the seal anchor:
@@ -879,19 +1203,31 @@ export function rememberInvocation({ sessionId, prompt }) {
 
 export function recordClaim(capability, statement, evidenceRefs = []) {
   const { runId } = requireParent(capability);
-  const payload = sanitizeClaim(statement, evidenceRefs);
-  return appendEvent(runId, {
-    type: 'builder_claim',
-    origin: 'agent_reported',
-    payload,
-    idempotencyKey: `claim:${sha256(canonicalJson(payload))}`
+  return withLock(lockPath(runId), () => {
+    const state = loadState(runId);
+    const { events } = parseLedger(runId);
+    const ordinal = events.filter((event) => event.type === 'builder_claim').length + 1;
+    const builderClaimId = `claim_${sha256(canonicalJson({ run_id: runId, event_type: 'builder_claim', ordinal })).slice(0, 24)}`;
+    const payload = {
+      ...sanitizeClaim(statement, evidenceRefs),
+      builder_claim_id: builderClaimId,
+      builder_claim_ordinal: ordinal
+    };
+    const event = appendEventUnlocked(runId, state, {
+      type: 'builder_claim',
+      origin: 'agent_reported',
+      payload,
+      idempotencyKey: `builder-claim:${builderClaimId}`
+    });
+    saveState(state);
+    return event;
   });
 }
 
 export function recordHookForParent(capability, payload, idempotencyKey) {
-  const runId = activeRunFor(capability);
-  if (!runId) return null;
-  if (loadState(runId).sealed) return null;
+  const active = activeRunFor(capability);
+  if (!active) return null;
+  const { runId } = requireParent(capability);
   return appendEvent(runId, {
     type: `hook_${String(payload.event || 'unknown').toLowerCase()}`,
     origin: 'runtime_hook',
@@ -1070,8 +1406,11 @@ export function recordEvaluation(childCapability, evaluationId, finding, evidenc
     const detachedBefore = checkout.detached_before ?? item.checkout_detached_before;
     const detachedAfter = checkout.detached_after ?? null;
     const integrityOk = headBefore === item.expected_head && headAfter === item.expected_head && cleanBefore === true && cleanAfter === true && detachedBefore === true && detachedAfter === true;
+    const findingOrdinal = item.findings.length + 1;
+    const findingId = `finding_${sha256(canonicalJson({ run_id: runId, evaluation_id: evaluationId, ordinal: findingOrdinal })).slice(0, 24)}`;
     const payload = {
       ...sanitizeClaim(finding, evidenceRefs),
+      ...(current.privacy_mode === 'proof' ? { finding_id: findingId, finding_ordinal: findingOrdinal } : {}),
       evaluation_request_id: evaluationId,
       expected_head: item.expected_head,
       checkout_head_before: headBefore,
@@ -1082,14 +1421,18 @@ export function recordEvaluation(childCapability, evaluationId, finding, evidenc
       checkout_detached_after: detachedAfter,
       checkout_integrity: integrityOk ? 'CONSISTENT_CLEAN' : 'CHECKOUT_INTEGRITY_EXCEPTION'
     };
-    const findingAlreadyRecorded = item.findings.some((existing) => sha256(canonicalJson(existing)) === sha256(canonicalJson(payload)));
-    appendEventUnlocked(runId, current, {
+    const findingAlreadyRecorded = current.privacy_mode === 'proof'
+      ? false
+      : item.findings.some((existing) => sha256(canonicalJson(existing)) === sha256(canonicalJson(payload)));
+    const findingEvent = appendEventUnlocked(runId, current, {
       type: 'evaluation_finding',
       origin: 'evaluator_reported',
       payload,
-      idempotencyKey: `evaluation-finding:${evaluationId}:${sha256(canonicalJson(payload))}`
+      idempotencyKey: current.privacy_mode === 'proof'
+        ? `evaluation-finding:${evaluationId}:${findingId}`
+        : `evaluation-finding:${evaluationId}:${sha256(canonicalJson(payload))}`
     });
-    if (!findingAlreadyRecorded) item.findings.push(payload);
+    if (!findingAlreadyRecorded) item.findings.push(findingEvent.payload);
     item.checkout_head_before = headBefore;
     item.checkout_head_after = headAfter;
     item.checkout_clean_before = cleanBefore;
@@ -1136,11 +1479,178 @@ export function markSnapshotRefreshed(capability, snapshotId, currentHead) {
   });
 }
 
-export function requestClose(capability, reason) {
+function compileAndRecordUnlocked(runId, state) {
+  assert(state.claim_contract && state.claim_profile, 'CLAIM_CONTRACT_REQUIRED');
+  const { events } = parseLedger(runId);
+  const compiled = compileClaim({ profile: state.claim_profile, contract: state.claim_contract, events });
+  const prior = [...events].reverse().find((event) => event.type === 'claim_compiled' && event.payload?.claim_contract_ref === state.claim_contract.claim_contract_ref);
+  let event = prior;
+  if (!prior || prior.payload?.input_digest !== compiled.input_digest) {
+    event = appendEventUnlocked(runId, state, {
+      type: 'claim_compiled',
+      origin: 'runtime_hook',
+      payload: {
+        ...compiled,
+        claim_contract_ref: state.claim_contract.claim_contract_ref,
+        fold_version: CURRENT_FOLD_VERSION
+      },
+      idempotencyKey: `claim-compiled:${state.claim_contract.contract_id}:${compiled.input_digest}`
+    });
+  }
+  state.compiled_claim = {
+    ...compiled,
+    claim_contract_ref: state.claim_contract.claim_contract_ref,
+    compiled_event_ref: event ? `sha256:${event.event_hash}` : null
+  };
+  return state.compiled_claim;
+}
+
+export function declareClaimContract(capability, rawContract) {
   const { runId } = requireParent(capability);
-  const payload = { reason: structuralSummary(reason, 'Close reason'), reason_ref: sha256(String(reason || '')) };
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
+    assert(!state.claim_contract, 'CLAIM_CONTRACT_ALREADY_DECLARED');
+    const { contract, profile } = validateClaimContract(rawContract, state.privacy_mode);
+    const event = appendEventUnlocked(runId, state, {
+      type: 'claim_contract_declared',
+      origin: 'mcp_routed',
+      payload: {
+        contract,
+        profile_structural: profile,
+        profile_requirements_hash: contract.profile_requirements_hash
+      },
+      idempotencyKey: `claim-contract:${contract.contract_id}`
+    });
+    state.claim_contract = { ...contract, claim_contract_ref: `sha256:${event.event_hash}` };
+    state.claim_profile = profile;
+    compileAndRecordUnlocked(runId, state);
+    saveState(state);
+    return {
+      ...state.claim_contract,
+      status: 'DECLARED',
+      compiled: state.compiled_claim
+    };
+  });
+}
+
+export function requestClaimProducer(capability, contractId, producerId) {
+  const { runId } = requireParent(capability);
+  return withLock(lockPath(runId), () => {
+    const state = loadState(runId);
+    assert(state.claim_contract?.contract_id === contractId, 'CLAIM_CONTRACT_NOT_FOUND');
+    assert(state.claim_contract.named_producers.includes(producerId), 'PRODUCER_NOT_DECLARED');
+    const profile = getClaimProfile(state.claim_contract.profile_id);
+    assert(profile.producers[producerId], 'UNREGISTERED_PRODUCER');
+    const event = appendEventUnlocked(runId, state, {
+      type: 'producer_requested',
+      origin: 'mcp_routed',
+      payload: {
+        contract_id: contractId,
+        claim_contract_ref: state.claim_contract.claim_contract_ref,
+        producer_id: producerId,
+        expected_identity: profile.producers[producerId].expected_identity
+      },
+      idempotencyKey: `producer-request:${contractId}:${producerId}`
+    });
+    const compiled = compileAndRecordUnlocked(runId, state);
+    saveState(state);
+    return { producer_id: producerId, status: 'REQUESTED', event_ref: `sha256:${event.event_hash}`, compiled };
+  });
+}
+
+export function evaluateClaimGate(capability, contractId, gateId) {
+  const { runId } = requireParent(capability);
+  return withLock(lockPath(runId), () => {
+    const state = loadState(runId);
+    assert(state.claim_contract?.contract_id === contractId, 'CLAIM_CONTRACT_NOT_FOUND');
+    assert(state.claim_contract.declared_gate_ids.includes(gateId), 'GATE_NOT_DECLARED');
+    const compiled = compileAndRecordUnlocked(runId, state);
+    appendEventUnlocked(runId, state, {
+      type: 'gate_evaluated',
+      origin: 'runtime_hook',
+      payload: {
+        ...compiled,
+        gate_id: gateId,
+        claim_contract_ref: state.claim_contract.claim_contract_ref,
+        fold_version: CURRENT_FOLD_VERSION
+      },
+      idempotencyKey: `gate-evaluated:${contractId}:${gateId}:${compiled.input_digest}`
+    });
+    saveState(state);
+    return { gate_id: gateId, ...compiled };
+  });
+}
+
+export function claimInlineAdvisory(capability) {
+  const runId = activeRunFor(capability);
+  if (!runId) return null;
+  return withLock(lockPath(runId), () => {
+    const state = loadState(runId);
+    recoverClaimControlStateUnlocked(runId, state);
+    assert(state.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
+    if (state.sealed || !state.claim_contract) return null;
+    const compiled = compileAndRecordUnlocked(runId, state);
+    const requestedSupported = compiled.state_results?.[state.claim_contract.requested_state]?.supported === true;
+    const prior = state.claim_diagnostic;
+    if (requestedSupported) {
+      if (prior?.status === 'OPEN') {
+        appendEventUnlocked(runId, state, {
+          type: 'diagnostic_resolved',
+          origin: 'runtime_hook',
+          payload: {
+            diagnostic_id: prior.diagnostic_id,
+            diagnostic_status: 'RESOLVED',
+            claim_contract_ref: state.claim_contract.claim_contract_ref,
+            input_digest: compiled.input_digest
+          },
+          idempotencyKey: `diagnostic-resolved:${prior.diagnostic_id}:${compiled.input_digest}`
+        });
+        state.claim_diagnostic = { ...prior, status: 'RESOLVED', input_digest: compiled.input_digest };
+        saveState(state);
+      }
+      return null;
+    }
+    const gateId = state.claim_contract.declared_gate_ids[0];
+    const fingerprint = blockerFingerprint(state.claim_contract, gateId, compiled);
+    if (prior?.status === 'OPEN' && prior.blocker_fingerprint === fingerprint) {
+      saveState(state);
+      return null;
+    }
+    const diagnosticId = `diag_${fingerprint.slice(0, 24)}`;
+    const supported = compiled.highest_supported_state || 'NO_SUPPORTED_STATE';
+    const message = `Lyhna inline claim check: evidence supports ${supported}, not requested ${state.claim_contract.requested_state}. Missing: ${compiled.missing.join(', ') || 'none named'}. Next verifier: ${compiled.next_verifier}.`;
+    appendEventUnlocked(runId, state, {
+      type: 'diagnostic_emitted',
+      origin: 'runtime_hook',
+      payload: {
+        diagnostic_id: diagnosticId,
+        diagnostic_status: 'OPEN',
+        claim_contract_ref: state.claim_contract.claim_contract_ref,
+        input_digest: compiled.input_digest,
+        blocker_fingerprint: fingerprint,
+        supported_state: compiled.highest_supported_state,
+        requested_state: state.claim_contract.requested_state,
+        missing: compiled.missing,
+        next_verifier: compiled.next_verifier,
+        message
+      },
+      idempotencyKey: `diagnostic:${fingerprint}`
+    });
+    state.claim_diagnostic = { diagnostic_id: diagnosticId, status: 'OPEN', input_digest: compiled.input_digest, blocker_fingerprint: fingerprint };
+    saveState(state);
+    return message;
+  });
+}
+
+export function requestClose(capability, reason) {
+  const { runId } = requireParent(capability);
+  return withLock(lockPath(runId), () => {
+    const state = loadState(runId);
+    const requestOrdinal = parseLedger(runId).events.filter((event) => event.type === 'close_requested').length + 1;
+    const requestId = `close_${sha256(canonicalJson({ run_id: runId, ordinal: requestOrdinal })).slice(0, 24)}`;
+    const payload = state.privacy_mode === 'proof'
+      ? { request_id: requestId, text_withheld: true }
+      : { request_id: requestId, reason: structuralSummary(reason, 'Close reason'), reason_ref: sha256(String(reason || '')) };
     appendEventUnlocked(runId, state, { type: 'close_requested', origin: 'mcp_routed', payload, idempotencyKey: `close:${sha256(canonicalJson(payload))}` });
     state.close_requested = payload;
     saveState(state);
@@ -1151,11 +1661,19 @@ export function requestClose(capability, reason) {
 export function sealChildByAgent({ sessionId, agentId, hookPayload = null, hookDeliveryKey = null }) {
   const parentCapability = findParentCapabilityBySession(sessionId);
   if (!parentCapability) return null;
-  const runId = activeRunFor(parentCapability);
-  if (!runId) return null;
+  const parentRecord = getCapability(parentCapability);
   const agentHash = sha256(String(agentId || ''));
+  const routePath = migratedChildRoutePath(parentRecord.session_hash, agentHash);
+  const migratedRoute = readJson(routePath, null);
+  const runId = activeRunFor(parentCapability) || migratedRoute?.run_id;
+  if (!runId) return null;
+  const finishRoute = (value) => {
+    if (migratedRoute) rmSync(routePath, { force: true });
+    return value;
+  };
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
+    recoverClaimControlStateUnlocked(runId, current);
     let stopEvent = null;
     if (hookPayload) {
       stopEvent = appendEventUnlocked(runId, current, {
@@ -1185,20 +1703,20 @@ export function sealChildByAgent({ sessionId, agentId, hookPayload = null, hookD
     if (evaluation?.child_receipt_id) {
       atomicWriteJson(receiptIndexPath(evaluation.child_receipt_id), { receipt_id: evaluation.child_receipt_id, run_id: runId });
       saveState(current);
-      return withChildReceiptPath(runId, current.child_receipts[evaluation.child_receipt_id]);
+      return finishRoute(withChildReceiptPath(runId, current.child_receipts[evaluation.child_receipt_id]));
     }
 
     const assignedEvaluation = Object.values(current.evaluations).find((item) => item.child_agent_hash === agentHash);
     if (!evaluation && !child) {
       saveState(current);
-      return null;
+      return finishRoute(null);
     }
 
     const receiptId = evaluation ? `child_${evaluation.id}` : child.id;
     if (!evaluation && child.receipt_id) {
       atomicWriteJson(receiptIndexPath(child.receipt_id), { receipt_id: child.receipt_id, run_id: runId });
       saveState(current);
-      return withChildReceiptPath(runId, current.child_receipts[child.receipt_id]);
+      return finishRoute(withChildReceiptPath(runId, current.child_receipts[child.receipt_id]));
     }
     const role = evaluation || assignedEvaluation ? 'evaluator' : 'delegated_agent';
     const status = evaluation ? evaluation.status : 'STOP_OBSERVED';
@@ -1268,7 +1786,7 @@ export function sealChildByAgent({ sessionId, agentId, hookPayload = null, hookD
     }
     atomicWriteJson(receiptIndexPath(receiptId), { receipt_id: receiptId, run_id: runId });
     saveState(current);
-    return withChildReceiptPath(runId, current.child_receipts[receiptId]);
+    return finishRoute(withChildReceiptPath(runId, current.child_receipts[receiptId]));
   });
 }
 
@@ -1312,11 +1830,58 @@ export function readSealedReceipt(capability, receiptId) {
   });
 }
 
+function finalizeRunSealUnlocked(runId, current, terminalStatus = 'SEALED', sealPayload = {}) {
+  appendEventUnlocked(runId, current, {
+    type: 'run_sealed',
+    origin: 'runtime_hook',
+    payload: {
+      status: terminalStatus,
+      receipt_renderer: ADAPTER_VERSION,
+      continuation_fold_version: CURRENT_FOLD_VERSION,
+      ...sealPayload
+    },
+    idempotencyKey: `seal:${runId}`
+  });
+  const { events, tip } = parseLedger(runId);
+  stripLegacyChildReceiptPaths(current);
+  current.sealed = true;
+  current.terminal_status = terminalStatus;
+  current.ledger_count = events.length;
+  current.ledger_tip = tip;
+  saveState(current);
+  const receiptJson = renderReceiptJson(current, events);
+  const receiptMarkdown = renderReceiptMarkdown(current, events);
+  atomicWriteText(join(runDir(runId), 'receipt.json'), receiptJson);
+  atomicWriteText(join(runDir(runId), 'RECEIPT.md'), receiptMarkdown);
+  const capsule = writeContinuationArtifacts(runId, current, events);
+  atomicWriteJson(capsuleIndexPath(capsule.capsule_ref), { run_id: runId, capsule_ref: capsule.capsule_ref });
+  atomicWriteJson(anchorPath(runId), {
+    run_id: runId,
+    final_seq: current.ledger_count,
+    final_hash: current.ledger_tip,
+    state_hash: sha256(canonicalJson(current)),
+    receipt_json_hash: sha256(receiptJson),
+    receipt_markdown_hash: sha256(receiptMarkdown),
+    receipt_renderer: ADAPTER_VERSION
+  });
+  dropCheckpointAnchor(runId);
+  return {
+    status: terminalStatus,
+    run_id: runId,
+    receipt_path: join(runDir(runId), 'RECEIPT.md'),
+    handoff_path: join(runDir(runId), 'HANDOFF.md'),
+    continuation_path: join(runDir(runId), 'continuation.json'),
+    capsule_ref: capsule.capsule_ref
+  };
+}
+
 export function checkpointOrSeal(capability, deliveryKey = null) {
   const runId = activeRunFor(capability);
   if (!runId) return { status: 'NO_ACTIVE_RUN' };
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
+    recoverClaimControlStateUnlocked(runId, current);
+    assert(current.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
     // Adopt a durable terminal run_sealed (crash after the seal append, before state/anchor) BEFORE the
     // replay guard, which would otherwise short-circuit and leave an unsealed run no later Stop repairs.
     const { events: preEvents } = adoptTerminalLedgerSeal(runId, current);
@@ -1360,6 +1925,147 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     if (!current.close_requested) {
       writeCheckpointArtifacts(runId, current);
       return { status: 'CHECKPOINTED', run_id: runId };
+    }
+    if (current.claim_contract) {
+      const compiled = compileAndRecordUnlocked(runId, current);
+      const gateId = current.claim_contract.declared_gate_ids[0];
+      const requestedSupported = compiled.state_results?.[current.claim_contract.requested_state]?.supported === true;
+      const blockers = [
+        ...compiled.missing.map((item) => `MISSING_${item}`),
+        ...compiled.pending_producers.map((item) => `PENDING_${item}`),
+        ...compiled.contradictions
+      ].sort();
+
+      if (!requestedSupported || blockers.length) {
+        const fingerprint = blockerFingerprint(current.claim_contract, gateId, compiled);
+        const { events: attemptEvents } = parseLedger(runId);
+        const attemptSequence = attemptEvents.filter((event) => event.type === 'closeout_attempted').length + 1;
+        const latestAttempt = [...attemptEvents].reverse().find((event) => event.type === 'closeout_attempted');
+        // Ordinals count only the maximal contiguous streak of one fingerprint: A-B-A is A1,B1,A1.
+        const ordinal = latestAttempt?.payload?.blocker_fingerprint === fingerprint
+          ? Number(latestAttempt.payload.ordinal || 0) + 1
+          : 1;
+        appendEventUnlocked(runId, current, {
+          type: 'closeout_attempted',
+          origin: 'runtime_hook',
+          payload: {
+            claim_contract_ref: current.claim_contract.claim_contract_ref,
+            gate_id: gateId,
+            blocker_fingerprint: fingerprint,
+            ordinal,
+            attempt_sequence: attemptSequence,
+            input_digest: compiled.input_digest,
+            eligible_evidence_frontier: compiled.eligible_evidence_frontier,
+            material_control_frontier: compiled.material_control_frontier,
+            blockers
+          },
+          idempotencyKey: `closeout-attempt:${current.claim_contract.contract_id}:${attemptSequence}`
+        });
+        const supported = compiled.highest_supported_state || 'NO_SUPPORTED_STATE';
+        const reason = `Lyhna evidence supports ${supported}, not requested ${current.claim_contract.requested_state}. Missing or conflicting evidence: ${blockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${compiled.next_verifier}.`;
+        const currentDiagnostic = current.claim_diagnostic?.status === 'OPEN'
+          && current.claim_diagnostic.blocker_fingerprint === fingerprint
+          ? current.claim_diagnostic
+          : null;
+        const diagnosticId = currentDiagnostic?.diagnostic_id || `diag_${fingerprint.slice(0, 24)}`;
+        const existingDiagnostic = currentDiagnostic || parseLedger(runId).events.find((event) => event.idempotency_key === `diagnostic:${fingerprint}`);
+        if (!existingDiagnostic) {
+          appendEventUnlocked(runId, current, {
+            type: 'diagnostic_emitted',
+            origin: 'runtime_hook',
+            payload: {
+              diagnostic_id: diagnosticId,
+              diagnostic_status: 'OPEN',
+              claim_contract_ref: current.claim_contract.claim_contract_ref,
+              input_digest: compiled.input_digest,
+              blocker_fingerprint: fingerprint,
+              supported_state: compiled.highest_supported_state,
+              requested_state: current.claim_contract.requested_state,
+              next_verifier: compiled.next_verifier,
+              message: reason
+            },
+            idempotencyKey: `diagnostic:${fingerprint}`
+          });
+        }
+        const diagnosticEvent = currentDiagnostic || existingDiagnostic;
+        current.claim_diagnostic = {
+          diagnostic_id: diagnosticId,
+          status: 'OPEN',
+          input_digest: diagnosticEvent?.payload?.input_digest || diagnosticEvent?.input_digest || compiled.input_digest,
+          blocker_fingerprint: fingerprint
+        };
+        if (ordinal < current.claim_contract.caps.max_unsupported_attempts) {
+          saveState(current);
+          writeCheckpointArtifacts(runId, current);
+          return {
+            status: 'CLOSE_DEFERRED',
+            run_id: runId,
+            blockers,
+            decision: 'block',
+            reason,
+            closeout_attempt_ordinal: ordinal,
+            compiled
+          };
+        }
+
+        const envelope = {
+          envelope_id: `closeout_${sha256(canonicalJson({ run_id: runId, fingerprint, ordinal })).slice(0, 24)}`,
+          outcome: 'CLOSED_UNSUPPORTED',
+          profile_id: current.claim_contract.profile_id,
+          requested_state: current.claim_contract.requested_state,
+          supported_state: compiled.highest_supported_state,
+          scope_ref: current.claim_contract.objective_ref,
+          eligible_evidence_frontier: compiled.eligible_evidence_frontier,
+          material_control_frontier: compiled.material_control_frontier,
+          input_digest: compiled.input_digest,
+          blockers,
+          next_verifier: compiled.next_verifier,
+          narrative: reason
+        };
+        const envelopeEvent = appendEventUnlocked(runId, current, {
+          type: 'closeout_envelope_generated',
+          origin: 'runtime_hook',
+          payload: envelope,
+          idempotencyKey: `closeout-envelope:${envelope.envelope_id}`
+        });
+        current.closeout_envelope = { ...envelopeEvent.payload, event_ref: `sha256:${envelopeEvent.event_hash}` };
+        saveState(current);
+        return finalizeRunSealUnlocked(runId, current, 'CLOSED_UNSUPPORTED', {
+          claim_contract_ref: current.claim_contract.claim_contract_ref,
+          supported_state: compiled.highest_supported_state,
+          requested_state: current.claim_contract.requested_state,
+          closeout_envelope_ref: current.closeout_envelope.event_ref
+        });
+      }
+
+      const envelope = {
+        envelope_id: `closeout_${sha256(canonicalJson({ run_id: runId, input_digest: compiled.input_digest })).slice(0, 24)}`,
+        outcome: 'SUPPORTED',
+        profile_id: current.claim_contract.profile_id,
+        requested_state: current.claim_contract.requested_state,
+        supported_state: compiled.highest_supported_state,
+        scope_ref: current.claim_contract.objective_ref,
+        eligible_evidence_frontier: compiled.eligible_evidence_frontier,
+        material_control_frontier: compiled.material_control_frontier,
+        input_digest: compiled.input_digest,
+        blockers: [],
+        next_verifier: compiled.next_verifier,
+        narrative: `Evidence supports ${compiled.highest_supported_state} for profile ${current.claim_contract.profile_id}.`
+      };
+      const envelopeEvent = appendEventUnlocked(runId, current, {
+        type: 'closeout_envelope_generated',
+        origin: 'runtime_hook',
+        payload: envelope,
+        idempotencyKey: `closeout-envelope:${envelope.envelope_id}`
+      });
+      current.closeout_envelope = { ...envelopeEvent.payload, event_ref: `sha256:${envelopeEvent.event_hash}` };
+      saveState(current);
+      return finalizeRunSealUnlocked(runId, current, 'SEALED', {
+        claim_contract_ref: current.claim_contract.claim_contract_ref,
+        supported_state: compiled.highest_supported_state,
+        requested_state: current.claim_contract.requested_state,
+        closeout_envelope_ref: current.closeout_envelope.event_ref
+      });
     }
     const evaluations = Object.values(current.evaluations);
     const closingSnapshots = Object.values(current.pr_snapshots).filter((snapshot) => snapshot.status === 'CONSISTENT');
@@ -1416,6 +2122,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     const { events, tip } = parseLedger(runId);
     stripLegacyChildReceiptPaths(current);
     current.sealed = true;
+    current.terminal_status = 'SEALED';
     current.ledger_count = events.length;
     current.ledger_tip = tip;
     saveState(current);

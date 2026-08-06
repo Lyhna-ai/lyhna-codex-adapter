@@ -4,6 +4,7 @@ import { sanitizeHook } from '../src/redact.mjs';
 import {
   activeRunFor,
   checkpointOrSeal,
+  claimInlineAdvisory,
   findParentCapabilityBySession,
   mintChild,
   mintSession,
@@ -66,15 +67,30 @@ function main(input) {
       hookDeliveryKey: `hook:${event}:${deliveryKey}`
     });
   }
+  if (event === 'PostToolUse' && parentCapability) {
+    const advisory = claimInlineAdvisory(parentCapability);
+    if (advisory) return contextOutput('PostToolUse', advisory);
+  }
   if (event === 'Stop' && parentCapability) {
     const deliveryKey = input.event_id || input.turn_id || sha256(JSON.stringify(sanitizeHook(input)));
-    checkpointOrSeal(parentCapability, deliveryKey);
+    const result = checkpointOrSeal(parentCapability, deliveryKey);
+    if (result?.decision === 'block') return { decision: 'block', reason: result.reason };
   }
   return {};
 }
 
+let hookInput = {};
 try {
-  process.stdout.write(`${JSON.stringify(main(readInput()))}\n`);
+  hookInput = readInput();
+  process.stdout.write(`${JSON.stringify(main(hookInput))}\n`);
 } catch (error) {
-  process.stdout.write(`${JSON.stringify({ systemMessage: `Lyhna hook did not record this event (${error.code || 'HOOK_ERROR'}). No execution claim was created.` })}\n`);
+  const code = error.code || 'HOOK_ERROR';
+  if ((hookInput.hook_event_name || hookInput.event_name) === 'Stop') {
+    process.stdout.write(`${JSON.stringify({
+      decision: 'block',
+      reason: `BLOCKED_TRANSPORT: Lyhna could not persist or verify the closeout boundary (${code}). The run remains unsupported; repair transport or ledger integrity before closing.`
+    })}\n`);
+  } else {
+    process.stdout.write(`${JSON.stringify({ systemMessage: `Lyhna hook did not record this event (${code}). No execution claim was created.` })}\n`);
+  }
 }

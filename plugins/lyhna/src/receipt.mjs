@@ -322,7 +322,7 @@ export function buildReceipt(state, events) {
     schema: 'lyhna.codex.adapter-receipt.v0',
     run_id: state.id,
     mode: state.mode,
-    status: state.sealed ? 'SEALED' : 'OPEN',
+    status: state.sealed ? (state.terminal_status || 'SEALED') : 'OPEN',
     build_record: state.mode === 'pr_only' ? 'unavailable' : 'witnessed_within_configured_coverage',
     objective: state.objective,
     ...(privacyMode !== 'proof' && state.objective_text ? { objective_text: state.objective_text } : {}),
@@ -332,6 +332,14 @@ export function buildReceipt(state, events) {
     open_predecessors: buildOpenPredecessors(state),
     coverage: buildCoverage(state, events),
     privacy_mode: privacyMode,
+    ...(state.claim_contract ? {
+      claim_compiler: {
+        contract: state.claim_contract,
+        compiled_state: state.compiled_claim || null,
+        diagnostic: state.claim_diagnostic || null,
+        closeout_envelope: state.closeout_envelope || null
+      }
+    } : {}),
     evidence: events.map((event) => ({
       seq: event.seq,
       ref: `sha256:${event.event_hash}`,

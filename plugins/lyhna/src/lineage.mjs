@@ -202,6 +202,11 @@ function stateAtArchivedStop(trusted, events) {
     ledger_count: events.length,
     ledger_tip: events.at(-1)?.event_hash ?? ZERO_HASH,
     close_requested: null,
+    claim_contract: null,
+    claim_profile: null,
+    compiled_claim: null,
+    claim_diagnostic: null,
+    closeout_envelope: null,
     pr_snapshots: {},
     evaluations: {},
     children: {},
@@ -301,10 +306,26 @@ function stateAtArchivedStop(trusted, events) {
       const evaluation = Object.values(state.evaluations)
         .find((item) => item.child_receipt_id === payload.receipt_id);
       if (evaluation) evaluation.child_receipt_retrieved = true;
+    } else if (event.type === 'claim_contract_declared') {
+      state.claim_contract = payload.contract ? { ...payload.contract, claim_contract_ref: `sha256:${event.event_hash}` } : null;
+      state.claim_profile = payload.profile_structural ?? null;
+    } else if (event.type === 'claim_compiled') {
+      state.compiled_claim = { ...payload, compiled_event_ref: `sha256:${event.event_hash}` };
+    } else if (event.type === 'diagnostic_emitted') {
+      state.claim_diagnostic = {
+        diagnostic_id: payload.diagnostic_id,
+        status: payload.diagnostic_status || 'OPEN',
+        input_digest: payload.input_digest
+      };
+    } else if (event.type === 'diagnostic_resolved') {
+      if (state.claim_diagnostic?.diagnostic_id === payload.diagnostic_id) state.claim_diagnostic.status = 'RESOLVED';
+    } else if (event.type === 'closeout_envelope_generated') {
+      state.closeout_envelope = { ...payload, event_ref: `sha256:${event.event_hash}` };
     } else if (event.type === 'close_requested') {
       state.close_requested = payload;
     } else if (event.type === 'run_sealed') {
       state.sealed = true;
+      state.terminal_status = payload.status || 'SEALED';
     }
   }
   return state;

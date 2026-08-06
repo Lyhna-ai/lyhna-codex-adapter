@@ -6,6 +6,8 @@ import {
   beginEvaluation as beginEvaluationStore,
   beginRun,
   claimEvaluation,
+  declareClaimContract,
+  evaluateClaimGate,
   getCapability,
   isEvaluationFinished,
   listChildReceipts,
@@ -14,6 +16,7 @@ import {
   recordClaim,
   recordEvaluation as recordEvaluationStore,
   recordRejectedClaim,
+  requestClaimProducer,
   requestClose
 } from './store.mjs';
 
@@ -22,6 +25,13 @@ function requireSnapshot(state, snapshotId) {
   if (!snapshot) throw Object.assign(new Error('SNAPSHOT_NOT_FOUND'), { code: 'SNAPSHOT_NOT_FOUND' });
   return snapshot;
 }
+
+const OPTIONAL_TOOL_ARGUMENTS = {
+  begin_run: ['objective', 'privacy_mode', 'continues_from'],
+  record_claim: ['evidence_refs'],
+  begin_evaluation: ['trigger'],
+  record_evaluation: ['evidence_refs', 'checkout_head_after', 'checkout_clean_after', 'checkout_detached_after']
+};
 
 export const toolDefinitions = [
   ['begin_run', 'Start an explicitly requested Lyhna run. Use mode "full" whenever the request asks to build, change, fix, continue, or delegate work; use "pr_only" only for a solely retrospective examination of an existing PR; when ambiguous, choose "full". Pass continues_from with a prior capsule_ref when this window continues an earlier one.', ['session_capability', 'mode']],
@@ -33,7 +43,10 @@ export const toolDefinitions = [
   ['refresh_pr', 'Explicitly recheck whether a PR snapshot head is current.', ['session_capability', 'pr_snapshot_id']],
   ['list_child_receipts', 'List sealed child receipts for the active run.', ['session_capability']],
   ['read_sealed_receipt', 'Retrieve and mark a child receipt as read by the parent.', ['session_capability', 'receipt_id']],
-  ['request_close', 'Request parent sealing at the next Stop hook.', ['session_capability', 'reason']]
+  ['request_close', 'Request parent sealing at the next Stop hook.', ['session_capability', 'reason']],
+  ['declare_claim_contract', 'Declare the immutable, profile-bound completion contract for this run. May be called once.', ['session_capability', 'contract']],
+  ['request_claim_producer', 'Register one producer named by the immutable claim contract. A request is not evidence.', ['session_capability', 'contract_id', 'producer_id']],
+  ['evaluate_claim_gate', 'Compile the strongest state supported by witnessed evidence at a declared gate.', ['session_capability', 'contract_id', 'gate_id']]
 ].map(([name, description, required]) => ({
   name,
   description,
@@ -63,11 +76,24 @@ export const toolDefinitions = [
       checkout_detached_before: { type: 'boolean' },
       checkout_detached_after: { type: 'boolean' },
       receipt_id: { type: 'string' },
-      reason: { type: 'string' }
+      reason: { type: 'string' },
+      contract: { type: 'object' },
+      contract_id: { type: 'string' },
+      producer_id: { type: 'string' },
+      gate_id: { type: 'string' }
     },
     required
   }
-}));
+})).map((tool) => {
+  const allowed = new Set([...(tool.inputSchema.required || []), ...(OPTIONAL_TOOL_ARGUMENTS[tool.name] || [])]);
+  return {
+    ...tool,
+    inputSchema: {
+      ...tool.inputSchema,
+      properties: Object.fromEntries(Object.entries(tool.inputSchema.properties).filter(([key]) => allowed.has(key)))
+    }
+  };
+});
 
 export function createService({ githubRunner } = {}) {
   async function dispatch(name, args) {
@@ -168,6 +194,12 @@ export function createService({ githubRunner } = {}) {
           return readSealedReceipt(args.session_capability, args.receipt_id);
         case 'request_close':
           return requestClose(args.session_capability, args.reason);
+        case 'declare_claim_contract':
+          return declareClaimContract(args.session_capability, args.contract);
+        case 'request_claim_producer':
+          return requestClaimProducer(args.session_capability, args.contract_id, args.producer_id);
+        case 'evaluate_claim_gate':
+          return evaluateClaimGate(args.session_capability, args.contract_id, args.gate_id);
         default:
           throw Object.assign(new Error(`UNKNOWN_TOOL: ${name}`), { code: 'UNKNOWN_TOOL' });
       }

@@ -152,7 +152,11 @@ test('MCP stdio process initializes, lists tools, accepts a valid call, and reje
   const byId = Object.fromEntries(output.filter((item) => item.id !== undefined).map((item) => [item.id, item]));
   assert.equal(byId[1].result.serverInfo.name, 'lyhna-codex-adapter');
   assert.equal(byId[1].result.serverInfo.version, ADAPTER_VERSION);
-  assert.equal(byId[2].result.tools.length, 10);
+  assert.equal(byId[2].result.tools.length, 13);
+  assert.deepEqual(
+    byId[2].result.tools.slice(-3).map((tool) => tool.name),
+    ['declare_claim_contract', 'request_claim_producer', 'evaluate_claim_gate']
+  );
   assert.equal(byId[3].result.structuredContent.status, 'OPEN');
   assert.equal(byId[4].error.message, 'INVALID_ARGUMENTS');
   assert.equal(byId[6].error.message, 'INVALID_ARGUMENTS');

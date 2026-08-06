@@ -301,7 +301,7 @@ test('stale lock ownership is recovered; credentials never persist though the re
   const proofRun = beginRun(proofParent, { mode: 'full', objective: 'build the private customer feature', privacyMode: 'proof' });
   const proofReceipt = renderReceiptJson(getRunForTesting(proofRun.id).state, getRunForTesting(proofRun.id).events);
   assert(!proofReceipt.includes('build the private customer feature'), 'proof mode withholds the request');
-  assert(proofReceipt.includes('Invocation objective retained by hash'), 'proof mode keeps the structural summary');
+  assert(proofReceipt.includes('Objective withheld.'), 'proof mode keeps only the explicit withheld marker');
 });
 
 test('invocation capture recognizes a boundary Lyhna mention anywhere in the prompt', { concurrency: false }, (t) => {

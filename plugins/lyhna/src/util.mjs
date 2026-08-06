@@ -10,7 +10,9 @@ export const ORIGINS = new Set([
   'evaluator_reported',
   'github_observed',
   'imported',
-  'unobserved'
+  'unobserved',
+  'registered_probe',
+  'mock_or_test'
 ]);
 
 export function dataRoot() {

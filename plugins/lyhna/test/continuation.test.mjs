@@ -287,7 +287,7 @@ test('a resolving reference is never reported as supporting the claim', (t) => {
   assert.notEqual(claim.support, 'SUPPORTED', 'the current fold must never issue SUPPORTED');
 
   const capsule = buildContinuation(state, events);
-  assert.equal(capsule.continuation_fold_version, 'v1');
+  assert.equal(capsule.continuation_fold_version, 'v2');
   assert.deepEqual(capsule.settled, [], 'no builder claim is ever promoted into settled');
 });
 
@@ -788,7 +788,7 @@ test('an inherited archive declaring an unimplemented generation fails safe, not
 
   const priorEvents = rechainLedger(directory, (event) => {
     if (event.type === 'checkpoint_anchor' && event.payload?.covers_seq === stopOneCount - 1) {
-      event.payload.continuation_fold_version = 'v2';
+      event.payload.continuation_fold_version = 'v999';
     }
   });
   const statePath = join(directory, 'state.json');
@@ -1378,7 +1378,8 @@ test('proof mode projects the words away but keeps the verdict auditable', (t) =
   assert.equal(capsule.privacy_mode, 'proof');
   assert.equal(capsule.claims[0].statement_text, undefined);
   assert.equal(capsule.claims[0].support, 'UNSUPPORTED');
-  assert.ok(capsule.claims[0].statement_ref, 'the claim stays addressable by hash');
+  assert.ok(capsule.claims[0].builder_claim_id, 'the claim stays addressable by a non-prose supervisor identity');
+  assert.equal(capsule.claims[0].statement_ref, null, 'proof mode stores no prose-derived statement hash');
 
   const handoff = readFileSync(join(directory, 'HANDOFF.md'), 'utf8');
   assert.doesNotMatch(handoff, /I deployed the migration/);
@@ -1446,7 +1447,7 @@ test('proof mode withholds the request from a packet that leaves the machine', (
 
   const capsule = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8'));
   assert.equal(capsule.objective_text, undefined);
-  assert.match(capsule.objective, /retained by hash/);
+  assert.equal(capsule.objective, 'Objective withheld.');
 
   const handoff = readFileSync(join(directory, 'HANDOFF.md'), 'utf8');
   assert.doesNotMatch(handoff, /Port the judgment ledger/);
