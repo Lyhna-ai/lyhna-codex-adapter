@@ -301,6 +301,8 @@ test('newer malformed time blocks closeout until a newer valid observation resto
   const unproven = evaluateClaimGate(parent, declared.contract_id, 'closeout');
   assert.equal(unproven.highest_supported_state, 'LIVE_PROVEN', 'older valid evidence remains visible but not closeable');
   assert.equal(unproven.currentness, 'CURRENTNESS_UNPROVEN');
+  assert.match(claimInlineAdvisory(parent), /CURRENTNESS_UNPROVEN/);
+  assert.equal(claimInlineAdvisory(parent), null, 'unchanged currentness diagnostic is suppressed inline');
   requestClose(parent, 'Close only if currentness is witnessed.');
   const blocked = checkpointOrSeal(parent, 'currentness-stop-1');
   assert.equal(blocked.decision, 'block');
@@ -330,6 +332,8 @@ test('newer malformed time blocks closeout until a newer valid observation resto
 
   observe(run.id, declared, 'terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }, 'terminal-valid-new');
   assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'AS_WITNESSED');
+  assert.equal(claimInlineAdvisory(parent), null, 'restored currentness resolves the inline diagnostic without another warning');
+  assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'diagnostic_resolved').length, 1);
   assert.equal(checkpointOrSeal(parent, 'currentness-stop-2').status, 'SEALED');
 });
 

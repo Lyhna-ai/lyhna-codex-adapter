@@ -1705,8 +1705,14 @@ export function claimInlineAdvisory(capability) {
     if (state.sealed || !state.claim_contract) return null;
     const compiled = compileAndRecordUnlocked(runId, state);
     const requestedSupported = compiled.state_results?.[state.claim_contract.requested_state]?.supported === true;
+    const inlineBlockers = [
+      ...compiled.missing.map((item) => `MISSING_${item}`),
+      ...compiled.pending_producers.map((item) => `PENDING_${item}`),
+      ...compiled.contradictions,
+      ...(compiled.currentness === 'AS_WITNESSED' ? [] : ['CURRENTNESS_UNPROVEN'])
+    ].sort();
     const prior = state.claim_diagnostic;
-    if (requestedSupported) {
+    if (requestedSupported && inlineBlockers.length === 0) {
       if (prior?.status === 'OPEN') {
         appendEventUnlocked(runId, state, {
           type: 'diagnostic_resolved',
@@ -1732,7 +1738,7 @@ export function claimInlineAdvisory(capability) {
     }
     const diagnosticId = `diag_${fingerprint.slice(0, 24)}`;
     const supported = compiled.highest_supported_state || 'NO_SUPPORTED_STATE';
-    const message = `Lyhna inline claim check: evidence supports ${supported}, not requested ${state.claim_contract.requested_state}. Missing: ${compiled.missing.join(', ') || 'none named'}. Next verifier: ${compiled.next_verifier}.`;
+    const message = `Lyhna inline claim check: evidence supports ${supported}, not requested ${state.claim_contract.requested_state}. Blockers: ${inlineBlockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${compiled.next_verifier}.`;
     appendEventUnlocked(runId, state, {
       type: 'diagnostic_emitted',
       origin: 'runtime_hook',
