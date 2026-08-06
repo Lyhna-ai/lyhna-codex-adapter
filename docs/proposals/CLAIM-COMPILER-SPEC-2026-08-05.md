@@ -62,6 +62,14 @@ profile-defined. The first bundled profile is `software_release/v1`:
 4. `LIVE_PROVEN` — a dated registered canary observed the bounded terminal effect and any
    profile-required reconciliation or replay behavior.
 
+Each requirement declares an assurance class: `local`, `repository`, or `production`. In the
+bundled profile, `BUILT` requirements are local, `MERGED` requirements are repository, and every
+deployment/configuration/canary/terminal-effect requirement for `DEPLOYED` or `LIVE_PROVEN` is
+production. A production requirement is structurally invalid unless its sole eligible origin is
+`registered_probe` and it names the exact profile-authorized producer identity and subject binding.
+`github_observed`, `mcp_routed`, `runtime_hook`, evaluator output, imports, and agent narration can
+support their registered non-production classes but can never satisfy a production requirement.
+
 These nodes are not a universal ladder. Other projects provide validated profiles with their own
 internal prerequisite DAGs. Every profile must also declare an unambiguous ordered surface
 projection. Multiple incomparable supported internal nodes are returned as
@@ -91,7 +99,7 @@ requested_state
 declared_gate_ids
 named producer IDs and expected identities
 objective_ref
-verifier
+verifier_id
 caps
 run_privacy_mode_ref
 recurrence_scope_ref (required only when the profile enables recurrence)
@@ -100,6 +108,14 @@ recurrence_scope_ref (required only when the profile enables recurrence)
 `run_privacy_mode_ref` is copied by the supervisor from the chained `run_begun` event. It is not
 supplied or overridable by `declare_claim_contract`; an attempted privacy field is rejected by the
 closed tool schema. The run-anchored mode remains the single authority.
+
+Every proof-retained contract value uses a closed structural schema. State and gate IDs must exist
+in the frozen profile; producer and `verifier_id` values must exist in the registered profile
+registry; caps are bounded numeric/enumerated fields; and `contract_id`, `objective_ref`, and
+`recurrence_scope_ref` are strict opaque references issued independently of free text. An objective
+with no independent structural reference uses only `text_withheld`, not a digest of its prose.
+Unknown keys, free-text verifier values, invalid opaque refs, and text smuggled into any structural
+field are rejected before event hashing in `proof` mode.
 
 The official completion result is a generated closeout envelope. Free-form prose is neither parsed
 nor accepted as completion evidence. Generated language always states profile, state, scope, and
@@ -122,12 +138,13 @@ compiler terminal state, and seals under the existing evidence-scoped rules. The
 agent-facing `submit_evidence`, `record_probe`, or contract-amendment tool. `tools/list` must retain
 all ten shipped tools and expose the three additions with backward-compatible existing schemas.
 
-The existing `claim_evaluation` interface is the issuance boundary for evaluator finding
-submissions. A v2 evaluation request carries a bounded `finding_slot_cap`; on a successful claim,
-the supervisor persists and returns that many child-bound `submission_ref` values in an additive
-structured-result field. Legacy claims omit the field and retain their existing result shape.
-`record_evaluation` consumes those refs as defined below; no hook is expected to inject an argument
-after the child constructs the call.
+The existing `claim_evaluation` interface is the issuance boundary for evaluator finding and
+verdict submissions. A v2 evaluation request carries a bounded `finding_slot_cap`; on a successful
+claim, the supervisor persists and returns that many child-bound finding `submission_ref` values
+plus exactly one child-bound `verdict_submission_ref` in an additive structured-result field.
+Legacy claims omit the field and retain their existing result shape. `record_evaluation` consumes
+those refs as defined below; no hook is expected to inject an argument after the child constructs
+the call.
 
 Evidence enters through supervisor-owned hooks, the GitHub observer, or registered project probe
 adapters. A producer request is not evidence.
@@ -143,6 +160,7 @@ producer_requested
 producer_terminal
 evaluation_submission_issued
 evaluation_submission_consumed
+evaluation_verdict_submitted
 continuation_lease_transferred
 gate_sample_observed
 closeout_attempted
@@ -158,9 +176,9 @@ evidence_observed
 An eligible envelope must have an event kind from the closed observer/probe registry, an allowed
 origin, a registered producer identity, the profile-required identity bindings, and a source
 cursor. `agent_reported`, `evaluator_reported`, `producer_requested`, `producer_terminal`,
-`evaluation_submission_issued`, `evaluation_submission_consumed`, `gate_sample_observed`,
-`continuation_lease_transferred`, `closeout_attempted`, and `claim_superseded` never satisfy a
-requirement.
+`evaluation_submission_issued`, `evaluation_submission_consumed`,
+`evaluation_verdict_submitted`, `gate_sample_observed`, `continuation_lease_transferred`,
+`closeout_attempted`, and `claim_superseded` never satisfy a requirement.
 Reviewer conclusions become eligible only through an `evidence_observed` envelope bound to a
 separately sealed evaluator child receipt; evaluator narration alone remains ineligible.
 
@@ -204,7 +222,8 @@ Profiles choose only from the closed eligible observer/probe registry and name a
 producer identities, and identity bindings for every requirement. Profile validation rejects any
 requirement that names a control/history or derived event family. `mock_or_test` can exercise logic
 but cannot satisfy production requirements. An agent-reported payload marked production remains
-agent-reported and ineligible.
+agent-reported and ineligible. A production-class requirement additionally rejects every origin
+except `registered_probe` and every producer other than its exact profile-authorized identity.
 
 ## Deterministic compiler output
 
@@ -276,6 +295,17 @@ stores full commands, output, tokens, environment, or private paths embedded in 
 `proof`, the finding summary is projected away; finding ID, severity/count, verdict, and evidence
 references remain. When the child seals, its terminal event binds those existing finding IDs to the
 sealed evaluator receipt ref; no ID is rewritten.
+
+The same backward-compatible `record_evaluation` schema accepts an optional structured `verdict`
+with the issued `verdict_submission_ref`; for a v2 verdict submission the prose `finding` field may
+be omitted. Consumption appends one `evaluation_verdict_submitted` control event bound to the
+evaluation request, child capability, exact head, review type, and closed verdict enum. `CLEAN` is
+accepted only when zero finding slots were consumed. `FINDINGS` requires at least one consumed
+finding ID. `INVALID` and `STALE` carry their structural reason code and refs. Replaying the verdict
+ref returns the prior structured result without another append; a different or second verdict ref
+is rejected. If `SubagentStop` occurs before a valid verdict submission, the producer terminates
+`INVALID` with `VERDICT_MISSING`; absence of findings is never interpreted as `CLEAN`. Child sealing
+then binds the submitted verdict and finding IDs to the sealed evaluator receipt.
 
 The default software-release quiet barrier requires two primary samples at least 120 witnessed
 seconds apart with identical profile-requirements and contract hashes, exact head, producer statuses, reviewer
@@ -353,7 +383,7 @@ predecessor run lock, `begin_run(..., continues_from: capsule_ref)` must validat
 capsule is the current published face, re-walk its chain, and reconstruct the complete immutable
 contract and control state. The capsule includes the canonical structural profile projection and
 `profile_requirements_hash`, optional mode-allowed display projection/hash, contract ID,
-`objective_ref`, requested state, gate IDs, producer identities, verifier, caps,
+`objective_ref`, requested state, gate IDs, producer identities, `verifier_id`, caps,
 `run_privacy_mode_ref`, `recurrence_scope_ref`, compiled state, pending producer cursors, unresolved
 diagnostics and resolutions, blocker fingerprint and close-attempt ordinal, quiet-period samples,
 gate-sample cursors, and unresolved enforcement refs.
@@ -378,7 +408,8 @@ named prior record. Post-seal activity without explicit invocation creates no Ly
 
 ## Recurrence reducer
 
-Profiles register stable `failure_class_id` values. A recurrence-enabled contract also declares a
+Profiles register stable failure entries containing `failure_class_id` and a closed structural
+`required_verifier_id`. A recurrence-enabled contract also declares a
 stable structural `recurrence_scope_ref` for the project or work domain; free-form objective text
 cannot supply it. A counted incident is an `evidence_observed` envelope from the profile-registered
 incident observer or probe, carrying the authorized producer identity, source cursor, failure class,
@@ -396,9 +427,10 @@ When one initial incident plus two distinct confirmed recurrences are first obse
 destination is eligible only if the current explicitly invoked open contract declares the same
 `profile_requirements_hash` and `recurrence_scope_ref` and its profile registers that exact
 `failure_class_id`. The reducer must append exactly one derived `ENFORCEMENT_REQUIRED` obligation
-to that eligible run. It carries the
-failure class, `recurrence_frontier`, sorted incident/contract refs, and per-ledger tips instead of a
-single `claim_contract_ref`. No source ledger is modified, and a sealed current run cannot receive
+to that eligible run. It carries the failure class, its profile-bound `required_verifier_id`,
+`recurrence_frontier`, sorted incident/contract refs, and per-ledger tips instead of a single
+`claim_contract_ref`. Proof projection and v2 continuation retain that verifier ID beside the
+unresolved obligation ref. No source ledger is modified, and a sealed current run cannot receive
 it. The supervisor snapshots two canonical sorted sets from the complete local open-and-sealed run
 index for the exact tuple `profile_requirements_hash`, `recurrence_scope_ref`, and
 `failure_class_id`: incident candidates and obligation candidates, including open runs that have
@@ -459,19 +491,23 @@ invalidates every earlier review. PR #13's gate mapping is repository
 and package version unchanged at `0.1.32`.
 
 Required mutations include derived self-evidence, a profile attempting to accept a control event,
-forged control events and production payloads, production-shaped mocks, builder/same-capability/
+forged control events and production payloads, production-shaped mocks, rejection of
+`github_observed`/`mcp_routed` production evidence and wrong registered-probe identities,
+builder/same-capability/
 attached-checkout review, actor and head mismatch, pending and late-finding reviewers, decisive
 page-two GitHub data, truncated pagination and missing final cursors, a diamond profile with
 ambiguous surface projection, deletion of a declared custom profile, cross-process diagnostic
 deduplication and resolution, persisted host-issued evaluator submission slots, wrong-child/ref
 rejection, write-time prose-independent finding IDs, sealed-receipt binding, legitimate
-duplicate-text findings, and consumed-slot replay deduplication,
+duplicate-text findings, consumed-slot replay deduplication, structured `CLEAN` and `FINDINGS`
+verdict submissions, verdict replay, and `VERDICT_MISSING` on silent child Stop,
 three cross-process Stop
 attempts with one stable blocker fingerprint, eligible evidence resetting that fingerprint,
 material control changing compiler state without satisfying evidence, evaluator command/argument
 or finding-prose leakage, recurrence across three sealed source ledgers with no post-seal append,
 privacy-independent structural profile identity, per-failure-class recurrence thresholds,
-supervisor-derived incident identity and cross-run duplicate-incident suppression,
+supervisor-derived incident identity, cross-run duplicate-incident suppression, and propagation of
+the profile-bound `required_verifier_id` into obligation and continuation,
 recurrence-scope and destination-contract separation, atomic incident/obligation set resampling
 including open incident and obligation runs before their first Stop, concurrent promotion
 deduplication under a data-root-wide lock with two eligible destination runs, mandatory
@@ -481,7 +517,8 @@ supersession and invalid
 supersession rejection, proof-mode removal of objective/statement text and prose-derived refs from
 `run_begun` and `builder_claim`, projection of evaluator findings and every other existing or new
 v2-writer event type plus profile/display and downstream artifact leakage, unknown text-field
-rejection, open-contract same-run lease rotation with complete contract/control reconstruction,
+rejection, proof-mode prose smuggling through `objective_ref`, `verifier_id`, caps, or other
+structural contract fields, open-contract same-run lease rotation with complete contract/control reconstruction,
 stale or unavailable predecessor rejection, revoked-capability write rejection, inherited
 diagnostics, attempts, producers, quiet samples, immediate gate enforcement, and second-declaration
 rejection, no-contract v1 close compatibility,
