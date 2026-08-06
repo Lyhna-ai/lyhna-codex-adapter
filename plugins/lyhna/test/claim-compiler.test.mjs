@@ -271,6 +271,46 @@ test('undeclared producers and malformed observation time never support a claim'
   assert.equal(compiled.currentness, 'CURRENTNESS_UNPROVEN');
 });
 
+test('newer malformed time blocks closeout until a newer valid observation restores currentness', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-currentness-gate', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Require witnessed currentness at closeout.' });
+  const declared = declareClaimContract(parent, contract());
+  seedBuilt(run.id, declared);
+  observe(run.id, declared, 'merge_identity', 'merge_identity_observed', 'github_observed', 'software_release/repository', { source_ref: 'sha256:source', base_ref: 'sha256:main', merge_ref: 'sha256:merge' });
+  observe(run.id, declared, 'deployment_identity', 'deployment_identity_observed', 'registered_probe', 'software_release/deployment', { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' });
+  observe(run.id, declared, 'configuration_present', 'configuration_presence_observed', 'registered_probe', 'software_release/deployment', { artifact_ref: 'sha256:artifact', configuration_ref: 'sha256:config' });
+  observe(run.id, declared, 'registered_canary', 'registered_canary_observed', 'registered_probe', 'software_release/canary', { artifact_ref: 'sha256:artifact', canary_ref: 'sha256:canary' });
+  observe(run.id, declared, 'terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }, 'terminal-valid-old');
+  appendEvent(run.id, {
+    type: 'evidence_observed',
+    origin: 'registered_probe',
+    payload: {
+      contract_id: declared.contract_id,
+      profile_requirements_hash: declared.profile_requirements_hash,
+      requirement_id: 'terminal_canary_state',
+      event_kind: 'terminal_canary_state_observed',
+      producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      source_cursor: 'cursor-terminal-malformed-new',
+      observed_at: 'not-a-timestamp',
+      subject_binding: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
+    },
+    idempotencyKey: 'terminal-malformed-new'
+  });
+  const unproven = evaluateClaimGate(parent, declared.contract_id, 'closeout');
+  assert.equal(unproven.highest_supported_state, 'LIVE_PROVEN', 'older valid evidence remains visible but not closeable');
+  assert.equal(unproven.currentness, 'CURRENTNESS_UNPROVEN');
+  requestClose(parent, 'Close only if currentness is witnessed.');
+  const blocked = checkpointOrSeal(parent, 'currentness-stop-1');
+  assert.equal(blocked.decision, 'block');
+  assert(blocked.blockers.includes('CURRENTNESS_UNPROVEN'));
+
+  observe(run.id, declared, 'terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }, 'terminal-valid-new');
+  assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'AS_WITNESSED');
+  assert.equal(checkpointOrSeal(parent, 'currentness-stop-2').status, 'SEALED');
+});
+
 test('unsupported closeout counts a contiguous fingerprint streak, seals honestly, and releases the session', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-closeout-fixture', cwd: process.cwd() });
@@ -472,6 +512,7 @@ test('an open v2 contract rotates onto the successor session without a second le
   assert.equal(resumed.id, run.id, 'open continuation rotates the same run rather than forking it');
   assert.equal(resumed.claim_contract.contract_id, run.claim_contract_id);
   assert.throws(() => recordClaim(firstParent, 'Old lease must be revoked.', []), /NO_ACTIVE_RUN/);
+  assert.throws(() => beginRun(firstParent, { mode: 'full', objective: 'Revoked predecessor cannot open another run.' }), /CAPABILITY_REVOKED/);
   assert.equal(getCapability(childCapability).parent_capability_hash, sha256(secondParent));
   const childReceipt = sealChildByAgent({ sessionId: firstSession, agentId: 'pending-child' });
   assert.equal(childReceipt.status, 'STOP_OBSERVED');

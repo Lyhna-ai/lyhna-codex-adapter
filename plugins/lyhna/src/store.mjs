@@ -643,6 +643,14 @@ function completeContinuationLeaseProjectionUnlocked(state, transferEvent) {
     predecessor_parent_ref: payload.predecessor_parent_ref,
     successor_parent_ref: payload.successor_parent_ref
   };
+  atomicWriteJson(join(root(), 'capabilities', `${payload.predecessor_parent_ref}.json`), {
+    ...predecessor,
+    revoked: {
+      reason: 'continuation_lease_transferred',
+      event_ref: `sha256:${transferEvent.event_hash}`,
+      successor_parent_ref: payload.successor_parent_ref
+    }
+  });
   for (const child of childRecords) {
     atomicWriteJson(child.path, { ...child.record, parent_capability_hash: payload.successor_parent_ref });
     atomicWriteJson(migratedChildRoutePath(predecessor.session_hash, child.record.agent_hash), {
@@ -1000,6 +1008,7 @@ function resolvePrivacyMode(requested) {
 export function beginRun(capability, { mode, objective = '', continuesFrom = '', privacyMode = '' }) {
   const parent = getCapability(capability);
   assert(parent.kind === 'parent', 'PARENT_CAPABILITY_REQUIRED');
+  assert(!parent.revoked, 'CAPABILITY_REVOKED');
   assert(mode === 'full' || mode === 'pr_only', 'INVALID_MODE');
   const privacy = resolvePrivacyMode(privacyMode);
   return withLock(sessionLockPath(capability), () => {
@@ -2035,7 +2044,8 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       const blockers = [
         ...compiled.missing.map((item) => `MISSING_${item}`),
         ...compiled.pending_producers.map((item) => `PENDING_${item}`),
-        ...compiled.contradictions
+        ...compiled.contradictions,
+        ...(compiled.currentness === 'AS_WITNESSED' ? [] : ['CURRENTNESS_UNPROVEN'])
       ].sort();
 
       if (!requestedSupported || blockers.length) {

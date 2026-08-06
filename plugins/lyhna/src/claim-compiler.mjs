@@ -384,16 +384,19 @@ export function compileClaim({ profile, contract, events }) {
   const producerTerminals = new Set(events.filter((event) => event.type === 'producer_terminal' && event.payload?.contract_id === contract.contract_id).map((event) => event.payload?.producer_id));
   const pending_producers = [...new Set(producerRequests.map((event) => event.payload?.producer_id).filter((id) => id && !producerTerminals.has(id)))].sort(codepointCompare);
   const relevantEligible = eligiblePrimary;
-  const malformedCurrentnessCandidate = primary.some((event) => {
+  const latestBoundCurrentness = new Map();
+  for (const event of primary) {
     const requirement = requirements.get(event.payload?.requirement_id);
-    if (!requirement || event.payload?.contract_id !== contract.contract_id) return false;
+    if (!requirement || event.payload?.contract_id !== contract.contract_id) continue;
     const expectedIdentity = profile.producers[requirement.producer_id]?.expected_identity;
     const boundProducer = contract.named_producers.includes(requirement.producer_id)
       && requirement.eligible_origins.includes(event.origin)
       && event.payload?.producer_id === requirement.producer_id
       && event.payload?.producer_identity === expectedIdentity;
-    return boundProducer && (!event.payload?.source_cursor || !isCanonicalObservedAt(event.payload?.observed_at));
-  });
+    if (boundProducer) latestBoundCurrentness.set(requirement.requirement_id, event);
+  }
+  const malformedCurrentnessCandidate = [...latestBoundCurrentness.values()]
+    .some((event) => !event.payload?.source_cursor || !isCanonicalObservedAt(event.payload?.observed_at));
   const currentness = relevantEligible.length > 0 && !malformedCurrentnessCandidate
     ? 'AS_WITNESSED'
     : 'CURRENTNESS_UNPROVEN';
@@ -402,7 +405,8 @@ export function compileClaim({ profile, contract, events }) {
     profile_requirements_hash: contract.profile_requirements_hash,
     contract,
     eligible_evidence_frontier,
-    material_control_frontier
+    material_control_frontier,
+    currentness
   }));
   return {
     contract_id: contract.contract_id,
@@ -430,6 +434,7 @@ export function blockerFingerprint(contract, gateId, compiled) {
     missing: compiled.missing,
     pending_producers: compiled.pending_producers,
     contradictions: compiled.contradictions,
+    currentness: compiled.currentness,
     eligible_evidence_frontier: compiled.eligible_evidence_frontier
   }));
 }
