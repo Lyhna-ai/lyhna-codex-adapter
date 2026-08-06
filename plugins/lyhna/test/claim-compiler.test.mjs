@@ -1316,6 +1316,24 @@ test('producer blocker transitions between Stops reset an otherwise matching att
   assert.equal(attempts[1].payload.blocker_fingerprint, originalFingerprint);
 });
 
+test('unrelated PR observations do not reset an unchanged closeout attempt streak', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-noop-pr-streak', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Ignore control events that do not change claim blockers.' });
+  const declared = declareClaimContract(parent, contract());
+  seedBuilt(run.id, declared);
+  requestClose(parent, 'The agent says this works in production.');
+
+  assert.equal(checkpointOrSeal(parent, 'noop-pr-stop-1').closeout_attempt_ordinal, 1);
+  addPrSnapshot(parent, {
+    id: 'noop_pr_snapshot', repository: 'Lyhna-ai/example', pr_number: 14,
+    base_sha: 'b'.repeat(40), head_before: 'a'.repeat(40), head_after: 'a'.repeat(40),
+    status: 'CONSISTENT', files: [], checks: [], reviews: [], review_comments: [],
+    issue_comments: [], failures: []
+  });
+  assert.equal(checkpointOrSeal(parent, 'noop-pr-stop-2').closeout_attempt_ordinal, 2);
+});
+
 test('an unbound closeout envelope cannot be appended or sealed during crash recovery', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-closeout-envelope-firewall', cwd: process.cwd() });
@@ -1720,6 +1738,34 @@ test('an open v2 contract rotates onto the successor session without a second le
   const events = getRunForTesting(run.id).events;
   assert.equal(events.filter((event) => event.type === 'claim_contract_declared').length, 1);
   assert.equal(events.filter((event) => event.type === 'continuation_lease_transferred').length, 1);
+});
+
+test('a successor plain checkpoint recompiles the transferred contract before folding', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const firstParent = mintSession({ sessionId: 'compiler-transfer-plain-one', cwd: process.cwd() });
+  const run = beginRun(firstParent, { mode: 'full', objective: 'Publish the transferred compiler frontier.' });
+  const declared = declareClaimContract(firstParent, contract());
+  const beforeTransfer = evaluateClaimGate(firstParent, declared.contract_id, 'closeout');
+  checkpointOrSeal(firstParent, 'transfer-plain-first-stop');
+  const firstPacket = getRunForTesting(run.id);
+  const capsuleRef = JSON.parse(readFileSync(join(firstPacket.directory, 'continuation.json'), 'utf8')).capsule_ref;
+
+  const successor = mintSession({ sessionId: 'compiler-transfer-plain-two', cwd: process.cwd() });
+  beginRun(successor, { mode: 'full', objective: 'Resume.', continuesFrom: capsuleRef });
+  assert.equal(getRunForTesting(run.id).state.compiled_claim.material_control_frontier, beforeTransfer.material_control_frontier);
+
+  assert.equal(checkpointOrSeal(successor, 'transfer-plain-successor-stop').status, 'CHECKPOINTED');
+  const afterTransfer = getRunForTesting(run.id);
+  assert.notEqual(afterTransfer.state.compiled_claim.material_control_frontier, beforeTransfer.material_control_frontier);
+  const capsule = JSON.parse(readFileSync(join(afterTransfer.directory, 'continuation.json'), 'utf8'));
+  assert.equal(
+    capsule.claim_compiler.compiled_state.material_control_frontier,
+    afterTransfer.state.compiled_claim.material_control_frontier
+  );
+  assert.equal(
+    capsule.claim_compiler.compiled_state.input_digest,
+    afterTransfer.state.compiled_claim.input_digest
+  );
 });
 
 test('durable lease transfer blocks stale predecessor receipt retrieval under the mutation lock', { concurrency: false }, (t) => {

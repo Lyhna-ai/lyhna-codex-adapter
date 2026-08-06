@@ -85,7 +85,7 @@ const EVALUATION_TRIGGERS = new Set(['initial', 'post_fix_reeval', 'gate_audit',
 const CLOSEOUT_STREAK_RESET_TYPES = new Set([
   'producer_requested', 'producer_terminal',
   'child_started', 'child_stop_observed', 'child_receipt_sealed', 'child_receipt_retrieved',
-  'pr_snapshot', 'pr_refreshed', 'evaluation_requested', 'evaluation_claimed', 'evaluation_finding',
+  'evaluation_requested', 'evaluation_claimed', 'evaluation_finding',
   'gate_sample_observed', 'claim_superseded'
 ]);
 // An evaluation is terminal once its outcome is fixed: recorded, checkout-integrity excepted,
@@ -2875,6 +2875,13 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     }
     saveState(current);
     if (!current.close_requested) {
+      // A plain Stop is still a continuation boundary. Recompile an open contract before folding
+      // it so material control added since the prior compile (notably a lease transfer) cannot be
+      // published with a current ledger tip but stale compiler frontiers.
+      if (current.claim_contract) {
+        compileAndRecordUnlocked(runId, current);
+        saveState(current);
+      }
       writeCheckpointArtifacts(runId, current);
       return { status: 'CHECKPOINTED', run_id: runId };
     }
