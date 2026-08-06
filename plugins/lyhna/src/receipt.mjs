@@ -302,7 +302,6 @@ export function buildReceipt(state, events) {
     failures: privacyMode === 'proof'
       ? (snapshot.failures || []).map((failure) => ({
           object: String(failure?.object || ''),
-          error_ref: failure?.error_ref || `sha256:${sha256(String(failure?.error || ''))}`,
           text_withheld: true
         }))
       : snapshot.failures || []

@@ -806,6 +806,40 @@ test('recovery rebuilds lifecycle receipt retrieval projection from durable even
   assert.equal(sealed.status, 'SEALED');
   assert.equal(getRunForTesting(run.id).state.child_receipts[receipt.id].retrieved, true);
 });
+
+test('recovery restores evaluator capability binding, child role, and canonical child key', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'compiler-rebuild-evaluator-binding';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Rebuild evaluator binding after a torn state write.' });
+  const head = 'a'.repeat(40);
+  const snapshot = addPrSnapshot(parent, {
+    id: 'rebuild_evaluator_snapshot', repository: 'Lyhna-ai/example', pr_number: 14,
+    base_sha: 'b'.repeat(40), head_before: head, head_after: head, status: 'CONSISTENT',
+    files: [], checks: [], reviews: [], review_comments: [], issue_comments: [], failures: []
+  });
+  const evaluation = beginEvaluation(parent, snapshot.id, { path: process.cwd(), head, clean: true, detached: true });
+  const child = mintChild({ sessionId, agentId: 'rebuild-evaluator-child' });
+  claimEvaluation(child, evaluation.id);
+
+  const packet = getRunForTesting(run.id);
+  const statePath = join(packet.directory, 'state.json');
+  const cache = JSON.parse(readFileSync(statePath, 'utf8'));
+  const agentHash = getCapability(child).agent_hash;
+  delete cache.evaluations[evaluation.id].child_capability_hash;
+  cache.children.wrong_cached_agent_key = { ...cache.children[agentHash], role: 'delegated_agent' };
+  delete cache.children[agentHash];
+  writeFileSync(statePath, JSON.stringify(cache, null, 2) + '\n');
+
+  assert.doesNotThrow(() => recordEvaluation(child, evaluation.id, 'No findings.', [], {
+    head_before: head, head_after: head, clean_before: true, clean_after: true,
+    detached_before: true, detached_after: true
+  }));
+  const recovered = getRunForTesting(run.id).state;
+  assert.equal(recovered.evaluations[evaluation.id].child_capability_hash, sha256(child));
+  assert.equal(recovered.children[agentHash].role, 'evaluator');
+  assert.equal(recovered.children.wrong_cached_agent_key, undefined);
+});
 test('supported closeout derives child join from the ledger in normal and envelope-replay paths', { concurrency: false }, (t) => {
   isolatedData(t);
   const makeSupportedRunWithActiveChild = (suffix) => {
@@ -1457,10 +1491,41 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
   });
   assert.equal(projected.payload.source_cursor, `cursor_${sha256(rawCursor)}`);
   assert.equal(projected.payload.subject_binding.source_ref, `sha256:${sha256(rawSource)}`);
+  const rawHookProse = 'HOOK_RAW_DO_NOT_PERSIST_7B31';
+  const rawHookDigest = sha256(rawHookProse);
+  const hookEvent = appendEvent(run.id, {
+    type: 'hook_posttooluse',
+    origin: 'runtime_hook',
+    payload: {
+      event: 'PostToolUse', event_id: 'proof-hook', model: null, tool_name: 'example', cwd_ref: null,
+      payload_ref: { sha256: rawHookDigest, bytes: rawHookProse.length },
+      support: 'tool_returned', outcome: 'returned'
+    },
+    idempotencyKey: 'proof-hook-payload-ref'
+  });
+  assert.equal(hookEvent.payload.payload_ref, undefined);
+  assert.equal(hookEvent.payload.text_withheld, true);
+  const rawFailureProse = 'SNAPSHOT_FAILURE_RAW_DO_NOT_PERSIST_8C42';
+  const rawFailureDigest = sha256(rawFailureProse);
+  const proofSnapshot = addPrSnapshot(parent, {
+    id: 'proof_failure_snapshot', repository: 'Lyhna-ai/example', pr_number: 14,
+    base_sha: 'b'.repeat(40), head_before: 'c'.repeat(40), head_after: 'c'.repeat(40), status: 'CONSISTENT',
+    files: [], checks: [], reviews: [], review_comments: [], issue_comments: [],
+    failures: [{ object: 'checks', error: rawFailureProse }]
+  });
+  assert.deepEqual(proofSnapshot.failures, [{ object: 'checks', text_withheld: true }]);
   assert.doesNotThrow(() => evaluateClaimGate(parent, declared.contract_id, 'closeout'));
   assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'gate_evaluated').length, 1);
+  assert.equal(checkpointOrSeal(parent, 'proof-projection-checkpoint').status, 'CHECKPOINTED');
   const proofLedger = JSON.stringify(getRunForTesting(run.id).events);
-  for (const marker of ['RAW_PROSE', 'NESTED_HOOK_PROSE', 'NESTED_SUBJECT_PROSE', rawCursor, rawSource, rawObservedAt]) assert.equal(proofLedger.includes(marker), false);
+  for (const marker of [
+    'RAW_PROSE', 'NESTED_HOOK_PROSE', 'NESTED_SUBJECT_PROSE', rawCursor, rawSource, rawObservedAt,
+    rawHookProse, rawHookDigest, rawFailureProse, rawFailureDigest
+  ]) assert.equal(proofLedger.includes(marker), false);
+  const proofArtifacts = readTree(data).join('\n');
+  for (const marker of [rawHookProse, rawHookDigest, rawFailureProse, rawFailureDigest]) {
+    assert.equal(proofArtifacts.includes(marker), false);
+  }
   assert.equal(readTree(data).join('\n').includes(rawContinuation), false);
 });
 

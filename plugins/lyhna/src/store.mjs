@@ -774,8 +774,13 @@ function reconcileLifecycleProjectionUnlocked(state, events) {
   if (existsSync(capabilityDir)) {
     for (const entry of readdirSync(capabilityDir, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const capabilityRef = entry.name.slice(0, -'.json'.length);
       const record = readJson(join(capabilityDir, entry.name), null);
-      if (record?.kind === 'child' && record.parent_run_id === state.id) capabilityRecords.push(record);
+      if (record?.kind === 'child'
+        && record.parent_run_id === state.id
+        && record.capability_hash === capabilityRef) {
+        capabilityRecords.push(record);
+      }
     }
   }
   const childEvents = new Map();
@@ -812,7 +817,12 @@ function reconcileLifecycleProjectionUnlocked(state, events) {
       });
     } else if (event.type === 'evaluation_claimed' && event.origin === 'mcp_routed') {
       const evaluation = evaluationEvents.get(payload.evaluation_request_id);
-      if (evaluation) Object.assign(evaluation, { status: 'CLAIMED', child_agent_hash: payload.child_agent_hash });
+      const capability = capabilityRecords.find((record) => record.agent_hash === payload.child_agent_hash);
+      if (evaluation) Object.assign(evaluation, {
+        status: 'CLAIMED',
+        child_agent_hash: payload.child_agent_hash,
+        child_capability_hash: capability?.capability_hash || null
+      });
     } else if (event.type === 'evaluation_finding' && event.origin === 'evaluator_reported') {
       const evaluation = evaluationEvents.get(payload.evaluation_request_id);
       if (evaluation) {
@@ -856,13 +866,14 @@ function reconcileLifecycleProjectionUnlocked(state, events) {
   for (const [childId, eventChild] of childEvents) {
     const priorEntry = Object.entries(priorChildren).find(([, child]) => child.id === childId);
     const capability = capabilityRecords.find((record) => `child_agent_${sha256(`${state.id}\0${record.agent_hash}`).slice(0, 24)}` === childId);
-    const agentHash = priorEntry?.[0] || capability?.agent_hash || `agent_${sha256(childId).slice(0, 24)}`;
+    const agentHash = capability?.agent_hash || priorEntry?.[0] || `agent_${sha256(childId).slice(0, 24)}`;
     const child = { ...(priorEntry?.[1] || {}), ...eventChild };
     const evaluation = [...evaluationEvents.values()].find((item) => (
       item.child_agent_hash
       && `child_agent_${sha256(`${state.id}\0${item.child_agent_hash}`).slice(0, 24)}` === childId
     ));
     const receiptId = evaluation ? `child_${evaluation.id}` : childId;
+    if (evaluation) child.role = 'evaluator';
     if (receiptEvents.has(receiptId)) {
       child.receipt_id = receiptId;
       child.role = receiptEvents.get(receiptId).role || child.role;
@@ -1261,6 +1272,10 @@ function normalizeEventPayloadForStorage(type, payload) {
 // withheld prose. Legacy ledgers are never rewritten; this function is reached only for new appends.
 function projectEventPayloadForPrivacy(state, type, payload) {
   if (state.privacy_mode !== 'proof') return payload;
+  if (type.startsWith('hook_')) {
+    const { payload_ref: _payloadRef, ...structural } = payload;
+    return { ...structural, text_withheld: true };
+  }
   if (type === 'builder_claim') {
     return {
       builder_claim_id: payload.builder_claim_id,
@@ -1304,7 +1319,6 @@ function projectEventPayloadForPrivacy(state, type, payload) {
       head_after: proofSafeGitObjectId(payload.head_after),
       failures: (payload.failures || []).map((failure) => ({
         object: String(failure?.object || ''),
-        error_ref: reference(String(failure?.error || '')),
         text_withheld: true
       }))
     };
