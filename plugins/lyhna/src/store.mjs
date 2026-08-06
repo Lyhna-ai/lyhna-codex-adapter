@@ -1022,6 +1022,9 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
   assert(!parent.revoked, 'CAPABILITY_REVOKED');
   assert(mode === 'full' || mode === 'pr_only', 'INVALID_MODE');
   const privacy = resolvePrivacyMode(privacyMode);
+  const continuationRef = String(continuesFrom || '').trim();
+  if (privacy === 'proof' && continuationRef) assert(/^[a-f0-9]{64}$/.test(continuationRef), 'INVALID_CAPSULE_REF');
+  continuesFrom = continuationRef;
   return withLock(sessionLockPath(capability), () => {
     const pendingPath = join(root(), 'pending', `${parent.session_hash}.json`);
     const pending = readJson(pendingPath, null);
@@ -1055,6 +1058,14 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
     if (!current && continuesFrom) {
       const transferred = withLock(continuationLockPath(), () => {
         const resolved = resolveContinuesFrom(continuesFrom);
+        if (resolved?.resolution === 'RESOLVED_LOCAL_ARCHIVE' && resolved.run_id) {
+          return withLock(lockPath(resolved.run_id), () => {
+            const prior = loadState(resolved.run_id);
+            recoverClaimControlStateUnlocked(resolved.run_id, prior);
+            assert(prior.sealed || !prior.claim_contract, 'STALE_CONTINUATION');
+            return null;
+          });
+        }
         if (resolved?.resolution !== 'RESOLVED_LOCAL_PACKET' || !resolved.run_id) return null;
         return withLock(lockPath(resolved.run_id), () => {
           const prior = loadState(resolved.run_id);
@@ -1698,6 +1709,14 @@ export function evaluateClaimGate(capability, contractId, gateId) {
   });
 }
 
+function claimSupportPosition(compiled, contract) {
+  const requestedSupported = compiled.state_results?.[contract.requested_state]?.supported === true;
+  const supported = compiled.highest_supported_state || 'NO_SUPPORTED_STATE';
+  return requestedSupported
+    ? `evidence supports requested ${contract.requested_state}, but closeout is blocked`
+    : `evidence supports ${supported}, not requested ${contract.requested_state}`;
+}
+
 export function claimInlineAdvisory(capability) {
   const runId = activeRunFor(capability);
   if (!runId) return null;
@@ -1740,10 +1759,7 @@ export function claimInlineAdvisory(capability) {
       return null;
     }
     const diagnosticId = `diag_${fingerprint.slice(0, 24)}`;
-    const supported = compiled.highest_supported_state || 'NO_SUPPORTED_STATE';
-    const claimPosition = requestedSupported
-      ? `evidence supports requested ${state.claim_contract.requested_state}, but closeout is blocked`
-      : `evidence supports ${supported}, not requested ${state.claim_contract.requested_state}`;
+    const claimPosition = claimSupportPosition(compiled, state.claim_contract);
     const message = `Lyhna inline claim check: ${claimPosition}. Blockers: ${inlineBlockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${compiled.next_verifier}.`;
     appendEventUnlocked(runId, state, {
       type: 'diagnostic_emitted',
@@ -2038,6 +2054,65 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     const checkpointKey = `checkpoint:${deliveryKey || preEvents.length + 1}`;
     const priorCheckpoint = preEvents.find((event) => event.idempotency_key === checkpointKey);
     if (priorCheckpoint) {
+      const nextCheckpoint = preEvents.find((event) => event.seq > priorCheckpoint.seq && event.type === 'turn_checkpoint');
+      const deliveryTail = preEvents.filter((event) => (
+        event.seq > priorCheckpoint.seq && (!nextCheckpoint || event.seq < nextCheckpoint.seq)
+      ));
+      const interruptedAttempt = deliveryTail.find((event) => event.type === 'closeout_attempted');
+      const attemptCompleted = deliveryTail.some((event) => (
+        event.type === 'checkpoint_anchor' || event.type === 'closeout_envelope_generated'
+      ));
+      if (interruptedAttempt && !attemptCompleted) {
+        const blockers = [...(interruptedAttempt.payload?.blockers || [])];
+        const ordinal = Number(interruptedAttempt.payload?.ordinal || 0);
+        const requested = current.claim_contract?.requested_state || 'UNDECLARED_STATE';
+        const nextVerifier = current.compiled_claim?.next_verifier || 'not available';
+        assert(current.claim_contract && ordinal > 0, 'INVALID_CLOSEOUT_ATTEMPT');
+        const reason = `Lyhna ${claimSupportPosition(current.compiled_claim, current.claim_contract)}. Missing or conflicting evidence: ${blockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${nextVerifier}.`;
+        if (ordinal < current.claim_contract.caps.max_unsupported_attempts) {
+          writeCheckpointArtifacts(runId, current);
+          return {
+            status: 'CLOSE_DEFERRED',
+            run_id: runId,
+            blockers,
+            decision: 'block',
+            reason,
+            closeout_attempt_ordinal: ordinal,
+            replayed_delivery: true,
+            compiled: current.compiled_claim
+          };
+        }
+        assert(current.compiled_claim?.input_digest === interruptedAttempt.payload?.input_digest, 'CLOSEOUT_ATTEMPT_STALE');
+        const fingerprint = interruptedAttempt.payload.blocker_fingerprint;
+        const envelope = {
+          envelope_id: `closeout_${sha256(canonicalJson({ run_id: runId, fingerprint, ordinal })).slice(0, 24)}`,
+          outcome: 'CLOSED_UNSUPPORTED',
+          profile_id: current.claim_contract.profile_id,
+          requested_state: requested,
+          supported_state: current.compiled_claim.highest_supported_state,
+          scope_ref: current.claim_contract.objective_ref,
+          eligible_evidence_frontier: interruptedAttempt.payload.eligible_evidence_frontier,
+          material_control_frontier: interruptedAttempt.payload.material_control_frontier,
+          input_digest: interruptedAttempt.payload.input_digest,
+          blockers,
+          next_verifier: nextVerifier,
+          narrative: reason
+        };
+        const envelopeEvent = appendEventUnlocked(runId, current, {
+          type: 'closeout_envelope_generated',
+          origin: 'runtime_hook',
+          payload: envelope,
+          idempotencyKey: `closeout-envelope:${envelope.envelope_id}`
+        });
+        current.closeout_envelope = { ...envelopeEvent.payload, event_ref: `sha256:${envelopeEvent.event_hash}` };
+        saveState(current);
+        return finalizeRunSealUnlocked(runId, current, 'CLOSED_UNSUPPORTED', {
+          claim_contract_ref: current.claim_contract.claim_contract_ref,
+          supported_state: current.compiled_claim.highest_supported_state,
+          requested_state: requested,
+          closeout_envelope_ref: current.closeout_envelope.event_ref
+        });
+      }
       // The Stop was observed. If the original delivery crashed after appending the turn_checkpoint
       // but before writeCheckpointArtifacts wrote the packet, no checkpoint_anchor follows it — finish
       // that interrupted packet now so every observed Stop has its verifiable checkpoint. If an anchor
@@ -2103,8 +2178,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
           },
           idempotencyKey: `closeout-attempt:${current.claim_contract.contract_id}:${attemptSequence}`
         });
-        const supported = compiled.highest_supported_state || 'NO_SUPPORTED_STATE';
-        const reason = `Lyhna evidence supports ${supported}, not requested ${current.claim_contract.requested_state}. Missing or conflicting evidence: ${blockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${compiled.next_verifier}.`;
+        const reason = `Lyhna ${claimSupportPosition(compiled, current.claim_contract)}. Missing or conflicting evidence: ${blockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${compiled.next_verifier}.`;
         const currentDiagnostic = current.claim_diagnostic?.status === 'OPEN'
           && current.claim_diagnostic.blocker_fingerprint === fingerprint
           ? current.claim_diagnostic

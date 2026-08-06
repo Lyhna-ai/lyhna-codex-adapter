@@ -521,7 +521,23 @@ test('proof-mode v2 withholds objective, claim, diagnostic, and closeout prose b
 });
 
 test('proof mode rejects prose-shaped scope refs and unregistered event shapes before hashing', { concurrency: false }, (t) => {
-  isolatedData(t);
+  const data = isolatedData(t);
+  const rawContinuation = 'CONTINUATION_RAW_DO_NOT_PERSIST_5A11';
+  const invalidParent = mintSession({ sessionId: 'compiler-proof-invalid-continuation', cwd: process.cwd() });
+  assert.throws(
+    () => beginRun(invalidParent, {
+      mode: 'full', objective: 'Private continuation.', privacyMode: 'proof', continuesFrom: rawContinuation
+    }),
+    /INVALID_CAPSULE_REF/
+  );
+  const unresolvedParent = mintSession({ sessionId: 'compiler-proof-unresolved-continuation', cwd: process.cwd() });
+  const unresolvedRef = 'f'.repeat(64);
+  const unresolvedRun = beginRun(unresolvedParent, {
+    mode: 'full', objective: 'Private unresolved continuation.', privacyMode: 'proof', continuesFrom: unresolvedRef
+  });
+  assert.deepEqual(unresolvedRun.inherits, {
+    capsule_ref: unresolvedRef, run_id: null, state_hash: null, resolution: 'UNRESOLVED_LOCALLY'
+  });
   const parent = mintSession({ sessionId: 'compiler-proof-shape', cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'Private objective.', privacyMode: 'proof' });
   assert.throws(
@@ -623,6 +639,7 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
   assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'gate_evaluated').length, 1);
   const proofLedger = JSON.stringify(getRunForTesting(run.id).events);
   for (const marker of ['RAW_PROSE', 'NESTED_HOOK_PROSE', 'NESTED_SUBJECT_PROSE', rawCursor, rawSource, rawObservedAt]) assert.equal(proofLedger.includes(marker), false);
+  assert.equal(readTree(data).join('\n').includes(rawContinuation), false);
 });
 
 test('proof-mode evaluator prose is withheld from state and child receipts, not only from the ledger', { concurrency: false }, (t) => {
@@ -675,6 +692,31 @@ test('an open v2 contract rotates onto the successor session without a second le
   const events = getRunForTesting(run.id).events;
   assert.equal(events.filter((event) => event.type === 'claim_contract_declared').length, 1);
   assert.equal(events.filter((event) => event.type === 'continuation_lease_transferred').length, 1);
+});
+
+test('a stale archived capsule cannot fork an open contracted run and the current face still transfers', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const firstParent = mintSession({ sessionId: 'compiler-stale-open-contract-one', cwd: process.cwd() });
+  const run = beginRun(firstParent, { mode: 'full', objective: 'Advance an open contract face.' });
+  declareClaimContract(firstParent, contract());
+  checkpointOrSeal(firstParent, 'stale-open-face-a');
+  const packet = getRunForTesting(run.id);
+  const refA = JSON.parse(readFileSync(join(packet.directory, 'continuation.json'), 'utf8')).capsule_ref;
+  recordClaim(firstParent, 'Advance the open run after face A.', []);
+  checkpointOrSeal(firstParent, 'stale-open-face-b');
+  const refB = JSON.parse(readFileSync(join(packet.directory, 'continuation.json'), 'utf8')).capsule_ref;
+  assert.notEqual(refA, refB);
+
+  const secondParent = mintSession({ sessionId: 'compiler-stale-open-contract-two', cwd: process.cwd() });
+  assert.throws(
+    () => beginRun(secondParent, { mode: 'full', objective: 'Do not fork stale face A.', continuesFrom: refA }),
+    /STALE_CONTINUATION/
+  );
+  assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'continuation_lease_transferred').length, 0);
+  assert.equal(beginRun(firstParent, { mode: 'full', objective: 'The original lease remains active.' }).id, run.id);
+  const transferred = beginRun(secondParent, { mode: 'full', objective: 'Transfer current face B.', continuesFrom: refB });
+  assert.equal(transferred.id, run.id);
+  assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'continuation_lease_transferred').length, 1);
 });
 
 test('an open v2 lease transfer fails closed when the mutable state cache was altered after its checkpoint', { concurrency: false }, (t) => {
@@ -777,6 +819,47 @@ test('a replayed third unsupported Stop finishes sealing after a crash behind th
   assert.equal(final.events.filter((event) => event.type === 'closeout_attempted').length, 3);
   assert.equal(final.events.filter((event) => event.type === 'closeout_envelope_generated').length, 1);
   assert.equal(final.events.at(-1).type, 'run_sealed');
+});
+
+test('a replayed Stop resumes a durable closeout attempt without escaping or incrementing the cap', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const exercise = (suffix, attemptCount) => {
+    const parent = mintSession({ sessionId: `compiler-attempt-crash-${suffix}`, cwd: process.cwd() });
+    const run = beginRun(parent, { mode: 'full', objective: 'Recover a durable closeout attempt.' });
+    declareClaimContract(parent, contract());
+    requestClose(parent, 'Close unsupported after bounded attempts.');
+    for (let ordinal = 1; ordinal <= attemptCount; ordinal += 1) checkpointOrSeal(parent, `attempt-crash-${suffix}-${ordinal}`);
+    const packet = getRunForTesting(run.id);
+    const attempt = packet.events.filter((event) => event.type === 'closeout_attempted').at(-1);
+    assert.equal(attempt.payload.ordinal, attemptCount);
+    writeFileSync(join(packet.directory, 'events.jsonl'), `${packet.events.slice(0, attempt.seq).map((event) => JSON.stringify(event)).join('\n')}\n`);
+    const state = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
+    state.sealed = false;
+    state.terminal_status = null;
+    state.closeout_envelope = null;
+    state.ledger_count = attempt.seq;
+    state.ledger_tip = attempt.event_hash;
+    writeFileSync(join(packet.directory, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
+    for (const name of ['seal-anchor.json', 'checkpoint-anchor.json', 'receipt.json', 'RECEIPT.md', 'continuation.json', 'HANDOFF.md']) {
+      rmSync(join(packet.directory, name), { force: true });
+    }
+    return { parent, run, deliveryKey: `attempt-crash-${suffix}-${attemptCount}` };
+  };
+
+  const second = exercise('second', 2);
+  const blocked = checkpointOrSeal(second.parent, second.deliveryKey);
+  assert.equal(blocked.decision, 'block');
+  assert.equal(blocked.closeout_attempt_ordinal, 2);
+  assert.equal(getRunForTesting(second.run.id).events.filter((event) => event.type === 'closeout_attempted').length, 2);
+
+  const third = exercise('third', 3);
+  const sealed = checkpointOrSeal(third.parent, third.deliveryKey);
+  assert.equal(sealed.status, 'CLOSED_UNSUPPORTED');
+  const final = getRunForTesting(third.run.id);
+  assert.equal(final.events.filter((event) => event.type === 'closeout_attempted').length, 3);
+  assert.equal(final.events.filter((event) => event.type === 'closeout_envelope_generated').length, 1);
+  assert.equal(final.events.filter((event) => event.type === 'run_sealed').length, 1);
+  assert.equal(checkpointOrSeal(third.parent, third.deliveryKey).status, 'NO_ACTIVE_RUN');
 });
 
 test('a supported closeout envelope blocks contradictory evidence until crash replay seals it', { concurrency: false }, (t) => {
