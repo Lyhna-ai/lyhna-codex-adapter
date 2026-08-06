@@ -1385,7 +1385,11 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
   if (state.privacy_mode === 'proof' && type.startsWith('hook_')) {
     assert(/^hook:[^:]+:id_[a-f0-9]{64}$/.test(String(idempotencyKey || '')), 'PROOF_HOOK_DELIVERY_ID_REQUIRED');
   }
-  const key = idempotencyKey || sha256(canonicalJson({ origin, payload: projectedPayload, type }));
+  const rawKey = idempotencyKey || sha256(canonicalJson({ origin, payload: projectedPayload, type }));
+  // Idempotency keys are part of the hash-chained event. In proof mode even a caller-supplied
+  // structural key is projected to an opaque digest, so this side channel cannot retain objective,
+  // diagnostic, or tool prose that the payload projection deliberately withheld.
+  const key = state.privacy_mode === 'proof' ? `idempotency_${sha256(String(rawKey))}` : rawKey;
   const contentHash = sha256(canonicalJson({ origin, payload: projectedPayload, type }));
   const duplicate = events.find((event) => event.idempotency_key === key);
   if (duplicate) {
@@ -2679,7 +2683,9 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     recoverClaimControlStateUnlocked(runId, current, parsedBeforeState);
     assert(current.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
     if (current.privacy_mode === 'proof') {
-      assert(/^id_[a-f0-9]{64}$/.test(String(deliveryKey || '')), 'PROOF_STOP_DELIVERY_ID_REQUIRED');
+      assert(/^id_[a-f0-9]{64}$/.test(String(deliveryKey || '')), 'STOP_DELIVERY_ID_REQUIRED');
+    } else if (current.claim_contract) {
+      assert(typeof deliveryKey === 'string' && deliveryKey.length > 0, 'STOP_DELIVERY_ID_REQUIRED');
     }
     atomicWriteJson(activePath(capability), { run_id: runId });
     // Adopt a durable terminal run_sealed (crash after the seal append, before state/anchor) BEFORE the
@@ -2710,8 +2716,18 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     // ALREADY existing in the ledger, checked before anything is appended. (Inferring it from tip
     // position would miss the crash window where the turn_checkpoint was appended and state saved but
     // the closeout never ran — the dup would still be the tip, so a redelivery would wrongly seal.)
-    const checkpointKey = `checkpoint:${deliveryKey || preEvents.length + 1}`;
-    const priorCheckpoint = preEvents.find((event) => event.idempotency_key === checkpointKey);
+    // Older non-contract runs may arrive without a host delivery ID. Bind their fallback to the
+    // latest non-checkpoint frontier instead of the ledger length: a replay after checkpoint
+    // artifacts then resolves to the same key, while real intervening work creates a new boundary.
+    // Contracted runs never use this fallback; they fail closed above when the host ID is absent.
+    const legacyStopFrontier = [...preEvents].reverse().find((event) => (
+      !['turn_checkpoint', 'checkpoint_anchor', 'close_deferred'].includes(event.type)
+    ))?.event_hash || ZERO_HASH;
+    const checkpointKey = `checkpoint:${deliveryKey || `auto_${legacyStopFrontier}`}`;
+    const storedCheckpointKey = current.privacy_mode === 'proof'
+      ? `idempotency_${sha256(checkpointKey)}`
+      : checkpointKey;
+    const priorCheckpoint = preEvents.find((event) => event.idempotency_key === storedCheckpointKey);
     let resumeCloseoutAfterCheckpoint = false;
     if (priorCheckpoint) {
       const nextCheckpoint = preEvents.find((event) => event.seq > priorCheckpoint.seq && event.type === 'turn_checkpoint');
@@ -2722,7 +2738,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       const attemptCompleted = deliveryTail.some((event) => (
         event.type === 'checkpoint_anchor' || event.type === 'closeout_envelope_generated'
       ));
-      if (interruptedAttempt && !attemptCompleted) {
+      if (interruptedAttempt) {
         validateCloseoutAttemptBinding(
           current,
           interruptedAttempt.origin,
@@ -2735,6 +2751,19 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         const nextVerifier = current.compiled_claim?.next_verifier || 'not available';
         assert(current.claim_contract && ordinal > 0, 'INVALID_CLOSEOUT_ATTEMPT');
         const reason = `Lyhna ${claimSupportPosition(current.compiled_claim, current.claim_contract)}. Missing or conflicting evidence: ${blockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${nextVerifier}.`;
+        if (attemptCompleted) {
+          assert(ordinal < current.claim_contract.caps.max_unsupported_attempts, 'CLOSEOUT_ATTEMPT_INCOMPLETE');
+          return {
+            status: 'CLOSE_DEFERRED',
+            run_id: runId,
+            blockers,
+            decision: 'block',
+            reason,
+            closeout_attempt_ordinal: ordinal,
+            replayed_delivery: true,
+            compiled: current.compiled_claim
+          };
+        }
         if (ordinal < current.claim_contract.caps.max_unsupported_attempts) {
           writeCheckpointArtifacts(runId, current);
           return {
@@ -2975,6 +3004,10 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       writeCheckpointArtifacts(runId, current);
       return { status: 'CLOSE_DEFERRED', run_id: runId, blockers };
     }
+    // Mutable projection fields are not proof that the receipt bytes still exist. Verify every
+    // durable child receipt immediately before the legacy seal, matching the contracted closeout
+    // path and preventing a run from sealing around a file altered after retrieval.
+    verifyChildReceipts(current);
     appendEventUnlocked(runId, current, {
       type: 'run_sealed',
       origin: 'runtime_hook',

@@ -1543,7 +1543,7 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
   const hookEvent = getRunForTesting(run.id).events.find((event) => event.type === 'hook_posttooluse');
   assert.equal(hookEvent.payload.payload_ref, undefined);
   assert.equal(hookEvent.payload.text_withheld, true);
-  assert.match(hookEvent.idempotency_key, /^hook:PostToolUse:id_[a-f0-9]{64}$/);
+  assert.match(hookEvent.idempotency_key, /^idempotency_[a-f0-9]{64}$/);
   const unidentifiedHookInput = {
     hook_event_name: 'PostToolUse', session_id: 'compiler-proof-shape',
     tool_name: 'example', tool_output: 'SECOND_HIDDEN_HOOK_RESULT', status: 'returned'
@@ -1559,7 +1559,7 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
   const unidentifiedStopFallback = sha256(JSON.stringify(sanitizeHook(unidentifiedStopInput)));
   const unidentifiedStop = runHook(unidentifiedStopInput, { ...process.env, LYHNA_CODEX_DATA: data });
   assert.equal(unidentifiedStop.decision, 'block');
-  assert.match(unidentifiedStop.reason, /PROOF_STOP_DELIVERY_ID_REQUIRED/);
+  assert.match(unidentifiedStop.reason, /STOP_DELIVERY_ID_REQUIRED/);
   assert.equal(getRunForTesting(run.id).events.some((event) => event.type === 'turn_checkpoint'), false);
   const rawFailureProse = 'SNAPSHOT_FAILURE_RAW_DO_NOT_PERSIST_8C42';
   const rawFailureDigest = sha256(rawFailureProse);
@@ -1587,6 +1587,16 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
     assert.equal(proofArtifacts.includes(marker), false);
   }
   assert.equal(readTree(data).join('\n').includes(rawContinuation), false);
+
+  const rawIdempotencyProse = 'IDEMPOTENCY_RAW_DO_NOT_PERSIST_91E4';
+  const idempotencyEvent = appendEvent(run.id, {
+    type: 'turn_checkpoint',
+    origin: 'runtime_hook',
+    payload: { status: 'OPEN', receipt_renderer: '0.1.33' },
+    idempotencyKey: rawIdempotencyProse
+  });
+  assert.match(idempotencyEvent.idempotency_key, /^idempotency_[a-f0-9]{64}$/);
+  assert.equal(JSON.stringify(getRunForTesting(run.id).events).includes(rawIdempotencyProse), false);
 });
 
 test('proof-mode evaluator prose is withheld from state and child receipts, not only from the ledger', { concurrency: false }, (t) => {
@@ -1901,6 +1911,45 @@ test('a replayed closeout Stop resumes when the checkpoint landed before the att
   assert.equal(final.events.filter((event) => event.type === 'turn_checkpoint').length, 1);
   assert.equal(final.events.filter((event) => event.type === 'closeout_attempted').length, 1);
   assert.equal(final.state.sealed, false);
+});
+
+test('a completed blocked Stop replay reproduces decision:block without incrementing the cap', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-completed-block-replay', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Keep a completed blocked response idempotent.' });
+  declareClaimContract(parent, contract());
+  requestClose(parent, 'Close only through the declared claim gate.');
+
+  const first = checkpointOrSeal(parent, 'id_'.concat(sha256('completed-block-stop')));
+  assert.equal(first.status, 'CLOSE_DEFERRED');
+  assert.equal(first.decision, 'block');
+  assert.equal(first.closeout_attempt_ordinal, 1);
+  const beforeReplay = getRunForTesting(run.id).events;
+
+  const replayed = checkpointOrSeal(parent, 'id_'.concat(sha256('completed-block-stop')));
+  assert.equal(replayed.status, 'CLOSE_DEFERRED');
+  assert.equal(replayed.decision, 'block');
+  assert.equal(replayed.closeout_attempt_ordinal, 1);
+  assert.equal(replayed.replayed_delivery, true);
+  const afterReplay = getRunForTesting(run.id).events;
+  assert.equal(afterReplay.length, beforeReplay.length);
+  assert.equal(afterReplay.filter((event) => event.type === 'closeout_attempted').length, 1);
+});
+
+test('a contracted Stop without a host delivery identity fails closed before recording an attempt', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const sessionId = 'compiler-unidentified-verified-stop';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Require a structural Stop delivery identity.' });
+  declareClaimContract(parent, contract());
+  requestClose(parent, 'Close only through the declared claim gate.');
+
+  const result = runHook({ hook_event_name: 'Stop', session_id: sessionId }, { ...process.env, LYHNA_CODEX_DATA: data });
+  assert.equal(result.decision, 'block');
+  assert.match(result.reason, /STOP_DELIVERY_ID_REQUIRED/);
+  const events = getRunForTesting(run.id).events;
+  assert.equal(events.some((event) => event.type === 'turn_checkpoint'), false);
+  assert.equal(events.some((event) => event.type === 'closeout_attempted'), false);
 });
 
 test('a replayed Stop resumes a durable closeout attempt without escaping or incrementing the cap', { concurrency: false }, (t) => {
