@@ -122,6 +122,13 @@ compiler terminal state, and seals under the existing evidence-scoped rules. The
 agent-facing `submit_evidence`, `record_probe`, or contract-amendment tool. `tools/list` must retain
 all ten shipped tools and expose the three additions with backward-compatible existing schemas.
 
+The existing `claim_evaluation` interface is the issuance boundary for evaluator finding
+submissions. A v2 evaluation request carries a bounded `finding_slot_cap`; on a successful claim,
+the supervisor persists and returns that many child-bound `submission_ref` values in an additive
+structured-result field. Legacy claims omit the field and retain their existing result shape.
+`record_evaluation` consumes those refs as defined below; no hook is expected to inject an argument
+after the child constructs the call.
+
 Evidence enters through supervisor-owned hooks, the GitHub observer, or registered project probe
 adapters. A producer request is not evidence.
 
@@ -134,6 +141,8 @@ events are never requirement-eligible:
 claim_contract_declared
 producer_requested
 producer_terminal
+evaluation_submission_issued
+evaluation_submission_consumed
 gate_sample_observed
 closeout_attempted
 claim_superseded
@@ -148,7 +157,8 @@ evidence_observed
 An eligible envelope must have an event kind from the closed observer/probe registry, an allowed
 origin, a registered producer identity, the profile-required identity bindings, and a source
 cursor. `agent_reported`, `evaluator_reported`, `producer_requested`, `producer_terminal`,
-`gate_sample_observed`, `closeout_attempted`, and `claim_superseded` never satisfy a requirement.
+`evaluation_submission_issued`, `evaluation_submission_consumed`, `gate_sample_observed`,
+`closeout_attempted`, and `claim_superseded` never satisfy a requirement.
 Reviewer conclusions become eligible only through an `evidence_observed` envelope bound to a
 separately sealed evaluator child receipt; evaluator narration alone remains ineligible.
 
@@ -247,10 +257,16 @@ terminal structured verdict.
 The shipped `record_evaluation(..., finding, ...)` input remains accepted for compatibility, with
 optional backward-compatible structured `severity`, finding-count, and `submission_ref` fields. For
 v2 claim-compiler evaluator findings, `submission_ref` is required and must be the opaque stable ref
-issued by the supervisor/host for that evaluator submission boundary; an agent-chosen or unknown ref
-is rejected. The store checks that ref before writing, so replay returns the prior result while a
-legitimate second finding has a distinct issued ref. The string finding is human-authored prose: the
-store writes only a bounded redacted summary plus a supervisor-generated finding ID derived at
+issued and returned to that child by `claim_evaluation`. The evaluation request declares a bounded
+finding-slot cap; claiming it appends one `evaluation_submission_issued` control event per slot,
+derived from the evaluation-request ref and slot ordinal, and returns those opaque refs only to the
+bound child. Issuance is persisted before return. `record_evaluation` atomically consumes one ref by
+appending `evaluation_submission_consumed` with the resulting finding ID; an agent-chosen, unknown,
+wrong-evaluation, or wrong-child ref is rejected. Replaying a consumed ref ignores the new payload
+and returns the prior finding ID and structured result without another append, while a legitimate
+second finding uses a distinct issued slot. Unused slots prove nothing and expire when the child
+receipt seals. The string finding is human-authored prose: the store writes only a bounded redacted
+summary plus a supervisor-generated finding ID derived at
 write time from the evaluator-request event ref, frozen head, review type, and `submission_ref`,
 never from the prose or a future receipt. Severity uses a closed enum and defaults to `UNSPECIFIED`;
 count is validated against the structured findings or deterministically calculated. It never
@@ -295,6 +311,20 @@ declaration inherits that value by reference and cannot change it.
   exported packet are then folded only from that already-projected chain. Stable labels, state IDs,
   the privacy-safe structural profile projection, evidence references, producer identities, and
   control digests remain.
+
+The v2 proof projection registry is closed, versioned, and exhaustive for text-bearing event fields:
+
+| Event field | `verified_context` | `proof` before event hashing |
+|---|---|---|
+| `run_begun.objective_text` and objective-like request text | bounded redacted text | structural ref plus `text_withheld` |
+| `builder_claim.statement_text` | bounded redacted text | claim label, evidence refs, plus `text_withheld` |
+| `claim_contract_declared` contract prose and profile display metadata | bounded redacted projection | structural contract/profile fields plus `text_withheld` |
+| evaluator-finding summary | bounded redacted summary | finding ID, severity/count, refs, plus `text_withheld` |
+| diagnostic prose | bounded redacted prose | diagnostic ID/status/refs plus `text_withheld` |
+| closeout narrative | bounded redacted narrative | profile/state/scope/frontiers plus `text_withheld` |
+
+A v2 writer rejects any unregistered event type or text-bearing field before append; it never
+passes an unknown field through. This table governs existing event names as well as new families.
 
 Proof-mode events and exported artifacts must not contain the withheld text. This v2 at-write rule
 does not rewrite or change the bytes of any legacy v1 event, ledger, fixture, or receipt. The v2
@@ -342,8 +372,13 @@ named prior record. Post-seal activity without explicit invocation creates no Ly
 
 Profiles register stable `failure_class_id` values. A recurrence-enabled contract also declares a
 stable structural `recurrence_scope_ref` for the project or work domain; free-form objective text
-cannot supply it. An incident supplies a distinct incident reference and eligible evidence
-references. The reducer reconstructs recurrence from validated ledgers rather than a second mutable
+cannot supply it. A counted incident is an `evidence_observed` envelope from the profile-registered
+incident observer or probe, carrying the authorized producer identity, source cursor, failure class,
+and stable incident-subject/occurrence reference required by that profile. The supervisor derives
+`incident_ref` from the canonical structural projection of those fields; neither the agent nor an
+imported narrative may choose it. Re-observing the same source occurrence in another run produces
+the same `incident_ref`, so it counts once, while a missing or conflicting occurrence identity is
+ineligible. The reducer reconstructs recurrence from validated ledgers rather than a second mutable
 database. Its immutable aggregate input is the canonical sort of unique records containing
 `profile_requirements_hash`, `recurrence_scope_ref`, `failure_class_id`, `incident_ref`,
 `source_run_id`, `source_contract_ref`, `source_ledger_tip`, and eligible evidence references. The
@@ -356,14 +391,17 @@ destination is eligible only if the current explicitly invoked open contract dec
 to that eligible run. It carries the
 failure class, `recurrence_frontier`, sorted incident/contract refs, and per-ledger tips instead of a
 single `claim_contract_ref`. No source ledger is modified, and a sealed current run cannot receive
-it. The supervisor snapshots two canonical sorted sets for the exact tuple
-`profile_requirements_hash`, `recurrence_scope_ref`, and `failure_class_id`: incident candidates
-from the capsule index, and obligation candidates from the complete local open-and-sealed run index,
-including unpublished open runs. Only distinct eligible incidents in that tuple are counted and
+it. The supervisor snapshots two canonical sorted sets from the complete local open-and-sealed run
+index for the exact tuple `profile_requirements_hash`, `recurrence_scope_ref`, and
+`failure_class_id`: incident candidates and obligation candidates, including open runs that have
+never produced a Stop capsule. Each open candidate is identified by its validated ledger tip and
+event count at snapshot time; a prefix is immutable input only for that reduction, not a claim that
+the open ledger is terminal. Only distinct eligible incidents in that tuple are counted and
 included in its `recurrence_frontier`; other classes, profiles, or scopes cannot affect its threshold
 or digest. The supervisor independently verifies and re-walks every candidate ledger in both sets.
-Under the store's single-writer lock it re-samples both tuple-scoped sets and appends only if their
-membership and ledger tips are unchanged; otherwise it retries from a new snapshot. Before append,
+Under the store's single-writer lock it re-samples both tuple-scoped sets, including every open
+event count and tip, and appends only if their membership and ledger tips are unchanged; otherwise
+it retries from a new snapshot. Before append,
 it searches the complete verified obligation set for an existing obligation with the same tuple;
 the tuple may have at most one durable obligation and is its stable idempotency key. When the
 threshold is first observed in an eligible open run and no such obligation exists, omission is an
@@ -414,20 +452,24 @@ forged control events and production payloads, production-shaped mocks, builder/
 attached-checkout review, actor and head mismatch, pending and late-finding reviewers, decisive
 page-two GitHub data, truncated pagination and missing final cursors, a diamond profile with
 ambiguous surface projection, deletion of a declared custom profile, cross-process diagnostic
-deduplication and resolution, host-issued evaluator submission refs, write-time prose-independent
-finding IDs, sealed-receipt binding, legitimate duplicate-text findings, and replay deduplication,
+deduplication and resolution, persisted host-issued evaluator submission slots, wrong-child/ref
+rejection, write-time prose-independent finding IDs, sealed-receipt binding, legitimate
+duplicate-text findings, and consumed-slot replay deduplication,
 three cross-process Stop
 attempts with one stable blocker fingerprint, eligible evidence resetting that fingerprint,
 material control changing compiler state without satisfying evidence, evaluator command/argument
 or finding-prose leakage, recurrence across three sealed source ledgers with no post-seal append,
 privacy-independent structural profile identity, per-failure-class recurrence thresholds,
+supervisor-derived incident identity and cross-run duplicate-incident suppression,
 recurrence-scope and destination-contract separation, atomic incident/obligation set resampling
-including an unpublished obligation-owning run, concurrent promotion deduplication, mandatory
+including open incident and obligation runs before their first Stop, concurrent promotion
+deduplication, mandatory
 threshold promotion only into a tuple-matching open contract,
 fourth-incident and replay deduplication, post-seal append corruption, exact-reference successor
 supersession and invalid
-supersession rejection, proof-mode projection of existing and new v2-writer event types plus
-profile/display and downstream artifact leakage,
+supersession rejection, proof-mode projection of `run_begun`, `builder_claim`, evaluator findings,
+and every other existing or new v2-writer event type plus profile/display and downstream artifact
+leakage, unknown text-field rejection,
 open-contract continuation with inherited diagnostics, attempts, producers, quiet samples,
 immediate gate enforcement, and second-declaration rejection, no-contract v1 close compatibility,
 free-form completion narration,
