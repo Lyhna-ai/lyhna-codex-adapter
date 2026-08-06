@@ -82,6 +82,10 @@ const EVENT_PAYLOAD_FIELDS = new Map([
 ]);
 const PRODUCER_TERMINAL_STATUSES = new Set(['CLEAN', 'FINDINGS', 'INVALID', 'STALE']);
 const EVALUATION_TRIGGERS = new Set(['initial', 'post_fix_reeval', 'gate_audit', 're_examination']);
+const LIFECYCLE_TRANSITION_TYPES = new Set([
+  'child_started', 'child_stop_observed', 'child_receipt_sealed', 'child_receipt_retrieved',
+  'evaluation_requested', 'evaluation_claimed', 'evaluation_finding', 'pr_refreshed'
+]);
 // An evaluation is terminal once its outcome is fixed: recorded, checkout-integrity excepted,
 // or superseded by a moved head. Non-terminal (OPEN/CLAIMED) means a retry re-attaches; terminal
 // means a fresh begin_evaluation on the same snapshot is a distinct re-examination.
@@ -158,17 +162,54 @@ function closeoutAttemptStreakContinues(state, events, prior, fingerprint, eligi
   // history but do not reset the cap, matching the compiler's primary/eligible firewall.
   if (prior.payload?.eligible_evidence_frontier !== eligibleEvidenceFrontier) return false;
   const baselineEvents = events.filter((event) => event.seq <= prior.seq);
-  const baselineBlockers = canonicalJson(claimCloseoutBlockersForEvents(state, baselineEvents));
   const intervening = events.filter((event) => (
     event.seq > prior.seq && (beforeSeq === null || event.seq < beforeSeq)
   ));
-  // Reconstruct the normalized blocker set at every witnessed frontier. This catches a real
-  // A -> B -> A transition while ignoring events (including repeated findings or PR observations)
-  // that do not change what actually blocks closeout.
-  return !intervening.some((event) => canonicalJson(claimCloseoutBlockersForEvents(
-    state,
-    events.filter((candidate) => candidate.seq <= event.seq)
-  )) !== baselineBlockers);
+  const lifecycle = lifecycleProjectionFromEvents(baselineEvents);
+  const producer = producerProjectionFromEvents(state, baselineEvents);
+  const baselineLifecycle = canonicalJson(lifecycleBlockersFromProjection(state, lifecycle));
+  const baselinePending = canonicalJson(pendingProducerIdsFromProjection(producer));
+  // Replay each relevant projection once. This preserves exact A -> B -> A detection without
+  // recompiling every ledger prefix (quadratic Stop latency on long but inert histories).
+  for (const event of intervening) {
+    const producerEvent = event.type === 'producer_requested' || event.type === 'producer_terminal';
+    if (!producerEvent && !LIFECYCLE_TRANSITION_TYPES.has(event.type)) continue;
+    applyLifecycleProjectionEvent(lifecycle, event);
+    applyProducerProjectionEvent(state, producer, event);
+    if (canonicalJson(lifecycleBlockersFromProjection(state, lifecycle)) !== baselineLifecycle) return false;
+    if (canonicalJson(pendingProducerIdsFromProjection(producer)) !== baselinePending) return false;
+  }
+  return true;
+}
+
+function producerProjectionFromEvents(state, events) {
+  const projection = { requested: new Set(), terminals: new Map() };
+  for (const event of events) applyProducerProjectionEvent(state, projection, event);
+  return projection;
+}
+
+function applyProducerProjectionEvent(state, projection, event) {
+  const payload = event.payload || {};
+  const producer = state.claim_profile?.producers?.[payload.producer_id];
+  const bound = Boolean(
+    producer
+    && state.claim_contract?.named_producers?.includes(payload.producer_id)
+    && payload.contract_id === state.claim_contract.contract_id
+    && payload.claim_contract_ref === state.claim_contract.claim_contract_ref
+  );
+  if (event.type === 'producer_requested' && event.origin === 'mcp_routed'
+    && bound && payload.expected_identity === producer.expected_identity) {
+    projection.requested.add(payload.producer_id);
+  } else if (event.type === 'producer_terminal' && event.origin === 'runtime_hook'
+    && bound && payload.producer_identity === producer.expected_identity) {
+    projection.terminals.set(payload.producer_id, payload.status);
+  }
+}
+
+function pendingProducerIdsFromProjection(projection) {
+  return [...projection.requested]
+    .filter((producerId) => projection.terminals.get(producerId) !== 'CLEAN')
+    .sort();
 }
 
 function validateCloseoutEnvelopeBinding(state, origin, payload) {
@@ -1263,6 +1304,27 @@ function validateEventPayloadStructure(state, type, origin, payload) {
 // pure compiler already treats as CURRENTNESS_UNPROVEN.
 function normalizeEventPayloadForStorage(type, payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+  if (type === 'pr_snapshot') {
+    return {
+      ...payload,
+      head_before: proofSafeGitObjectId(payload.head_before),
+      head_after: proofSafeGitObjectId(payload.head_after)
+    };
+  }
+  if (type === 'pr_refreshed') {
+    return { ...payload, observed_head: proofSafeGitObjectId(payload.observed_head) };
+  }
+  if (type === 'evaluation_requested') {
+    return { ...payload, expected_head: proofSafeGitObjectId(payload.expected_head) };
+  }
+  if (type === 'evaluation_finding') {
+    return {
+      ...payload,
+      expected_head: proofSafeGitObjectId(payload.expected_head),
+      checkout_head_before: proofSafeGitObjectId(payload.checkout_head_before),
+      checkout_head_after: proofSafeGitObjectId(payload.checkout_head_after)
+    };
+  }
   if (type === 'evidence_observed') {
     let normalized = payload;
     if (normalized.subject_binding
@@ -1525,8 +1587,15 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
   assert(mode === 'full' || mode === 'pr_only', 'INVALID_MODE');
   const privacy = resolvePrivacyMode(privacyMode);
   const continuationRef = String(continuesFrom || '').trim();
-  if (continuationRef) assert(/^[a-f0-9]{64}$/.test(continuationRef), 'INVALID_CAPSULE_REF');
-  continuesFrom = continuationRef;
+  const canonicalContinuationRef = /^[a-f0-9]{64}$/.test(continuationRef) ? continuationRef : '';
+  if (privacy === 'proof' && continuationRef) assert(canonicalContinuationRef, 'INVALID_CAPSULE_REF');
+  // verified_context preserves the historical unresolved-edge behavior without storing arbitrary
+  // caller prose as an identity. Proof mode remains fail-closed because even an unresolved marker
+  // must not accept prompt-shaped input at its portable boundary.
+  const projectedUnresolvedContinuation = continuationRef && !canonicalContinuationRef
+    ? { capsule_ref: null, run_id: null, state_hash: null, resolution: 'UNRESOLVED_LOCALLY' }
+    : null;
+  continuesFrom = canonicalContinuationRef;
   return withLock(sessionLockPath(capability), () => withLock(continuationLockPath(), () => {
     const currentParent = getCapability(capability);
     assert(currentParent.kind === 'parent', 'PARENT_CAPABILITY_REQUIRED');
@@ -1688,7 +1757,7 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
       open_predecessors: openPredecessors,
       // The lineage edge to the window this run continues. Resolved locally, never taken on the
       // agent's word; null when no predecessor was declared.
-      inherits: resolveContinuesFrom(continuesFrom),
+      inherits: projectedUnresolvedContinuation || resolveContinuesFrom(continuesFrom),
       claim_contract: null,
       claim_profile: null,
       compiled_claim: null,
@@ -1941,17 +2010,15 @@ export function addPrSnapshot(capability, snapshot) {
     });
     // Plain retry keeps the existing record untouched (no status resurrection, no lost refresh state);
     // a new (base or occurrence) observation is stored as itself.
-    const storedSnapshot = state.privacy_mode === 'proof'
-      ? {
-          ...normalized,
-          id: snapshotEvent.payload.id,
-          base_sha: proofSafeGitObjectId(normalized.base_sha),
-          head_before: snapshotEvent.payload.head_before,
-          head_after: snapshotEvent.payload.head_after,
-          current_head: proofSafeGitObjectId(normalized.current_head),
-          failures: snapshotEvent.payload.failures || []
-        }
-      : normalized;
+    const storedSnapshot = {
+      ...normalized,
+      id: snapshotEvent.payload.id,
+      base_sha: proofSafeGitObjectId(normalized.base_sha),
+      head_before: snapshotEvent.payload.head_before,
+      head_after: snapshotEvent.payload.head_after,
+      current_head: proofSafeGitObjectId(normalized.current_head),
+      failures: snapshotEvent.payload.failures || []
+    };
     if (latest && !diverged) state.pr_snapshots[id] ||= storedSnapshot;
     else state.pr_snapshots[id] = storedSnapshot;
     saveState(state);
@@ -2259,63 +2326,65 @@ function claimSupportPosition(compiled, contract) {
     : `evidence supports ${supported}, not requested ${contract.requested_state}`;
 }
 
-function claimLifecycleBlockers(state, ledgerEvents = null) {
-  // Lifecycle caches are projections for the UI and mutation paths; they are not closeout
-  // authority. Rebuild the join from witnessed events every time so editing state.json cannot
-  // turn an active child or evaluator into a completed one.
-  const events = ledgerEvents || parseLedger(state.id).events;
-  const children = new Map();
-  const evaluations = new Map();
-  const sealedReceipts = new Map();
-  const retrievedReceipts = new Map();
+function lifecycleProjectionFromEvents(events) {
+  const projection = {
+    children: new Map(), evaluations: new Map(), sealedReceipts: new Map(),
+    retrievedReceipts: new Map(), staleSnapshots: new Set()
+  };
+  for (const event of events) applyLifecycleProjectionEvent(projection, event);
+  return projection;
+}
 
-  for (const event of events) {
-    const payload = event.payload || {};
-    if (event.type === 'child_started' && event.origin === 'runtime_hook') {
-      children.set(payload.child_id, { stopped: false, receipt_id: null });
-    } else if (event.type === 'child_stop_observed' && event.origin === 'runtime_hook') {
-      const child = children.get(payload.child_id);
-      if (child) child.stopped = true;
-    } else if (event.type === 'evaluation_requested' && event.origin === 'mcp_routed') {
-      evaluations.set(payload.evaluation_request_id, {
-        id: payload.evaluation_request_id,
-        snapshot_id: payload.snapshot_id,
-        status: 'OPEN',
-        child_agent_hash: null
-      });
-    } else if (event.type === 'evaluation_claimed' && event.origin === 'mcp_routed') {
-      const evaluation = evaluations.get(payload.evaluation_request_id);
-      if (evaluation) {
-        evaluation.status = 'CLAIMED';
-        evaluation.child_agent_hash = payload.child_agent_hash;
-      }
-    } else if (event.type === 'evaluation_finding' && event.origin === 'evaluator_reported') {
-      const evaluation = evaluations.get(payload.evaluation_request_id);
-      if (evaluation && evaluation.status !== 'CHECKOUT_INTEGRITY_EXCEPTION') {
-        evaluation.status = payload.checkout_integrity === 'CONSISTENT_CLEAN'
-          ? 'RECORDED'
-          : 'CHECKOUT_INTEGRITY_EXCEPTION';
-      }
-    } else if (event.type === 'pr_refreshed' && event.origin === 'github_observed' && payload.status === 'STALE') {
-      for (const evaluation of evaluations.values()) {
-        if (evaluation.snapshot_id === payload.snapshot_id) evaluation.status = 'STALE';
-      }
-    } else if (event.type === 'child_receipt_sealed' && event.origin === 'runtime_hook') {
-      sealedReceipts.set(payload.receipt_id, payload.content_ref);
-    } else if (event.type === 'child_receipt_retrieved' && event.origin === 'mcp_routed') {
-      retrievedReceipts.set(payload.receipt_id, payload.content_ref);
+function applyLifecycleProjectionEvent(projection, event) {
+  const payload = event.payload || {};
+  if (event.type === 'child_started' && event.origin === 'runtime_hook') {
+    projection.children.set(payload.child_id, { stopped: false, receipt_id: null });
+  } else if (event.type === 'child_stop_observed' && event.origin === 'runtime_hook') {
+    const child = projection.children.get(payload.child_id);
+    if (child) child.stopped = true;
+  } else if (event.type === 'evaluation_requested' && event.origin === 'mcp_routed') {
+    projection.evaluations.set(payload.evaluation_request_id, {
+      id: payload.evaluation_request_id,
+      snapshot_id: payload.snapshot_id,
+      status: projection.staleSnapshots.has(payload.snapshot_id) ? 'STALE' : 'OPEN',
+      child_agent_hash: null
+    });
+  } else if (event.type === 'evaluation_claimed' && event.origin === 'mcp_routed') {
+    const evaluation = projection.evaluations.get(payload.evaluation_request_id);
+    if (evaluation && evaluation.status !== 'STALE') {
+      evaluation.status = 'CLAIMED';
+      evaluation.child_agent_hash = payload.child_agent_hash;
+    }
+  } else if (event.type === 'evaluation_finding' && event.origin === 'evaluator_reported') {
+    const evaluation = projection.evaluations.get(payload.evaluation_request_id);
+    if (evaluation && !['STALE', 'CHECKOUT_INTEGRITY_EXCEPTION'].includes(evaluation.status)) {
+      evaluation.status = payload.checkout_integrity === 'CONSISTENT_CLEAN'
+        ? 'RECORDED'
+        : 'CHECKOUT_INTEGRITY_EXCEPTION';
+    }
+  } else if (event.type === 'pr_refreshed' && event.origin === 'github_observed' && payload.status === 'STALE') {
+    projection.staleSnapshots.add(payload.snapshot_id);
+    for (const evaluation of projection.evaluations.values()) {
+      if (evaluation.snapshot_id === payload.snapshot_id) evaluation.status = 'STALE';
+    }
+  } else if (event.type === 'child_receipt_sealed' && event.origin === 'runtime_hook') {
+    projection.sealedReceipts.set(payload.receipt_id, payload.content_ref);
+  } else if (event.type === 'child_receipt_retrieved' && event.origin === 'mcp_routed') {
+    projection.retrievedReceipts.set(payload.receipt_id, payload.content_ref);
+  }
+}
+
+function lifecycleBlockersFromProjection(state, projection, verifyArtifacts = false) {
+  const { children, evaluations, sealedReceipts, retrievedReceipts } = projection;
+  if (verifyArtifacts) {
+    // A ledger claim that a child receipt was sealed is joined only while the exact artifact still
+    // exists and hashes to the witnessed content reference.
+    for (const [receiptId, contentRef] of sealedReceipts) {
+      const path = childReceiptPath(state.id, receiptId);
+      assert(typeof contentRef === 'string' && contentRef.length > 0 && existsSync(path), 'LOCAL_CHAIN_BROKEN');
+      assert(sha256(readFileSync(path, 'utf8')) === contentRef, 'LOCAL_CHAIN_BROKEN');
     }
   }
-
-  // A ledger claim that a child receipt was sealed is joined only while the exact artifact still
-  // exists and hashes to the witnessed content reference. Closing over missing bytes would create
-  // a parent receipt that its own verifier rejects immediately afterward.
-  for (const [receiptId, contentRef] of sealedReceipts) {
-    const path = childReceiptPath(state.id, receiptId);
-    assert(typeof contentRef === 'string' && contentRef.length > 0 && existsSync(path), 'LOCAL_CHAIN_BROKEN');
-    assert(sha256(readFileSync(path, 'utf8')) === contentRef, 'LOCAL_CHAIN_BROKEN');
-  }
-
   const blockers = [];
   for (const evaluation of evaluations.values()) {
     if (evaluation.status === 'STALE' || evaluation.status === 'INVALID') continue;
@@ -2341,6 +2410,13 @@ function claimLifecycleBlockers(state, ledgerEvents = null) {
   return [...new Set(blockers)].sort();
 }
 
+function claimLifecycleBlockers(state, ledgerEvents = null) {
+  // Lifecycle caches are UI projections, never closeout authority. Rebuild once from witnessed
+  // events; artifact verification remains on the authoritative closeout path, not streak replay.
+  const events = ledgerEvents || parseLedger(state.id).events;
+  return lifecycleBlockersFromProjection(state, lifecycleProjectionFromEvents(events), true);
+}
+
 function claimCloseoutBlockers(state, compiled, ledgerEvents = null) {
   return [...new Set([
     ...compiled.missing.map((item) => `MISSING_${item}`),
@@ -2349,15 +2425,6 @@ function claimCloseoutBlockers(state, compiled, ledgerEvents = null) {
     ...(compiled.currentness === 'AS_WITNESSED' ? [] : ['CURRENTNESS_UNPROVEN']),
     ...claimLifecycleBlockers(state, ledgerEvents)
   ])].sort();
-}
-
-function claimCloseoutBlockersForEvents(state, events) {
-  const compiled = compileClaim({
-    profile: state.claim_profile,
-    contract: state.claim_contract,
-    events
-  });
-  return claimCloseoutBlockers(state, compiled, events);
 }
 
 function claimCloseoutBlockerFingerprint(state, gateId, compiled) {

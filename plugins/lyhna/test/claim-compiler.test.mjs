@@ -1505,15 +1505,21 @@ test('proof-mode v2 withholds objective, claim, diagnostic, and closeout prose b
 test('proof mode rejects prose-shaped scope refs and unregistered event shapes before hashing', { concurrency: false }, (t) => {
   const data = isolatedData(t);
   const rawContinuation = 'CONTINUATION_RAW_DO_NOT_PERSIST_5A11';
-  for (const privacyMode of ['verified_context', 'proof']) {
-    const invalidParent = mintSession({ sessionId: `compiler-${privacyMode}-invalid-continuation`, cwd: process.cwd() });
-    assert.throws(
-      () => beginRun(invalidParent, {
-        mode: 'full', objective: 'Private continuation.', privacyMode, continuesFrom: rawContinuation
-      }),
-      /INVALID_CAPSULE_REF/
-    );
-  }
+  const verifiedParent = mintSession({ sessionId: 'compiler-verified_context-invalid-continuation', cwd: process.cwd() });
+  const verifiedRun = beginRun(verifiedParent, {
+    mode: 'full', objective: 'Private continuation.', privacyMode: 'verified_context', continuesFrom: rawContinuation
+  });
+  assert.deepEqual(verifiedRun.inherits, {
+    capsule_ref: null, run_id: null, state_hash: null, resolution: 'UNRESOLVED_LOCALLY'
+  });
+  assert.equal(readTree(getRunForTesting(verifiedRun.id).directory).join('\n').includes(rawContinuation), false);
+  const invalidParent = mintSession({ sessionId: 'compiler-proof-invalid-continuation', cwd: process.cwd() });
+  assert.throws(
+    () => beginRun(invalidParent, {
+      mode: 'full', objective: 'Private continuation.', privacyMode: 'proof', continuesFrom: rawContinuation
+    }),
+    /INVALID_CAPSULE_REF/
+  );
   const unresolvedParent = mintSession({ sessionId: 'compiler-proof-unresolved-continuation', cwd: process.cwd() });
   const unresolvedRef = 'f'.repeat(64);
   const unresolvedRun = beginRun(unresolvedParent, {
@@ -1725,6 +1731,22 @@ test('invalid evaluator checkout identities are projected before storage in ever
     const parent = mintSession({ sessionId, cwd: process.cwd() });
     const run = beginRun(parent, { mode: 'full', objective: 'Validate evaluator identities.', privacyMode });
     const head = 'a'.repeat(40);
+    const rawSnapshotHead = `SNAPSHOT_HEAD_RAW_${privacyMode}_DO_NOT_PERSIST`;
+    const invalidSnapshot = addPrSnapshot(parent, {
+      id: `${privacyMode}_invalid_upstream_snapshot`, repository: 'Lyhna-ai/example', pr_number: 1,
+      base_sha: rawSnapshotHead, head_before: rawSnapshotHead, head_after: rawSnapshotHead,
+      status: 'CONSISTENT', files: [], checks: [], reviews: [], review_comments: [],
+      issue_comments: [], failures: []
+    });
+    assert.equal(invalidSnapshot.base_sha, null);
+    assert.equal(invalidSnapshot.head_before, null);
+    assert.equal(invalidSnapshot.head_after, null);
+    assert.throws(
+      () => beginEvaluation(parent, invalidSnapshot.id, {
+        path: process.cwd(), head: rawSnapshotHead, clean: true, detached: true
+      }),
+      /EVALUATOR_CHECKOUT_REQUIRED/
+    );
     const snapshot = addPrSnapshot(parent, {
       id: `${privacyMode}_invalid_eval_snapshot`, repository: 'Lyhna-ai/example', pr_number: 1,
       base_sha: 'b'.repeat(40), head_before: head, head_after: head, status: 'CONSISTENT',
@@ -1744,8 +1766,11 @@ test('invalid evaluator checkout identities are projected before storage in ever
     assert.equal(stored.checkout_head_after, null);
     assert.equal(stored.status, 'CHECKOUT_INTEGRITY_EXCEPTION');
     assert.equal(readTree(getRunForTesting(run.id).directory).join('\n').includes(rawHead), false);
+    assert.equal(readTree(getRunForTesting(run.id).directory).join('\n').includes(rawSnapshotHead), false);
   }
-  assert.equal(readTree(data).join('\n').includes('CHECKOUT_HEAD_RAW_'), false);
+  const allBytes = readTree(data).join('\n');
+  assert.equal(allBytes.includes('CHECKOUT_HEAD_RAW_'), false);
+  assert.equal(allBytes.includes('SNAPSHOT_HEAD_RAW_'), false);
 });
 
 test('proof mode projects snapshot, refresh, and checkout Git identifiers at first write', { concurrency: false }, (t) => {
