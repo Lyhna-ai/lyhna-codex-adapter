@@ -81,6 +81,7 @@ const EVENT_PAYLOAD_FIELDS = new Map([
   ['run_sealed', ['status', 'receipt_renderer', 'continuation_fold_version', 'claim_contract_ref', 'supported_state', 'requested_state', 'closeout_envelope_ref']],
   ['turn_checkpoint', ['status', 'receipt_renderer']]
 ]);
+const PRODUCER_TERMINAL_STATUSES = new Set(['CLEAN', 'FINDINGS', 'INVALID', 'STALE']);
 const EVALUATION_TRIGGERS = new Set(['initial', 'post_fix_reeval', 'gate_audit', 're_examination']);
 // An evaluation is terminal once its outcome is fixed: recorded, checkout-integrity excepted,
 // or superseded by a moved head. Non-terminal (OPEN/CLAIMED) means a retry re-attaches; terminal
@@ -866,7 +867,9 @@ function validateEventPayloadStructure(state, type, origin, payload) {
     assert(state.claim_contract.named_producers.includes(requirement.producer_id), 'INVALID_EVIDENCE_BINDING');
     assert(origin === 'mock_or_test' || requirement.eligible_origins.includes(origin), 'INVALID_EVIDENCE_BINDING');
     assert(typeof payload.source_cursor === 'string' && payload.source_cursor.length > 0 && payload.source_cursor.length <= 512, 'INVALID_EVIDENCE_BINDING');
-    assert(payload.observed_at === null || typeof payload.observed_at === 'string', 'INVALID_EVIDENCE_BINDING');
+    assert(payload.observed_at === undefined
+      || payload.observed_at === null
+      || typeof payload.observed_at === 'string', 'INVALID_EVIDENCE_BINDING');
     assert(payload.subject_binding && typeof payload.subject_binding === 'object' && !Array.isArray(payload.subject_binding), 'INVALID_EVIDENCE_BINDING');
     const bindingKeys = Object.keys(payload.subject_binding);
     assert(bindingKeys.length === requirement.subject_fields.length, 'INVALID_EVIDENCE_BINDING');
@@ -888,7 +891,7 @@ function validateEventPayloadStructure(state, type, origin, payload) {
     assert(payload.producer_identity === undefined
       || payload.producer_identity === producer.expected_identity, 'INVALID_PRODUCER_TERMINAL');
     assert(origin === 'runtime_hook', 'INVALID_PRODUCER_TERMINAL');
-    assert(typeof payload.status === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(payload.status), 'INVALID_PRODUCER_TERMINAL');
+    assert(PRODUCER_TERMINAL_STATUSES.has(payload.status), 'INVALID_PRODUCER_TERMINAL');
     assert(payload.source_cursor === undefined
       || (typeof payload.source_cursor === 'string' && payload.source_cursor.length > 0 && payload.source_cursor.length <= 512), 'INVALID_PRODUCER_TERMINAL');
     assert(payload.observed_at === undefined
@@ -923,7 +926,10 @@ function validateEventPayloadStructure(state, type, origin, payload) {
 // preserving arbitrary timestamp-shaped input: null is the canonical malformed/missing marker the
 // pure compiler already treats as CURRENTNESS_UNPROVEN.
 function normalizeEventPayloadForStorage(type, payload) {
-  if ((type === 'evidence_observed' || type === 'producer_terminal')
+  if (type === 'evidence_observed' && !isCanonicalObservedAt(payload.observed_at)) {
+    return { ...payload, observed_at: null };
+  }
+  if (type === 'producer_terminal'
     && payload.observed_at !== undefined
     && !isCanonicalObservedAt(payload.observed_at)) {
     return { ...payload, observed_at: null };

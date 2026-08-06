@@ -221,9 +221,22 @@ test('proof mode projects producer-terminal cursors and rejects unbound control 
     },
     idempotencyKey: 'proof-producer-terminal-wrong-identity'
   }), /INVALID_PRODUCER_TERMINAL/);
+  const rawStatus = 'RAW_TERMINAL_STATUS_SECRET_4A9E';
+  assert.throws(() => appendEvent(run.id, {
+    type: 'producer_terminal',
+    origin: 'runtime_hook',
+    payload: {
+      contract_id: declared.contract_id,
+      producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      status: rawStatus
+    },
+    idempotencyKey: 'proof-producer-terminal-wrong-status'
+  }), /INVALID_PRODUCER_TERMINAL/);
   const bytes = readTree(data).join('\n');
   assert.equal(bytes.includes(rawCursor), false);
   assert.equal(bytes.includes('RAW_TERMINAL_IDENTITY_9B2A'), false);
+  assert.equal(bytes.includes(rawStatus), false);
 });
 
 function runHook(input, env) {
@@ -423,7 +436,7 @@ test('undeclared producers are rejected while malformed time becomes a sanitized
   assert.equal(compiled.currentness, 'CURRENTNESS_UNPROVEN');
 });
 
-test('malformed time is sanitized into a currentness blocker while wrong-kind evidence is rejected', { concurrency: false }, (t) => {
+test('missing or malformed time becomes a sanitized currentness blocker while wrong-kind evidence is rejected', { concurrency: false }, (t) => {
   const data = isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-currentness-gate', cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'Require witnessed currentness at closeout.' });
@@ -434,6 +447,23 @@ test('malformed time is sanitized into a currentness blocker while wrong-kind ev
   observe(run.id, declared, 'configuration_present', 'configuration_presence_observed', 'registered_probe', 'software_release/deployment', { artifact_ref: 'sha256:artifact', configuration_ref: 'sha256:config' });
   observe(run.id, declared, 'registered_canary', 'registered_canary_observed', 'registered_probe', 'software_release/canary', { artifact_ref: 'sha256:artifact', canary_ref: 'sha256:canary' });
   observe(run.id, declared, 'terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }, 'terminal-valid-old');
+  const missingTime = appendEvent(run.id, {
+    type: 'evidence_observed',
+    origin: 'registered_probe',
+    payload: {
+      contract_id: declared.contract_id,
+      profile_requirements_hash: declared.profile_requirements_hash,
+      requirement_id: 'terminal_canary_state',
+      event_kind: 'terminal_canary_state_observed',
+      producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      source_cursor: 'cursor-terminal-missing-time',
+      subject_binding: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
+    },
+    idempotencyKey: 'terminal-missing-time'
+  });
+  assert.equal(missingTime.payload.observed_at, null);
+  assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'CURRENTNESS_UNPROVEN');
   const malformedObservedAt = 'RAW_MALFORMED_TIME_3C91';
   const malformed = appendEvent(run.id, {
     type: 'evidence_observed',
