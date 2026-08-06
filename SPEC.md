@@ -9,6 +9,14 @@ the work commercially, architecturally, legally, or operationally correct. For a
 declared claim contract, it may refuse an unsupported Lyhna claim or successful seal; it does not
 block the underlying external action.
 
+## Normative claim-compiler addendum
+
+For v0.1.33 through v0.1.36, implementations and reviews must also follow
+[`docs/proposals/CLAIM-COMPILER-SPEC-2026-08-05.md`](docs/proposals/CLAIM-COMPILER-SPEC-2026-08-05.md).
+That ratified addendum supplements this specification and supersedes it only where it explicitly
+defines unsupported-seal refusal and the five-PR merge authorization. Every other invariant in
+this specification remains binding.
+
 ## Repository boundary
 
 - All new product code lives in `Lyhna-ai/lyhna-codex-adapter`.

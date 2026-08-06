@@ -85,8 +85,12 @@ named producer IDs and expected identities
 objective_ref
 verifier
 caps
-privacy_mode
+run_privacy_mode_ref
 ```
+
+`run_privacy_mode_ref` is copied by the supervisor from the chained `run_begun` event. It is not
+supplied or overridable by `declare_claim_contract`; an attempted privacy field is rejected by the
+closed tool schema. The run-anchored mode remains the single authority.
 
 The official completion result is a generated closeout envelope. Free-form prose is neither parsed
 nor accepted as completion evidence. Generated language always states profile, state, scope, and
@@ -237,6 +241,9 @@ and resets the ordinal for the resulting fingerprint.
 
 The canonical privacy enum remains the shipped `verified_context | proof`.
 
+The selected value comes only from `begin_run` and its chained `run_begun` event. Contract
+declaration inherits that value by reference and cannot change it.
+
 - `verified_context` retains bounded, redacted contract and diagnostic text for the owner.
 - `proof` follows the existing at-egress projection model: the local ledger retains the same
   bounded redacted source text, while capsule, receipt, handoff, continuation prompt, and exported
@@ -314,7 +321,7 @@ custom profile, cross-process diagnostic deduplication and resolution, three cro
 attempts with one stable blocker fingerprint, eligible evidence resetting that fingerprint,
 post-seal append corruption, explicit successor supersession, proof-mode export leakage,
 open-contract continuation, free-form completion narration, full backward-compatible `tools/list`,
-and three distinct recurrence incidents.
+privacy-mode override rejection, and three distinct recurrence incidents.
 
 Adam authorizes Codex to squash-merge this ratification PR #13 and four future slices only when
 their declared gates are terminal and clean. The future targets are fixed as repository
