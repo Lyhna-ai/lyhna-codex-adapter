@@ -301,7 +301,9 @@ test('newer malformed time blocks closeout until a newer valid observation resto
   const unproven = evaluateClaimGate(parent, declared.contract_id, 'closeout');
   assert.equal(unproven.highest_supported_state, 'LIVE_PROVEN', 'older valid evidence remains visible but not closeable');
   assert.equal(unproven.currentness, 'CURRENTNESS_UNPROVEN');
-  assert.match(claimInlineAdvisory(parent), /CURRENTNESS_UNPROVEN/);
+  const currentnessAdvisory = claimInlineAdvisory(parent);
+  assert.match(currentnessAdvisory, /supports requested LIVE_PROVEN, but closeout is blocked/);
+  assert.match(currentnessAdvisory, /CURRENTNESS_UNPROVEN/);
   assert.equal(claimInlineAdvisory(parent), null, 'unchanged currentness diagnostic is suppressed inline');
   requestClose(parent, 'Close only if currentness is witnessed.');
   const blocked = checkpointOrSeal(parent, 'currentness-stop-1');
@@ -370,7 +372,54 @@ test('a reused source cursor with conflicting witnessed times blocks closeout un
   assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'CURRENTNESS_UNPROVEN');
   requestClose(parent, 'Close only after an unambiguous source frontier.');
   assert(checkpointOrSeal(parent, 'cursor-conflict-stop').blockers.includes('CURRENTNESS_UNPROVEN'));
-  observe(run.id, declared, 'terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }, 'terminal-cursor-new');
+  appendEvent(run.id, {
+    type: 'evidence_observed',
+    origin: 'registered_probe',
+    payload: {
+      contract_id: declared.contract_id,
+      profile_requirements_hash: declared.profile_requirements_hash,
+      requirement_id: 'terminal_canary_state',
+      event_kind: 'terminal_canary_state_observed',
+      producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      source_cursor: 'cursor-terminal-new',
+      observed_at: '2026-08-05T12:02:00Z',
+      subject_binding: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
+    },
+    idempotencyKey: 'terminal-cursor-new'
+  });
+  assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'AS_WITNESSED');
+});
+
+test('a later source cursor cannot move witnessed time backward and a newer time restores currentness', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-currentness-time-regression', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Reject regressed witnessed time.' });
+  const declared = declareClaimContract(parent, contract({ requested_state: 'BUILT' }));
+  seedBuilt(run.id, declared);
+  const sourceObservation = (cursor, observedAt, key) => appendEvent(run.id, {
+    type: 'evidence_observed',
+    origin: 'mock_or_test',
+    payload: {
+      contract_id: declared.contract_id,
+      profile_requirements_hash: declared.profile_requirements_hash,
+      requirement_id: 'source_identity',
+      event_kind: 'source_identity_observed',
+      producer_id: 'software_release/local',
+      producer_identity: 'local_verifier',
+      source_cursor: cursor,
+      observed_at: observedAt,
+      subject_binding: { source_ref: 'sha256:source' }
+    },
+    idempotencyKey: key
+  });
+  sourceObservation('cursor-source-forward', '2026-08-05T12:05:00Z', 'source-forward');
+  sourceObservation('cursor-source-regressed', '2026-08-05T12:01:00Z', 'source-regressed');
+  const regressed = evaluateClaimGate(parent, declared.contract_id, 'closeout');
+  assert.equal(regressed.highest_supported_state, 'BUILT');
+  assert.equal(regressed.currentness, 'CURRENTNESS_UNPROVEN');
+  assert.match(claimInlineAdvisory(parent), /supports requested BUILT, but closeout is blocked/);
+  sourceObservation('cursor-source-restored', '2026-08-05T12:06:00Z', 'source-restored');
   assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'AS_WITNESSED');
 });
 
@@ -532,6 +581,26 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
   );
   const rawCursor = 'CURSOR_RAW_DO_NOT_PERSIST_6C20';
   const rawSource = 'SUBJECT_RAW_DO_NOT_PERSIST_B157';
+  const rawObservedAt = 'OBSERVED_AT_RAW_DO_NOT_PERSIST_9C42';
+  assert.throws(
+    () => appendEvent(run.id, {
+      type: 'evidence_observed',
+      origin: 'runtime_hook',
+      payload: {
+        contract_id: declared.contract_id,
+        profile_requirements_hash: declared.profile_requirements_hash,
+        requirement_id: 'source_identity',
+        event_kind: 'source_identity_observed',
+        producer_id: 'software_release/local',
+        producer_identity: 'local_verifier',
+        source_cursor: rawCursor,
+        observed_at: rawObservedAt,
+        subject_binding: { source_ref: rawSource }
+      },
+      idempotencyKey: 'known-evidence-malformed-observed-at'
+    }),
+    /UNREGISTERED_PROOF_FIELD/
+  );
   const projected = appendEvent(run.id, {
     type: 'evidence_observed',
     origin: 'runtime_hook',
@@ -550,8 +619,10 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
   });
   assert.equal(projected.payload.source_cursor, `cursor_${sha256(rawCursor)}`);
   assert.equal(projected.payload.subject_binding.source_ref, `sha256:${sha256(rawSource)}`);
+  assert.doesNotThrow(() => evaluateClaimGate(parent, declared.contract_id, 'closeout'));
+  assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'gate_evaluated').length, 1);
   const proofLedger = JSON.stringify(getRunForTesting(run.id).events);
-  for (const marker of ['RAW_PROSE', 'NESTED_HOOK_PROSE', 'NESTED_SUBJECT_PROSE', rawCursor, rawSource]) assert.equal(proofLedger.includes(marker), false);
+  for (const marker of ['RAW_PROSE', 'NESTED_HOOK_PROSE', 'NESTED_SUBJECT_PROSE', rawCursor, rawSource, rawObservedAt]) assert.equal(proofLedger.includes(marker), false);
 });
 
 test('proof-mode evaluator prose is withheld from state and child receipts, not only from the ledger', { concurrency: false }, (t) => {

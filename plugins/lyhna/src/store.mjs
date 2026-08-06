@@ -27,6 +27,7 @@ import {
   blockerFingerprint,
   compileClaim,
   getClaimProfile,
+  isCanonicalObservedAt,
   validateClaimContract
 } from './claim-compiler.mjs';
 
@@ -894,6 +895,7 @@ function projectEventPayloadForPrivacy(state, type, payload) {
     const requirement = state.claim_profile?.requirements?.find((item) => item.requirement_id === payload.requirement_id);
     assert(requirement, 'UNREGISTERED_PROOF_FIELD');
     assert(typeof payload.source_cursor === 'string' && payload.source_cursor.length > 0, 'UNREGISTERED_PROOF_FIELD');
+    assert(isCanonicalObservedAt(payload.observed_at), 'UNREGISTERED_PROOF_FIELD');
     assert(payload.subject_binding && typeof payload.subject_binding === 'object' && !Array.isArray(payload.subject_binding), 'UNREGISTERED_PROOF_FIELD');
     const unknownBinding = Object.keys(payload.subject_binding || {}).find((key) => !requirement.subject_fields.includes(key));
     assert(!unknownBinding, 'UNREGISTERED_PROOF_FIELD');
@@ -1679,11 +1681,12 @@ export function evaluateClaimGate(capability, contractId, gateId) {
     assert(state.claim_contract?.contract_id === contractId, 'CLAIM_CONTRACT_NOT_FOUND');
     assert(state.claim_contract.declared_gate_ids.includes(gateId), 'GATE_NOT_DECLARED');
     const compiled = compileAndRecordUnlocked(runId, state);
+    const { compiled_event_ref: _compiledEventRef, ...gatePayload } = compiled;
     appendEventUnlocked(runId, state, {
       type: 'gate_evaluated',
       origin: 'runtime_hook',
       payload: {
-        ...compiled,
+        ...gatePayload,
         gate_id: gateId,
         claim_contract_ref: state.claim_contract.claim_contract_ref,
         fold_version: CURRENT_FOLD_VERSION
@@ -1738,7 +1741,10 @@ export function claimInlineAdvisory(capability) {
     }
     const diagnosticId = `diag_${fingerprint.slice(0, 24)}`;
     const supported = compiled.highest_supported_state || 'NO_SUPPORTED_STATE';
-    const message = `Lyhna inline claim check: evidence supports ${supported}, not requested ${state.claim_contract.requested_state}. Blockers: ${inlineBlockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${compiled.next_verifier}.`;
+    const claimPosition = requestedSupported
+      ? `evidence supports requested ${state.claim_contract.requested_state}, but closeout is blocked`
+      : `evidence supports ${supported}, not requested ${state.claim_contract.requested_state}`;
+    const message = `Lyhna inline claim check: ${claimPosition}. Blockers: ${inlineBlockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${compiled.next_verifier}.`;
     appendEventUnlocked(runId, state, {
       type: 'diagnostic_emitted',
       origin: 'runtime_hook',

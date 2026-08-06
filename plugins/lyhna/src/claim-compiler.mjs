@@ -306,7 +306,7 @@ function evidenceMatches(requirement, event, contract, profile) {
     && isCanonicalObservedAt(event.payload?.observed_at);
 }
 
-function isCanonicalObservedAt(value) {
+export function isCanonicalObservedAt(value) {
   if (typeof value !== 'string' || !CANONICAL_UTC_SECONDS.test(value)) return false;
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) return false;
@@ -414,7 +414,18 @@ export function compileClaim({ profile, contract, events }) {
       .map((event) => event.payload?.observed_at));
     return timestamps.size > 1;
   });
-  const currentness = relevantEligible.length > 0 && !malformedCurrentnessCandidate && !conflictingCurrentnessCandidate
+  const regressedCurrentnessCandidate = [...latestBoundCurrentness.entries()].some(([requirementId, latest]) => {
+    if (!isCanonicalObservedAt(latest.payload?.observed_at)) return false;
+    const latestTime = Date.parse(latest.payload.observed_at);
+    return (boundCurrentnessHistory.get(requirementId) || [])
+      .slice(0, -1)
+      .some((event) => isCanonicalObservedAt(event.payload?.observed_at)
+        && Date.parse(event.payload.observed_at) > latestTime);
+  });
+  const currentness = relevantEligible.length > 0
+    && !malformedCurrentnessCandidate
+    && !conflictingCurrentnessCandidate
+    && !regressedCurrentnessCandidate
     ? 'AS_WITNESSED'
     : 'CURRENTNESS_UNPROVEN';
   const firstMissing = missing.length ? requirements.get(missing[0]) : null;
