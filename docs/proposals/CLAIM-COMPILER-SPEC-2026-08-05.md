@@ -68,22 +68,25 @@ projection. Multiple incomparable supported internal nodes are returned as
 `maximal_supported_nodes`; `highest_supported_state` is populated only by the unique ordered
 surface projection. A profile with an ambiguous or missing projection is rejected before use.
 
-A profile snapshot is canonicalized as ledger-owned immutable bytes in `claim_contract_declared`;
-its mode-appropriate canonical hash is the profile identity. The schema separates machine-required
-structural fields from optional human-authored display metadata. In `verified_context`, the event
-and v2 capsule carry the full bounded, redacted canonical snapshot. In `proof`, the event payload is
-projected before canonical ledger hashing: it carries the complete structural projection and
-deterministic `text_withheld` markers, never display metadata or a hash derived from that withheld
-text. The proof-mode v2 capsule carries that same canonical structural projection and hash. Either
-projection contains everything the pure compiler needs, so deleting or editing a project profile
-after declaration cannot change offline continuation or refolding. A locally declared profile
-states the chosen requirements; it does not prove those requirements are sufficient.
+A profile snapshot is canonicalized as ledger-owned immutable bytes in `claim_contract_declared`.
+`profile_requirements_hash`, computed only from the canonical machine-required structural
+projection, is the stable profile identity used by the compiler, continuity, and recurrence in
+every privacy mode. Optional display metadata has a separate `profile_display_hash` only in
+`verified_context` and can never change structural identity or satisfy a requirement. In
+`verified_context`, the event and v2 capsule carry the bounded, redacted display projection beside
+the structural projection. In `proof`, the event payload is projected before canonical ledger
+hashing: it carries the same complete structural projection and deterministic `text_withheld`
+markers, never display metadata or a hash derived from that withheld text. The proof-mode v2 capsule
+carries that same canonical structural projection and requirements hash. Either projection contains
+everything the pure compiler needs, so deleting or editing a project profile after declaration
+cannot change offline continuation or refolding. A locally declared profile states the chosen
+requirements; it does not prove those requirements are sufficient.
 
 An immutable contract contains:
 
 ```text
 contract_id
-profile_id and profile_hash
+profile_id and profile_requirements_hash
 requested_state
 declared_gate_ids
 named producer IDs and expected identities
@@ -244,16 +247,17 @@ terminal structured verdict.
 The shipped `record_evaluation(..., finding, ...)` input remains accepted for compatibility, with
 optional backward-compatible structured `severity` and finding-count fields. The store treats the
 string finding as human-authored prose: it writes only a bounded redacted finding summary plus a
-supervisor-generated finding ID derived from the sealed evaluator receipt reference and finding
-ordinal, never from the prose. Severity uses a closed enum and defaults to `UNSPECIFIED`; count is
-validated against the structured findings or deterministically calculated. It never stores full
-commands, output, tokens, environment, or private paths embedded in the input. In `proof`, the
-finding summary is projected away; finding ID, severity/count, verdict, and evidence references
-remain. Replay of the same sealed receipt and ordinal resolves to the same ID and appends no
-duplicate.
+supervisor-generated finding ID derived at write time from the evaluator-request event ref, frozen
+head, review type, and finding ordinal, never from the prose or a future receipt. Severity uses a
+closed enum and defaults to `UNSPECIFIED`; count is validated against the structured findings or
+deterministically calculated. It never stores full commands, output, tokens, environment, or
+private paths embedded in the input. In `proof`, the finding summary is projected away; finding ID,
+severity/count, verdict, and evidence references remain. When the child seals, its terminal event
+binds those existing finding IDs to the sealed evaluator receipt ref; no ID is rewritten. Replay of
+the same request ref and ordinal resolves to the same ID and appends no duplicate.
 
 The default software-release quiet barrier requires two primary samples at least 120 witnessed
-seconds apart with identical profile and contract hashes, exact head, producer statuses, reviewer
+seconds apart with identical profile-requirements and contract hashes, exact head, producer statuses, reviewer
 actors and verdicts, checks, unresolved-thread state, source cursors, pagination-completeness
 markers, and local verifier result. GitHub checks, reviews, comments, and unresolved threads are
 terminal only after every page is observed and the final cursor or explicit end marker is bound
@@ -337,22 +341,27 @@ stable structural `recurrence_scope_ref` for the project or work domain; free-fo
 cannot supply it. An incident supplies a distinct incident reference and eligible evidence
 references. The reducer reconstructs recurrence from validated ledgers rather than a second mutable
 database. Its immutable aggregate input is the canonical sort of unique records containing
-`profile_hash`, `recurrence_scope_ref`, `failure_class_id`, `incident_ref`, `source_run_id`,
-`source_contract_ref`, `source_ledger_tip`, and eligible evidence references. The
+`profile_requirements_hash`, `recurrence_scope_ref`, `failure_class_id`, `incident_ref`,
+`source_run_id`, `source_contract_ref`, `source_ledger_tip`, and eligible evidence references. The
 `recurrence_frontier` is the digest of those sorted records.
 
-One initial incident plus two distinct confirmed recurrences may append one derived
-`ENFORCEMENT_REQUIRED` obligation only to the current explicitly invoked open run. It carries the
+When one initial incident plus two distinct confirmed recurrences are first observed and a current
+explicitly invoked open run exists, the reducer must append exactly one derived
+`ENFORCEMENT_REQUIRED` obligation to that run. It carries the
 failure class, `recurrence_frontier`, sorted incident/contract refs, and per-ledger tips instead of a
 single `claim_contract_ref`. No source ledger is modified, and a sealed current run cannot receive
 it. The supervisor snapshots a canonical sorted candidate set from the local capsule index for the
-same `profile_hash` and `recurrence_scope_ref`, then independently verifies and re-walks every
-candidate ledger. Under the store's single-writer lock it re-samples that index and appends only if
-the candidate set and ledger tips are unchanged; otherwise it retries from a new snapshot. Before
-append, it searches that complete verified set for an existing obligation with the same
-`profile_hash`, `recurrence_scope_ref`, and `failure_class_id`; that tuple may have at most one
-durable obligation and is its stable idempotency key. The event records the threshold-crossing
-recurrence frontier. Replay, an unrelated scope/profile, or a fourth and later incident cannot
+exact tuple `profile_requirements_hash`, `recurrence_scope_ref`, and `failure_class_id`. Only
+distinct eligible incidents in that tuple are counted and included in its `recurrence_frontier`;
+other classes, profiles, or scopes cannot affect its threshold or digest. The supervisor then
+independently verifies and re-walks every candidate ledger. Under the store's single-writer lock it
+re-samples that same tuple and appends only if its candidate set and ledger tips are unchanged;
+otherwise it retries from a new snapshot. Before append, it searches that complete verified set for
+an existing obligation with the same tuple; the tuple may have at most one durable obligation and
+is its stable idempotency key. When the threshold is first observed in an eligible open run and no
+such obligation exists, omission is an error rather than an allowed outcome. The event records the
+threshold-crossing recurrence frontier. Replay, an unrelated scope/profile/class, or a fourth and
+later incident cannot
 silently suppress or duplicate the obligation: unrelated tuples reduce separately, while the same
 tuple reports its existing obligation and newer incident set read-only. An unresolved obligation
 ref is carried in v2 continuation until an explicit future disposition contract resolves it. With
@@ -396,13 +405,16 @@ forged control events and production payloads, production-shaped mocks, builder/
 attached-checkout review, actor and head mismatch, pending and late-finding reviewers, decisive
 page-two GitHub data, truncated pagination and missing final cursors, a diamond profile with
 ambiguous surface projection, deletion of a declared custom profile, cross-process diagnostic
-deduplication and resolution, prose-independent evaluator finding IDs and replay deduplication,
+deduplication and resolution, write-time prose-independent evaluator finding IDs, sealed-receipt
+binding, and replay deduplication,
 three cross-process Stop
 attempts with one stable blocker fingerprint, eligible evidence resetting that fingerprint,
 material control changing compiler state without satisfying evidence, evaluator command/argument
 or finding-prose leakage, recurrence across three sealed source ledgers with no post-seal append,
-recurrence-scope separation and atomic candidate-set resampling, fourth-incident and replay
-deduplication, post-seal append corruption, exact-reference successor supersession and invalid
+privacy-independent structural profile identity, per-failure-class recurrence thresholds,
+recurrence-scope separation and atomic candidate-set resampling, mandatory threshold promotion,
+fourth-incident and replay deduplication, post-seal append corruption, exact-reference successor
+supersession and invalid
 supersession rejection, proof-mode event/profile/display and downstream artifact leakage,
 open-contract continuation with inherited diagnostics, attempts, producers, quiet samples,
 immediate gate enforcement, and second-declaration rejection, no-contract v1 close compatibility,
