@@ -143,6 +143,7 @@ producer_requested
 producer_terminal
 evaluation_submission_issued
 evaluation_submission_consumed
+continuation_lease_transferred
 gate_sample_observed
 closeout_attempted
 claim_superseded
@@ -158,7 +159,8 @@ An eligible envelope must have an event kind from the closed observer/probe regi
 origin, a registered producer identity, the profile-required identity bindings, and a source
 cursor. `agent_reported`, `evaluator_reported`, `producer_requested`, `producer_terminal`,
 `evaluation_submission_issued`, `evaluation_submission_consumed`, `gate_sample_observed`,
-`closeout_attempted`, and `claim_superseded` never satisfy a requirement.
+`continuation_lease_transferred`, `closeout_attempted`, and `claim_superseded` never satisfy a
+requirement.
 Reviewer conclusions become eligible only through an `evidence_observed` envelope bound to a
 separately sealed evaluator child receipt; evaluator narration alone remains ineligible.
 
@@ -316,8 +318,8 @@ The v2 proof projection registry is closed, versioned, and exhaustive for text-b
 
 | Event field | `verified_context` | `proof` before event hashing |
 |---|---|---|
-| `run_begun.objective_text` and objective-like request text | bounded redacted text | structural ref plus `text_withheld` |
-| `builder_claim.statement_text` | bounded redacted text | claim label, evidence refs, plus `text_withheld` |
+| `run_begun.objective_text` and objective-like request text | bounded redacted text plus its local text hash | omit text and every prose-derived hash; retain only an independently supplied structural `objective_ref`, when present, plus `text_withheld` |
+| `builder_claim.statement` / `statement_text` / prose-derived `statement_ref` | bounded redacted text plus local text hash | omit all three; retain origin, evidence refs, state labels not derived from narration, plus `text_withheld` |
 | `claim_contract_declared` contract prose and profile display metadata | bounded redacted projection | structural contract/profile fields plus `text_withheld` |
 | evaluator-finding summary | bounded redacted summary | finding ID, severity/count, refs, plus `text_withheld` |
 | diagnostic prose | bounded redacted prose | diagnostic ID/status/refs plus `text_withheld` |
@@ -345,20 +347,26 @@ The implementation must:
 - inherit an open contract as open across a window boundary;
 - never reopen a sealed contract.
 
-Open-contract inheritance is a supervisor transition, not a second agent declaration. After
-`begin_run(..., continues_from: capsule_ref)` validates an open predecessor capsule, the supervisor
-appends one `claim_contract_declared` event with `declaration_kind: inherited`, the original
-contract ID and mode-appropriate profile hash, the unchanged requested state, gates, producer
-identities, verifier, and caps, plus `inherited_from_contract_ref` and the validated `capsule_ref`.
-The same event carries a canonical `inherited_control_state` projection copied from the verified v2
-capsule: compiled state, pending producer cursors, unresolved diagnostic IDs and resolutions,
-blocker fingerprint and close-attempt ordinal, quiet-period samples, gate-sample cursors, and
-unresolved enforcement refs. The successor reducer initializes from that ledger event before any
-new hook boundary, so process or window changes cannot reset diagnostics, attempts, joins, or quiet
-samples. That event activates compilation and gate enforcement immediately and consumes the run's
-sole declaration slot, so a later `declare_claim_contract` call is rejected. If either contract or
-control state cannot be reconstructed and verified from the capsule, successor creation fails
-closed instead of opening an unenforced or reset contract.
+Open-contract window continuation rotates the lease on the same run and ledger; it never creates two
+writable histories or a second contract declaration. Under a data-root continuation lock plus the
+predecessor run lock, `begin_run(..., continues_from: capsule_ref)` must validate that the open
+capsule is the current published face, re-walk its chain, and reconstruct the complete immutable
+contract and control state. The capsule includes the canonical structural profile projection and
+`profile_requirements_hash`, optional mode-allowed display projection/hash, contract ID,
+`objective_ref`, requested state, gate IDs, producer identities, verifier, caps,
+`run_privacy_mode_ref`, `recurrence_scope_ref`, compiled state, pending producer cursors, unresolved
+diagnostics and resolutions, blocker fingerprint and close-attempt ordinal, quiet-period samples,
+gate-sample cursors, and unresolved enforcement refs.
+
+The supervisor then appends one `continuation_lease_transferred` control event to that same open
+ledger, atomically revokes the predecessor session capability, binds the new hook-observed session
+capability, and returns the existing `run_id`. The append guard rejects every later hook or MCP write
+using the revoked capability. The new session reconstructs from the ledger before its first work
+boundary, so compiler state, diagnostics, attempts, joins, quiet samples, scope, and gate enforcement
+continue without reset. The run's sole `claim_contract_declared` event remains authoritative and a
+second declaration is rejected. If the capsule is stale, any contract/control field fails equality,
+the predecessor is not locally available, or revocation and transfer cannot be committed atomically,
+continuation fails closed and no second writable run is opened.
 
 A later contradiction does not open a run automatically. After a new explicit Lyhna invocation,
 the shipped `begin_run(..., continues_from: capsule_ref)` path opens the successor. The previous
@@ -399,9 +407,12 @@ event count at snapshot time; a prefix is immutable input only for that reductio
 the open ledger is terminal. Only distinct eligible incidents in that tuple are counted and
 included in its `recurrence_frontier`; other classes, profiles, or scopes cannot affect its threshold
 or digest. The supervisor independently verifies and re-walks every candidate ledger in both sets.
-Under the store's single-writer lock it re-samples both tuple-scoped sets, including every open
-event count and tip, and appends only if their membership and ledger tips are unchanged; otherwise
-it retries from a new snapshot. Before append,
+The entire scan, verification, re-sample, duplicate check, and destination append executes under a
+data-root-wide recurrence/index lock, not the shipped per-run writer lock. Per-run locks are acquired
+inside it in canonical run-ID order. Before append the reducer re-samples both tuple-scoped sets,
+including every open event count and tip, and proceeds only if their membership and ledger tips are
+unchanged; otherwise it releases and retries from a new snapshot. This serializes two eligible
+destination runs so only the first can append. Before append,
 it searches the complete verified obligation set for an existing obligation with the same tuple;
 the tuple may have at most one durable obligation and is its stable idempotency key. When the
 threshold is first observed in an eligible open run and no such obligation exists, omission is an
@@ -463,15 +474,17 @@ privacy-independent structural profile identity, per-failure-class recurrence th
 supervisor-derived incident identity and cross-run duplicate-incident suppression,
 recurrence-scope and destination-contract separation, atomic incident/obligation set resampling
 including open incident and obligation runs before their first Stop, concurrent promotion
-deduplication, mandatory
+deduplication under a data-root-wide lock with two eligible destination runs, mandatory
 threshold promotion only into a tuple-matching open contract,
 fourth-incident and replay deduplication, post-seal append corruption, exact-reference successor
 supersession and invalid
-supersession rejection, proof-mode projection of `run_begun`, `builder_claim`, evaluator findings,
-and every other existing or new v2-writer event type plus profile/display and downstream artifact
-leakage, unknown text-field rejection,
-open-contract continuation with inherited diagnostics, attempts, producers, quiet samples,
-immediate gate enforcement, and second-declaration rejection, no-contract v1 close compatibility,
+supersession rejection, proof-mode removal of objective/statement text and prose-derived refs from
+`run_begun` and `builder_claim`, projection of evaluator findings and every other existing or new
+v2-writer event type plus profile/display and downstream artifact leakage, unknown text-field
+rejection, open-contract same-run lease rotation with complete contract/control reconstruction,
+stale or unavailable predecessor rejection, revoked-capability write rejection, inherited
+diagnostics, attempts, producers, quiet samples, immediate gate enforcement, and second-declaration
+rejection, no-contract v1 close compatibility,
 free-form completion narration,
 full backward-compatible `tools/list`,
 privacy-mode override rejection, and three distinct recurrence incidents.
