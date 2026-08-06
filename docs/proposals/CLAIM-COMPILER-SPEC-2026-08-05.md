@@ -245,16 +245,19 @@ A successful review job with findings is `FINDINGS`, not `CLEAN`. Free-form revi
 terminal structured verdict.
 
 The shipped `record_evaluation(..., finding, ...)` input remains accepted for compatibility, with
-optional backward-compatible structured `severity` and finding-count fields. The store treats the
-string finding as human-authored prose: it writes only a bounded redacted finding summary plus a
-supervisor-generated finding ID derived at write time from the evaluator-request event ref, frozen
-head, review type, and finding ordinal, never from the prose or a future receipt. Severity uses a
-closed enum and defaults to `UNSPECIFIED`; count is validated against the structured findings or
-deterministically calculated. It never stores full commands, output, tokens, environment, or
-private paths embedded in the input. In `proof`, the finding summary is projected away; finding ID,
-severity/count, verdict, and evidence references remain. When the child seals, its terminal event
-binds those existing finding IDs to the sealed evaluator receipt ref; no ID is rewritten. Replay of
-the same request ref and ordinal resolves to the same ID and appends no duplicate.
+optional backward-compatible structured `severity`, finding-count, and `submission_ref` fields. For
+v2 claim-compiler evaluator findings, `submission_ref` is required and must be the opaque stable ref
+issued by the supervisor/host for that evaluator submission boundary; an agent-chosen or unknown ref
+is rejected. The store checks that ref before writing, so replay returns the prior result while a
+legitimate second finding has a distinct issued ref. The string finding is human-authored prose: the
+store writes only a bounded redacted summary plus a supervisor-generated finding ID derived at
+write time from the evaluator-request event ref, frozen head, review type, and `submission_ref`,
+never from the prose or a future receipt. Severity uses a closed enum and defaults to `UNSPECIFIED`;
+count is validated against the structured findings or deterministically calculated. It never
+stores full commands, output, tokens, environment, or private paths embedded in the input. In
+`proof`, the finding summary is projected away; finding ID, severity/count, verdict, and evidence
+references remain. When the child seals, its terminal event binds those existing finding IDs to the
+sealed evaluator receipt ref; no ID is rewritten.
 
 The default software-release quiet barrier requires two primary samples at least 120 witnessed
 seconds apart with identical profile-requirements and contract hashes, exact head, producer statuses, reviewer
@@ -283,14 +286,15 @@ declaration inherits that value by reference and cannot change it.
 
 - `verified_context` retains bounded, redacted contract, profile-display, diagnostic,
   evaluator-finding, objective, and closeout text for the owner.
-- `proof` is an at-write guarantee for every new v2 event family. Before canonical event hashing,
-  objective-like prose, contract text, profile display metadata, diagnostic prose, evaluator
-  finding prose, and closeout narrative are replaced with stable structural fields and
-  deterministic `text_withheld` markers. The raw prose and any digest derived from it never enter
-  the proof-mode ledger. Capsule, receipt, handoff, continuation prompt, and exported packet are
-  then folded only from that already-projected chain. Stable labels, state IDs, the privacy-safe
-  structural profile projection, evidence references, producer identities, and control digests
-  remain.
+- `proof` is an at-write guarantee for every event appended by a v2 writer, including existing event
+  types such as `run_begun` and evaluator findings as well as newly introduced families. Before
+  canonical event hashing, objective-like prose, contract text, profile display metadata,
+  diagnostic prose, evaluator finding prose, and closeout narrative are replaced with stable
+  structural fields and deterministic `text_withheld` markers. The raw prose and any digest derived
+  from it never enter the proof-mode ledger. Capsule, receipt, handoff, continuation prompt, and
+  exported packet are then folded only from that already-projected chain. Stable labels, state IDs,
+  the privacy-safe structural profile projection, evidence references, producer identities, and
+  control digests remain.
 
 Proof-mode events and exported artifacts must not contain the withheld text. This v2 at-write rule
 does not rewrite or change the bytes of any legacy v1 event, ledger, fixture, or receipt. The v2
@@ -345,28 +349,33 @@ database. Its immutable aggregate input is the canonical sort of unique records 
 `source_run_id`, `source_contract_ref`, `source_ledger_tip`, and eligible evidence references. The
 `recurrence_frontier` is the digest of those sorted records.
 
-When one initial incident plus two distinct confirmed recurrences are first observed and a current
-explicitly invoked open run exists, the reducer must append exactly one derived
-`ENFORCEMENT_REQUIRED` obligation to that run. It carries the
+When one initial incident plus two distinct confirmed recurrences are first observed, the
+destination is eligible only if the current explicitly invoked open contract declares the same
+`profile_requirements_hash` and `recurrence_scope_ref` and its profile registers that exact
+`failure_class_id`. The reducer must append exactly one derived `ENFORCEMENT_REQUIRED` obligation
+to that eligible run. It carries the
 failure class, `recurrence_frontier`, sorted incident/contract refs, and per-ledger tips instead of a
 single `claim_contract_ref`. No source ledger is modified, and a sealed current run cannot receive
-it. The supervisor snapshots a canonical sorted candidate set from the local capsule index for the
-exact tuple `profile_requirements_hash`, `recurrence_scope_ref`, and `failure_class_id`. Only
-distinct eligible incidents in that tuple are counted and included in its `recurrence_frontier`;
-other classes, profiles, or scopes cannot affect its threshold or digest. The supervisor then
-independently verifies and re-walks every candidate ledger. Under the store's single-writer lock it
-re-samples that same tuple and appends only if its candidate set and ledger tips are unchanged;
-otherwise it retries from a new snapshot. Before append, it searches that complete verified set for
-an existing obligation with the same tuple; the tuple may have at most one durable obligation and
-is its stable idempotency key. When the threshold is first observed in an eligible open run and no
-such obligation exists, omission is an error rather than an allowed outcome. The event records the
-threshold-crossing recurrence frontier. Replay, an unrelated scope/profile/class, or a fourth and
+it. The supervisor snapshots two canonical sorted sets for the exact tuple
+`profile_requirements_hash`, `recurrence_scope_ref`, and `failure_class_id`: incident candidates
+from the capsule index, and obligation candidates from the complete local open-and-sealed run index,
+including unpublished open runs. Only distinct eligible incidents in that tuple are counted and
+included in its `recurrence_frontier`; other classes, profiles, or scopes cannot affect its threshold
+or digest. The supervisor independently verifies and re-walks every candidate ledger in both sets.
+Under the store's single-writer lock it re-samples both tuple-scoped sets and appends only if their
+membership and ledger tips are unchanged; otherwise it retries from a new snapshot. Before append,
+it searches the complete verified obligation set for an existing obligation with the same tuple;
+the tuple may have at most one durable obligation and is its stable idempotency key. When the
+threshold is first observed in an eligible open run and no such obligation exists, omission is an
+error rather than an allowed outcome. The event records the threshold-crossing recurrence frontier.
+Replay, an unrelated scope/profile/class, or a fourth and
 later incident cannot
 silently suppress or duplicate the obligation: unrelated tuples reduce separately, while the same
 tuple reports its existing obligation and newer incident set read-only. An unresolved obligation
 ref is carried in v2 continuation until an explicit future disposition contract resolves it. With
-no open run, the reducer reports the obligation read-only and appends nothing. It never edits code,
-policy, infrastructure, or deployment.
+no tuple-matching eligible open run, the reducer reports the obligation read-only and appends
+nothing; it never attaches an obligation to an unrelated active run. It never edits code, policy,
+infrastructure, or deployment.
 
 ## Build order and kill gate
 
@@ -405,17 +414,20 @@ forged control events and production payloads, production-shaped mocks, builder/
 attached-checkout review, actor and head mismatch, pending and late-finding reviewers, decisive
 page-two GitHub data, truncated pagination and missing final cursors, a diamond profile with
 ambiguous surface projection, deletion of a declared custom profile, cross-process diagnostic
-deduplication and resolution, write-time prose-independent evaluator finding IDs, sealed-receipt
-binding, and replay deduplication,
+deduplication and resolution, host-issued evaluator submission refs, write-time prose-independent
+finding IDs, sealed-receipt binding, legitimate duplicate-text findings, and replay deduplication,
 three cross-process Stop
 attempts with one stable blocker fingerprint, eligible evidence resetting that fingerprint,
 material control changing compiler state without satisfying evidence, evaluator command/argument
 or finding-prose leakage, recurrence across three sealed source ledgers with no post-seal append,
 privacy-independent structural profile identity, per-failure-class recurrence thresholds,
-recurrence-scope separation and atomic candidate-set resampling, mandatory threshold promotion,
+recurrence-scope and destination-contract separation, atomic incident/obligation set resampling
+including an unpublished obligation-owning run, concurrent promotion deduplication, mandatory
+threshold promotion only into a tuple-matching open contract,
 fourth-incident and replay deduplication, post-seal append corruption, exact-reference successor
 supersession and invalid
-supersession rejection, proof-mode event/profile/display and downstream artifact leakage,
+supersession rejection, proof-mode projection of existing and new v2-writer event types plus
+profile/display and downstream artifact leakage,
 open-contract continuation with inherited diagnostics, attempts, producers, quiet samples,
 immediate gate enforcement, and second-declaration rejection, no-contract v1 close compatibility,
 free-form completion narration,
