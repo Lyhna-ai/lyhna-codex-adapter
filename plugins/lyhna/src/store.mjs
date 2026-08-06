@@ -833,6 +833,14 @@ function projectEventPayloadForPrivacy(state, type, payload) {
     const unknown = Object.keys(payload).find((key) => !allowed.includes(key));
     assert(!unknown, 'UNREGISTERED_PROOF_FIELD');
   };
+  const assertReferenceShape = (value, optional = false) => {
+    if (optional && (value === null || value === undefined)) return;
+    assert(value && typeof value === 'object' && !Array.isArray(value), 'UNREGISTERED_PROOF_FIELD');
+    const keys = Object.keys(value);
+    assert(keys.length === 2 && keys.includes('sha256') && keys.includes('bytes'), 'UNREGISTERED_PROOF_FIELD');
+    assert(/^[a-f0-9]{64}$/.test(String(value.sha256 || '')), 'UNREGISTERED_PROOF_FIELD');
+    assert(Number.isSafeInteger(value.bytes) && value.bytes >= 0, 'UNREGISTERED_PROOF_FIELD');
+  };
   only();
   if (type === 'builder_claim') {
     return {
@@ -877,8 +885,14 @@ function projectEventPayloadForPrivacy(state, type, payload) {
   if (type === 'evidence_observed') {
     const requirement = state.claim_profile?.requirements?.find((item) => item.requirement_id === payload.requirement_id);
     assert(requirement, 'UNREGISTERED_PROOF_FIELD');
+    assert(payload.subject_binding && typeof payload.subject_binding === 'object' && !Array.isArray(payload.subject_binding), 'UNREGISTERED_PROOF_FIELD');
     const unknownBinding = Object.keys(payload.subject_binding || {}).find((key) => !requirement.subject_fields.includes(key));
     assert(!unknownBinding, 'UNREGISTERED_PROOF_FIELD');
+    assert(requirement.subject_fields.every((key) => typeof payload.subject_binding[key] === 'string'), 'UNREGISTERED_PROOF_FIELD');
+  }
+  if (type.startsWith('hook_')) {
+    assertReferenceShape(payload.payload_ref);
+    assertReferenceShape(payload.cwd_ref, true);
   }
   return payload;
 }
@@ -888,6 +902,13 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
   assert(!state.sealed, 'RUN_SEALED');
   const projectedPayload = projectEventPayloadForPrivacy(state, type, payload);
   const { events, tip } = parseLedger(runId);
+  const latestEnvelope = [...events].reverse().find((event) => event.type === 'closeout_envelope_generated');
+  if (latestEnvelope && latestEnvelope.seq !== events.at(-1)?.seq) {
+    assert(events.some((event) => event.type === 'run_sealed' && event.seq > latestEnvelope.seq), 'CLOSEOUT_ENVELOPE_TAIL');
+  }
+  if (events.at(-1)?.type === 'closeout_envelope_generated') {
+    assert(type === 'run_sealed', 'CLOSEOUT_ENVELOPE_PENDING_SEAL');
+  }
   if (events.length > state.ledger_count) {
     const prefixTip = state.ledger_count === 0 ? ZERO_HASH : events[state.ledger_count - 1]?.event_hash;
     assert(prefixTip === state.ledger_tip, 'LOCAL_CHAIN_BROKEN');
@@ -908,7 +929,7 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
   // request_close, record_evaluation, read_sealed_receipt's retrieval mark, etc. — fails closed with
   // RUN_SEALED here rather than appending post-seal corruption. Idempotent re-appends returned above
   // are unaffected.
-  assert(events.at(-1)?.type !== 'run_sealed', 'RUN_SEALED');
+  assert(!events.some((event) => event.type === 'run_sealed'), 'RUN_SEALED');
   const event = {
     schema: 'lyhna.codex.event.v0',
     seq: events.length + 1,

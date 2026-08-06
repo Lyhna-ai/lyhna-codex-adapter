@@ -395,7 +395,40 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
     }),
     /UNREGISTERED_PROOF_FIELD/
   );
-  assert.equal(getRunForTesting(run.id).events.some((event) => JSON.stringify(event).includes('RAW_PROSE')), false);
+  assert.throws(
+    () => appendEvent(run.id, {
+      type: 'hook_posttooluse',
+      origin: 'runtime_hook',
+      payload: {
+        event: 'PostToolUse', event_id: null, model: null, tool_name: null, cwd_ref: null,
+        payload_ref: { sha256: 'a'.repeat(64), bytes: 1, nested_text: 'NESTED_HOOK_PROSE' },
+        support: 'tool_returned', outcome: 'returned'
+      },
+      idempotencyKey: 'known-event-nested-field'
+    }),
+    /UNREGISTERED_PROOF_FIELD/
+  );
+  assert.throws(
+    () => appendEvent(run.id, {
+      type: 'evidence_observed',
+      origin: 'runtime_hook',
+      payload: {
+        contract_id: declared.contract_id,
+        profile_requirements_hash: declared.profile_requirements_hash,
+        requirement_id: 'source_identity',
+        event_kind: 'source_identity_observed',
+        producer_id: 'software_release/local',
+        producer_identity: 'local_verifier',
+        source_cursor: 'nested-proof-cursor',
+        observed_at: '2026-08-05T12:00:00Z',
+        subject_binding: { source_ref: { nested_text: 'NESTED_SUBJECT_PROSE' } }
+      },
+      idempotencyKey: 'known-evidence-nested-field'
+    }),
+    /UNREGISTERED_PROOF_FIELD/
+  );
+  const proofLedger = JSON.stringify(getRunForTesting(run.id).events);
+  for (const marker of ['RAW_PROSE', 'NESTED_HOOK_PROSE', 'NESTED_SUBJECT_PROSE']) assert.equal(proofLedger.includes(marker), false);
 });
 
 test('proof-mode evaluator prose is withheld from state and child receipts, not only from the ledger', { concurrency: false }, (t) => {
@@ -547,6 +580,43 @@ test('a replayed third unsupported Stop finishes sealing after a crash behind th
   const final = getRunForTesting(run.id);
   assert.equal(final.state.sealed, true);
   assert.equal(final.events.filter((event) => event.type === 'closeout_attempted').length, 3);
+  assert.equal(final.events.filter((event) => event.type === 'closeout_envelope_generated').length, 1);
+  assert.equal(final.events.at(-1).type, 'run_sealed');
+});
+
+test('a supported closeout envelope blocks contradictory evidence until crash replay seals it', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-supported-envelope-barrier', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Seal the supported build boundary.' });
+  const declared = declareClaimContract(parent, contract({
+    requested_state: 'BUILT',
+    named_producers: ['software_release/local'],
+    verifier_id: 'software_release/local_verifier'
+  }));
+  seedBuilt(run.id, declared);
+  requestClose(parent, 'Seal supported BUILT evidence.');
+  checkpointOrSeal(parent, 'supported-envelope-stop');
+
+  const packet = getRunForTesting(run.id);
+  const envelope = packet.events.at(-2);
+  assert.equal(envelope.type, 'closeout_envelope_generated');
+  writeFileSync(join(packet.directory, 'events.jsonl'), `${packet.events.slice(0, -1).map((event) => JSON.stringify(event)).join('\n')}\n`);
+  const state = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
+  state.sealed = false;
+  state.terminal_status = null;
+  state.ledger_count = envelope.seq;
+  state.ledger_tip = envelope.event_hash;
+  writeFileSync(join(packet.directory, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
+  for (const name of ['seal-anchor.json', 'receipt.json', 'RECEIPT.md', 'continuation.json', 'HANDOFF.md']) {
+    rmSync(join(packet.directory, name), { force: true });
+  }
+
+  assert.throws(
+    () => observe(run.id, declared, 'source_identity', 'source_identity_observed', 'runtime_hook', 'software_release/local', { source_ref: 'sha256:contradictory-source' }, 'post-envelope-contradiction'),
+    /CLOSEOUT_ENVELOPE_PENDING_SEAL/
+  );
+  assert.equal(checkpointOrSeal(parent, 'supported-envelope-stop').status, 'SEALED');
+  const final = getRunForTesting(run.id);
   assert.equal(final.events.filter((event) => event.type === 'closeout_envelope_generated').length, 1);
   assert.equal(final.events.at(-1).type, 'run_sealed');
 });
