@@ -181,11 +181,63 @@ test('every release requirement validates identity, origin, and exact subject sh
         idempotencyKey: `wrong-binding-${privacyMode}-${requirement.requirement_id}`
       }), /INVALID_EVIDENCE_BINDING/);
     }
+    const rawBinding = `RAW_VERIFIED_BINDING_${privacyMode}`;
+    const observed = appendEvent(run.id, {
+      type: 'evidence_observed', origin: 'runtime_hook',
+      payload: {
+        contract_id: declared.contract_id,
+        profile_requirements_hash: declared.profile_requirements_hash,
+        requirement_id: 'source_identity',
+        event_kind: 'source_identity_observed',
+        producer_id: 'software_release/local',
+        producer_identity: 'local_verifier',
+        source_cursor: `cursor-${privacyMode}-raw-binding`,
+        observed_at: '2026-08-05T12:00:00Z',
+        subject_binding: { source_ref: rawBinding }
+      },
+      idempotencyKey: `raw-binding-${privacyMode}`
+    });
+    assert.equal(observed.payload.subject_binding.source_ref, `sha256:${sha256(rawBinding)}`);
     assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').highest_supported_state, null);
   }
   const bytes = readTree(data).join('\n');
   assert.equal(bytes.includes('RAW_WRONG_IDENTITY_'), false);
   assert.equal(bytes.includes('RAW_BINDING_'), false);
+  assert.equal(bytes.includes('RAW_VERIFIED_BINDING_'), false);
+});
+
+test('a changed blocker frontier resolves the prior diagnostic exactly once before replacement', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-diagnostic-supersession', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Replace stale inline guidance.' });
+  const declared = declareClaimContract(parent, contract());
+  seedBuilt(run.id, declared);
+  assert.match(claimInlineAdvisory(parent), /not requested LIVE_PROVEN/);
+  requestClaimProducer(parent, declared.contract_id, 'software_release/canary');
+  assert.match(claimInlineAdvisory(parent), /PENDING_software_release\/canary/);
+  assert.equal(claimInlineAdvisory(parent), null);
+  appendEvent(run.id, {
+    type: 'producer_terminal',
+    origin: 'runtime_hook',
+    payload: {
+      contract_id: declared.contract_id,
+      claim_contract_ref: declared.claim_contract_ref,
+      producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      status: 'CLEAN'
+    },
+    idempotencyKey: 'diagnostic-supersession-clean'
+  });
+  assert.match(claimInlineAdvisory(parent), /not requested LIVE_PROVEN/);
+  assert.equal(claimInlineAdvisory(parent), null);
+  const diagnostics = getRunForTesting(run.id).events.filter((event) => event.type.startsWith('diagnostic_'));
+  assert.deepEqual(diagnostics.map((event) => event.type), [
+    'diagnostic_emitted', 'diagnostic_resolved', 'diagnostic_emitted', 'diagnostic_resolved', 'diagnostic_emitted'
+  ]);
+  assert.equal(diagnostics.filter((event) => event.type === 'diagnostic_emitted').length, 3);
+  assert.equal(diagnostics.filter((event) => event.type === 'diagnostic_resolved').length, 2);
+  assert.equal(diagnostics.find((event) => event.type === 'diagnostic_resolved').payload.diagnostic_id, diagnostics[0].payload.diagnostic_id);
+  assert.notEqual(diagnostics[0].payload.diagnostic_id, diagnostics[4].payload.diagnostic_id, 'A-B-A creates a fresh A diagnostic instance');
 });
 
 test('proof mode projects producer-terminal cursors and rejects unbound control values before hashing', { concurrency: false }, (t) => {
@@ -194,6 +246,12 @@ test('proof mode projects producer-terminal cursors and rejects unbound control 
   const run = beginRun(parent, { mode: 'full', objective: 'Project terminal producer control.', privacyMode: 'proof' });
   const declared = declareClaimContract(parent, contract());
   const rawCursor = 'RAW_TERMINAL_CURSOR_51E7';
+  assert.throws(() => appendEvent(run.id, {
+    type: 'evidence_observed', origin: 'runtime_hook', payload: null, idempotencyKey: 'null-evidence-payload'
+  }), /INVALID_EVENT_PAYLOAD/);
+  assert.throws(() => appendEvent(run.id, {
+    type: 'producer_terminal', origin: 'runtime_hook', payload: null, idempotencyKey: 'null-terminal-payload'
+  }), /INVALID_EVENT_PAYLOAD/);
   const terminal = appendEvent(run.id, {
     type: 'producer_terminal',
     origin: 'runtime_hook',
@@ -216,6 +274,29 @@ test('proof mode projects producer-terminal cursors and rejects unbound control 
     payload: {
       contract_id: declared.contract_id,
       producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      status: 'CLEAN'
+    },
+    idempotencyKey: 'proof-producer-terminal-missing-contract-ref'
+  }), /INVALID_PRODUCER_TERMINAL/);
+  assert.throws(() => appendEvent(run.id, {
+    type: 'producer_terminal',
+    origin: 'runtime_hook',
+    payload: {
+      contract_id: declared.contract_id,
+      claim_contract_ref: declared.claim_contract_ref,
+      producer_id: 'software_release/canary',
+      status: 'CLEAN'
+    },
+    idempotencyKey: 'proof-producer-terminal-missing-identity'
+  }), /INVALID_PRODUCER_TERMINAL/);
+  assert.throws(() => appendEvent(run.id, {
+    type: 'producer_terminal',
+    origin: 'runtime_hook',
+    payload: {
+      contract_id: declared.contract_id,
+      claim_contract_ref: declared.claim_contract_ref,
+      producer_id: 'software_release/canary',
       producer_identity: 'RAW_TERMINAL_IDENTITY_9B2A',
       status: 'INVALID'
     },
@@ -227,6 +308,7 @@ test('proof mode projects producer-terminal cursors and rejects unbound control 
     origin: 'runtime_hook',
     payload: {
       contract_id: declared.contract_id,
+      claim_contract_ref: declared.claim_contract_ref,
       producer_id: 'software_release/canary',
       producer_identity: 'registered_canary_probe',
       status: rawStatus
@@ -237,6 +319,45 @@ test('proof mode projects producer-terminal cursors and rejects unbound control 
   assert.equal(bytes.includes(rawCursor), false);
   assert.equal(bytes.includes('RAW_TERMINAL_IDENTITY_9B2A'), false);
   assert.equal(bytes.includes(rawStatus), false);
+});
+
+test('only a strictly bound CLEAN producer terminal clears requested work', { concurrency: false }, (t) => {
+  isolatedData(t);
+  for (const status of ['FINDINGS', 'INVALID', 'STALE', 'CLEAN']) {
+    const parent = mintSession({ sessionId: `compiler-producer-status-${status}`, cwd: process.cwd() });
+    const run = beginRun(parent, { mode: 'full', objective: `Require ${status} producer semantics.` });
+    const declared = declareClaimContract(parent, contract({
+      requested_state: 'BUILT',
+      named_producers: ['software_release/local'],
+      verifier_id: 'software_release/local_verifier'
+    }));
+    seedBuilt(run.id, declared);
+    requestClaimProducer(parent, declared.contract_id, 'software_release/local');
+    appendEvent(run.id, {
+      type: 'producer_terminal',
+      origin: 'runtime_hook',
+      payload: {
+        contract_id: declared.contract_id,
+        claim_contract_ref: declared.claim_contract_ref,
+        producer_id: 'software_release/local',
+        producer_identity: 'local_verifier',
+        status
+      },
+      idempotencyKey: `producer-status-${status}`
+    });
+    const compiled = evaluateClaimGate(parent, declared.contract_id, 'closeout');
+    assert.equal(compiled.pending_producers.includes('software_release/local'), status !== 'CLEAN');
+    requestClose(parent, 'Close only after a clean producer terminal.');
+    const result = checkpointOrSeal(parent, `producer-status-stop-${status}`);
+    if (status === 'CLEAN') {
+      assert.equal(result.status, 'SEALED');
+    } else {
+      assert.equal(result.decision, 'block');
+      assert(result.blockers.includes('PENDING_software_release/local'));
+      const capsule = JSON.parse(readFileSync(join(getRunForTesting(run.id).directory, 'continuation.json'), 'utf8'));
+      assert(capsule.claim_compiler.pending_producers.includes('software_release/local'));
+    }
+  }
 });
 
 function runHook(input, env) {
@@ -506,6 +627,29 @@ test('missing or malformed time becomes a sanitized currentness blocker while wr
     assert.equal(malformedNonString.payload.observed_at, null);
     assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'CURRENTNESS_UNPROVEN');
   }
+  const malformedCursors = [
+    ['missing', undefined],
+    ['object', { raw: 'RAW_NONSTRING_CURSOR_0D72' }]
+  ];
+  for (const [label, sourceCursor] of malformedCursors) {
+    const payload = {
+      contract_id: declared.contract_id,
+      profile_requirements_hash: declared.profile_requirements_hash,
+      requirement_id: 'terminal_canary_state',
+      event_kind: 'terminal_canary_state_observed',
+      producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      observed_at: '2026-08-05T11:59:00Z',
+      subject_binding: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
+    };
+    if (sourceCursor !== undefined) payload.source_cursor = sourceCursor;
+    const malformedCursor = appendEvent(run.id, {
+      type: 'evidence_observed', origin: 'registered_probe', payload,
+      idempotencyKey: `terminal-${label}-cursor`
+    });
+    assert.equal(malformedCursor.payload.source_cursor, null);
+    assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'CURRENTNESS_UNPROVEN');
+  }
   const unproven = evaluateClaimGate(parent, declared.contract_id, 'closeout');
   assert.equal(unproven.highest_supported_state, 'LIVE_PROVEN', 'older valid evidence remains visible but cannot close');
   assert.equal(unproven.currentness, 'CURRENTNESS_UNPROVEN');
@@ -541,6 +685,7 @@ test('missing or malformed time becomes a sanitized currentness blocker while wr
   assert.equal(checkpointOrSeal(parent, 'currentness-stop-2').status, 'SEALED');
   assert.equal(readTree(data).join('\n').includes(malformedObservedAt), false);
   assert.equal(readTree(data).join('\n').includes('RAW_NONSTRING_TIME_70B4'), false);
+  assert.equal(readTree(data).join('\n').includes('RAW_NONSTRING_CURSOR_0D72'), false);
 });
 
 test('a reused source cursor with conflicting witnessed times blocks closeout until a new cursor arrives', { concurrency: false }, (t) => {
@@ -644,11 +789,35 @@ test('unsupported closeout counts a contiguous fingerprint streak, seals honestl
   appendEvent(run.id, {
     type: 'producer_terminal',
     origin: 'runtime_hook',
-    payload: { contract_id: declared.contract_id, producer_id: 'software_release/canary', status: 'INVALID' },
+    payload: {
+      contract_id: declared.contract_id,
+      claim_contract_ref: declared.claim_contract_ref,
+      producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      status: 'INVALID'
+    },
     idempotencyKey: 'fixture-producer-terminal'
+  });
+  assert(evaluateClaimGate(parent, declared.contract_id, 'closeout').pending_producers.includes('software_release/canary'));
+  appendEvent(run.id, {
+    type: 'producer_terminal',
+    origin: 'runtime_hook',
+    payload: {
+      contract_id: declared.contract_id,
+      claim_contract_ref: declared.claim_contract_ref,
+      producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      status: 'CLEAN'
+    },
+    idempotencyKey: 'fixture-producer-terminal-clean'
   });
   const aAgain = checkpointOrSeal(parent, 'stop-a-again');
   assert.equal(aAgain.closeout_attempt_ordinal, 1, 'A-B-A restarts the A streak instead of resuming it');
+  const diagnosticTransitions = getRunForTesting(run.id).events.filter((event) => event.type.startsWith('diagnostic_'));
+  assert.deepEqual(diagnosticTransitions.map((event) => event.type), [
+    'diagnostic_emitted', 'diagnostic_resolved', 'diagnostic_emitted', 'diagnostic_resolved', 'diagnostic_emitted'
+  ]);
+  assert.notEqual(diagnosticTransitions[0].payload.diagnostic_id, diagnosticTransitions[4].payload.diagnostic_id);
   observe(run.id, declared, 'deployment_identity', 'deployment_identity_observed', 'mock_or_test', 'software_release/deployment', { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' }, 'ineligible-noise-does-not-reset');
   assert.equal(getRunForTesting(run.id).state.sealed, false);
   assert.equal(checkpointOrSeal(parent, 'stop-a2').closeout_attempt_ordinal, 2, 'ineligible evidence does not reset the eligible frontier');
@@ -659,6 +828,9 @@ test('unsupported closeout counts a contiguous fingerprint streak, seals honestl
   assert.equal(final.state.terminal_status, 'CLOSED_UNSUPPORTED');
   assert.equal(final.events.at(-1).type, 'run_sealed');
   assert.equal(final.events.at(-1).payload.status, 'CLOSED_UNSUPPORTED');
+  const closeoutEnvelope = final.events.find((event) => event.type === 'closeout_envelope_generated');
+  assert.equal(closeoutEnvelope.payload.claim_contract_ref, declared.claim_contract_ref);
+  assert.equal(closeoutEnvelope.payload.fold_version, 'v2');
   assert.throws(() => appendEvent(run.id, { type: 'evidence_observed', origin: 'mock_or_test', payload: {}, idempotencyKey: 'post-seal' }), /RUN_SEALED/);
   assert.equal(verifySealedRun(run.id).status, 'ALREADY_SEALED');
 
@@ -675,7 +847,7 @@ test('separate Stop hook processes preserve attempt state and the third seals CL
   const session = runHook({ hook_event_name: 'SessionStart', session_id: sessionId, cwd: process.cwd() }, env);
   const parent = session.hookSpecificOutput.additionalContext.match(/LYHNA_SESSION_CAPABILITY=([^\s.]+)/)[1];
   const run = beginRun(parent, { mode: 'full', objective: 'Cross-process closeout.' });
-  declareClaimContract(parent, contract());
+  const declared = declareClaimContract(parent, contract());
   requestClose(parent, 'Close now.');
 
   const first = runHook({ hook_event_name: 'Stop', session_id: sessionId, event_id: 'process-stop-1', turn_id: 'turn-1' }, env);
@@ -694,6 +866,7 @@ test('proof-mode v2 withholds objective, claim, diagnostic, and closeout prose b
   const objective = 'OBJECTIVE_RAW_DO_NOT_PERSIST_7F31';
   const statement = 'CLAIM_RAW_DO_NOT_PERSIST_4A62';
   const closeReason = 'CLOSE_RAW_DO_NOT_PERSIST_9B14';
+  const snapshotFailure = 'SNAPSHOT_FAILURE_RAW_DO_NOT_PERSIST_2D89';
   const parent = mintSession({ sessionId: 'compiler-proof-fixture', cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective, privacyMode: 'proof' });
   const declared = declareClaimContract(parent, contract());
@@ -703,6 +876,12 @@ test('proof-mode v2 withholds objective, claim, diagnostic, and closeout prose b
   assert.equal(first.payload.statement, undefined);
   assert.equal(first.payload.statement_ref, undefined);
   assert.equal(first.payload.text_withheld, true);
+  addPrSnapshot(parent, {
+    id: 'proof_snapshot_failure', repository: 'Lyhna-ai/example', pr_number: 14,
+    head_before: 'a'.repeat(40), head_after: 'a'.repeat(40), status: 'CONSISTENT',
+    files: [], checks: [], reviews: [], review_comments: [], issue_comments: [],
+    failures: [{ object: 'checks', error: snapshotFailure }]
+  });
   requestClose(parent, closeReason);
   checkpointOrSeal(parent, 'proof-stop-1');
   checkpointOrSeal(parent, 'proof-stop-2');
@@ -710,7 +889,7 @@ test('proof-mode v2 withholds objective, claim, diagnostic, and closeout prose b
 
   const packet = getRunForTesting(run.id);
   const files = readTree(packet.directory).join('\n');
-  for (const raw of [objective, statement, closeReason]) assert.equal(files.includes(raw), false, `withheld prose leaked: ${raw}`);
+  for (const raw of [objective, statement, closeReason, snapshotFailure]) assert.equal(files.includes(raw), false, `withheld prose leaked: ${raw}`);
   assert.equal(packet.events.some((event) => JSON.stringify(event).includes(statement)), false);
   assert.equal(packet.events.find((event) => event.type === 'closeout_envelope_generated').payload.text_withheld, true);
   const capsule = JSON.parse(readFileSync(join(packet.directory, 'continuation.json'), 'utf8'));
@@ -869,7 +1048,8 @@ test('an open v2 contract rotates onto the successor session without a second le
   const firstSession = 'compiler-window-one';
   const firstParent = mintSession({ sessionId: firstSession, cwd: process.cwd() });
   const run = beginRun(firstParent, { mode: 'full', objective: 'Continue this open contract.' });
-  declareClaimContract(firstParent, contract());
+  const declared = declareClaimContract(firstParent, contract());
+  const preTransferFrontier = evaluateClaimGate(firstParent, declared.contract_id, 'closeout').material_control_frontier;
   const childCapability = mintChild({ sessionId: firstSession, agentId: 'pending-child' });
   requestClose(firstParent, 'Keep the contract open until evidence arrives.');
   assert.equal(checkpointOrSeal(firstParent, 'window-one-stop').closeout_attempt_ordinal, 1);
@@ -882,6 +1062,7 @@ test('an open v2 contract rotates onto the successor session without a second le
   assert.throws(() => recordClaim(firstParent, 'Old lease must be revoked.', []), /NO_ACTIVE_RUN/);
   assert.throws(() => beginRun(firstParent, { mode: 'full', objective: 'Revoked predecessor cannot open another run.' }), /CAPABILITY_REVOKED/);
   assert.equal(getCapability(childCapability).parent_capability_hash, sha256(secondParent));
+  assert.notEqual(evaluateClaimGate(secondParent, declared.contract_id, 'closeout').material_control_frontier, preTransferFrontier);
   const childReceipt = sealChildByAgent({ sessionId: firstSession, agentId: 'pending-child' });
   assert.equal(childReceipt.status, 'STOP_OBSERVED');
   assert.equal(checkpointOrSeal(secondParent, 'window-two-stop').closeout_attempt_ordinal, 2, 'attempt frontier survives the window boundary');
@@ -989,7 +1170,7 @@ test('a replayed third unsupported Stop finishes sealing after a crash behind th
   isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-envelope-crash-replay', cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'Seal the third unsupported attempt.' });
-  declareClaimContract(parent, contract());
+  const declared = declareClaimContract(parent, contract());
   requestClose(parent, 'Close unsupported after three attempts.');
   checkpointOrSeal(parent, 'envelope-crash-1');
   checkpointOrSeal(parent, 'envelope-crash-2');
@@ -998,6 +1179,8 @@ test('a replayed third unsupported Stop finishes sealing after a crash behind th
   const packet = getRunForTesting(run.id);
   const envelope = packet.events.at(-2);
   assert.equal(envelope.type, 'closeout_envelope_generated');
+  assert.equal(envelope.payload.claim_contract_ref, declared.claim_contract_ref);
+  assert.equal(envelope.payload.fold_version, 'v2');
   writeFileSync(join(packet.directory, 'events.jsonl'), `${packet.events.slice(0, -1).map((event) => JSON.stringify(event)).join('\n')}\n`);
   const state = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
   state.sealed = false;
@@ -1075,6 +1258,8 @@ test('a supported closeout envelope blocks contradictory evidence until crash re
   const packet = getRunForTesting(run.id);
   const envelope = packet.events.at(-2);
   assert.equal(envelope.type, 'closeout_envelope_generated');
+  assert.equal(envelope.payload.claim_contract_ref, declared.claim_contract_ref);
+  assert.equal(envelope.payload.fold_version, 'v2');
   writeFileSync(join(packet.directory, 'events.jsonl'), `${packet.events.slice(0, -1).map((event) => JSON.stringify(event)).join('\n')}\n`);
   const state = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
   state.sealed = false;
@@ -1140,6 +1325,7 @@ test('a Stop integrity failure returns BLOCKED_TRANSPORT instead of allowing clo
   const session = runHook({ hook_event_name: 'SessionStart', session_id: sessionId, cwd: process.cwd() }, env);
   const parent = session.hookSpecificOutput.additionalContext.match(/LYHNA_SESSION_CAPABILITY=([^\s.]+)/)[1];
   const run = beginRun(parent, { mode: 'full', objective: 'Fail closed on corrupt state.' });
+  declareClaimContract(parent, contract());
   const packet = getRunForTesting(run.id);
   const statePath = join(packet.directory, 'state.json');
   const state = JSON.parse(readFileSync(statePath, 'utf8'));
@@ -1149,4 +1335,22 @@ test('a Stop integrity failure returns BLOCKED_TRANSPORT instead of allowing clo
   const result = runHook({ hook_event_name: 'Stop', session_id: sessionId, event_id: 'corrupt-stop' }, env);
   assert.equal(result.decision, 'block');
   assert.match(result.reason, /^BLOCKED_TRANSPORT:/);
+});
+
+test('a Stop transport error cannot block a session without an active claim contract', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const env = { ...process.env, LYHNA_CODEX_DATA: data };
+  const sessionId = 'compiler-stop-no-claim';
+  const session = runHook({ hook_event_name: 'SessionStart', session_id: sessionId, cwd: process.cwd() }, env);
+  const parent = session.hookSpecificOutput.additionalContext.match(/LYHNA_SESSION_CAPABILITY=([^\s.]+)/)[1];
+  const run = beginRun(parent, { mode: 'full', objective: 'No claim contract is active.' });
+  const packet = getRunForTesting(run.id);
+  const statePath = join(packet.directory, 'state.json');
+  const state = JSON.parse(readFileSync(statePath, 'utf8'));
+  state.ledger_tip = 'f'.repeat(64);
+  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+
+  const result = runHook({ hook_event_name: 'Stop', session_id: sessionId, event_id: 'no-claim-corrupt-stop' }, env);
+  assert.equal(result.decision, undefined);
+  assert.match(result.systemMessage, /did not record this event/);
 });

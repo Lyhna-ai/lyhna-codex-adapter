@@ -14,6 +14,7 @@ const CONTROL_TYPES = new Set([
   'claim_contract_declared',
   'producer_requested',
   'producer_terminal',
+  'continuation_lease_transferred',
   'gate_sample_observed',
   'claim_superseded'
 ]);
@@ -388,8 +389,17 @@ export function compileClaim({ profile, contract, events }) {
     .map((item) => item.requirement_id)
     .filter((requirementId) => requestedRequirements.has(requirementId) && !satisfied.get(requirementId));
   const producerRequests = events.filter((event) => event.type === 'producer_requested' && event.payload?.contract_id === contract.contract_id);
-  const producerTerminals = new Set(events.filter((event) => event.type === 'producer_terminal' && event.payload?.contract_id === contract.contract_id).map((event) => event.payload?.producer_id));
-  const pending_producers = [...new Set(producerRequests.map((event) => event.payload?.producer_id).filter((id) => id && !producerTerminals.has(id)))].sort(codepointCompare);
+  const producerTerminals = new Map();
+  for (const event of events) {
+    if (event.type !== 'producer_terminal'
+      || event.payload?.contract_id !== contract.contract_id
+      || event.payload?.claim_contract_ref !== contract.claim_contract_ref) continue;
+    producerTerminals.set(event.payload.producer_id, event.payload.status);
+  }
+  const requestedProducerIds = [...new Set(producerRequests.map((event) => event.payload?.producer_id).filter(Boolean))];
+  const pending_producers = requestedProducerIds
+    .filter((id) => producerTerminals.get(id) !== 'CLEAN')
+    .sort(codepointCompare);
   const relevantEligible = eligiblePrimary;
   const latestBoundCurrentness = new Map();
   const boundCurrentnessHistory = new Map();

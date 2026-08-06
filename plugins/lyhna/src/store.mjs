@@ -58,7 +58,7 @@ const EVENT_PAYLOAD_FIELDS = new Map([
   ['close_deferred', ['blockers', 'receipt_renderer']],
   ['close_requested', ['request_id', 'reason', 'reason_ref', 'text_withheld']],
   ['closeout_attempted', ['claim_contract_ref', 'gate_id', 'blocker_fingerprint', 'ordinal', 'attempt_sequence', 'input_digest', 'eligible_evidence_frontier', 'material_control_frontier', 'blockers']],
-  ['closeout_envelope_generated', ['envelope_id', 'outcome', 'profile_id', 'requested_state', 'supported_state', 'scope_ref', 'eligible_evidence_frontier', 'material_control_frontier', 'input_digest', 'blockers', 'next_verifier', 'narrative', 'text_withheld']],
+  ['closeout_envelope_generated', ['envelope_id', 'outcome', 'profile_id', 'requested_state', 'supported_state', 'scope_ref', 'eligible_evidence_frontier', 'material_control_frontier', 'input_digest', 'claim_contract_ref', 'fold_version', 'blockers', 'next_verifier', 'narrative', 'text_withheld']],
   ['continuation_lease_transferred', ['capsule_ref', 'predecessor_parent_ref', 'successor_parent_ref', 'active_child_refs']],
   ['diagnostic_emitted', ['diagnostic_id', 'diagnostic_status', 'claim_contract_ref', 'input_digest', 'blocker_fingerprint', 'supported_state', 'requested_state', 'missing', 'next_verifier', 'message', 'narrative', 'text_withheld']],
   ['diagnostic_resolved', ['diagnostic_id', 'diagnostic_status', 'claim_contract_ref', 'input_digest', 'blocker_fingerprint', 'supported_state', 'requested_state', 'missing', 'next_verifier', 'message', 'narrative', 'text_withheld']],
@@ -549,7 +549,9 @@ function reconstructClaimControl(events) {
   let latestDiagnostic = [...emitted.values()].at(-1) || null;
   const latestAttempt = [...events].reverse().find((event) => event.type === 'closeout_attempted');
   if (latestAttempt && (!latestDiagnostic || latestAttempt.seq > latestDiagnostic.event_seq)) {
-    latestDiagnostic = [...emitted.values()].find((item) => item.blocker_fingerprint === latestAttempt.payload?.blocker_fingerprint) || latestDiagnostic;
+    latestDiagnostic = [...emitted.values()].reverse().find((item) => (
+      item.blocker_fingerprint === latestAttempt.payload?.blocker_fingerprint
+    )) || latestDiagnostic;
   }
   if (latestDiagnostic) {
     const attempt = [...events].reverse().find((event) => (
@@ -866,7 +868,8 @@ function validateEventPayloadStructure(state, type, origin, payload) {
     assert(payload.producer_identity === expectedIdentity, 'INVALID_EVIDENCE_BINDING');
     assert(state.claim_contract.named_producers.includes(requirement.producer_id), 'INVALID_EVIDENCE_BINDING');
     assert(origin === 'mock_or_test' || requirement.eligible_origins.includes(origin), 'INVALID_EVIDENCE_BINDING');
-    assert(typeof payload.source_cursor === 'string' && payload.source_cursor.length > 0 && payload.source_cursor.length <= 512, 'INVALID_EVIDENCE_BINDING');
+    assert(payload.source_cursor === null
+      || (typeof payload.source_cursor === 'string' && payload.source_cursor.length > 0 && payload.source_cursor.length <= 512), 'INVALID_EVIDENCE_BINDING');
     assert(payload.observed_at === undefined
       || payload.observed_at === null
       || typeof payload.observed_at === 'string', 'INVALID_EVIDENCE_BINDING');
@@ -886,10 +889,8 @@ function validateEventPayloadStructure(state, type, origin, payload) {
     const producer = state.claim_profile.producers?.[payload.producer_id];
     assert(producer && state.claim_contract.named_producers.includes(payload.producer_id), 'INVALID_PRODUCER_TERMINAL');
     assert(payload.contract_id === state.claim_contract.contract_id, 'INVALID_PRODUCER_TERMINAL');
-    assert(payload.claim_contract_ref === undefined
-      || payload.claim_contract_ref === state.claim_contract.claim_contract_ref, 'INVALID_PRODUCER_TERMINAL');
-    assert(payload.producer_identity === undefined
-      || payload.producer_identity === producer.expected_identity, 'INVALID_PRODUCER_TERMINAL');
+    assert(payload.claim_contract_ref === state.claim_contract.claim_contract_ref, 'INVALID_PRODUCER_TERMINAL');
+    assert(payload.producer_identity === producer.expected_identity, 'INVALID_PRODUCER_TERMINAL');
     assert(origin === 'runtime_hook', 'INVALID_PRODUCER_TERMINAL');
     assert(PRODUCER_TERMINAL_STATUSES.has(payload.status), 'INVALID_PRODUCER_TERMINAL');
     assert(payload.source_cursor === undefined
@@ -926,8 +927,29 @@ function validateEventPayloadStructure(state, type, origin, payload) {
 // preserving arbitrary timestamp-shaped input: null is the canonical malformed/missing marker the
 // pure compiler already treats as CURRENTNESS_UNPROVEN.
 function normalizeEventPayloadForStorage(type, payload) {
-  if (type === 'evidence_observed' && !isCanonicalObservedAt(payload.observed_at)) {
-    return { ...payload, observed_at: null };
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+  if (type === 'evidence_observed') {
+    let normalized = payload;
+    if (normalized.subject_binding
+      && typeof normalized.subject_binding === 'object'
+      && !Array.isArray(normalized.subject_binding)) {
+      const subjectBinding = Object.fromEntries(Object.entries(normalized.subject_binding).map(([key, value]) => [
+        key,
+        typeof value === 'string' && !/^sha256:[a-f0-9]{64}$/.test(value)
+          ? `sha256:${sha256(value)}`
+          : value
+      ]));
+      normalized = { ...normalized, subject_binding: subjectBinding };
+    }
+    if (typeof normalized.source_cursor !== 'string'
+      || normalized.source_cursor.length === 0
+      || normalized.source_cursor.length > 512) {
+      normalized = { ...normalized, source_cursor: null };
+    }
+    if (!isCanonicalObservedAt(normalized.observed_at)) {
+      normalized = { ...normalized, observed_at: null };
+    }
+    return normalized;
   }
   if (type === 'producer_terminal'
     && payload.observed_at !== undefined
@@ -985,9 +1007,11 @@ function projectEventPayloadForPrivacy(state, type, payload) {
       const value = payload.subject_binding[key];
       return [key, /^sha256:[a-f0-9]{64}$/.test(value) ? value : `sha256:${sha256(value)}`];
     }));
-    const sourceCursor = /^cursor_[a-f0-9]{64}$/.test(payload.source_cursor)
-      ? payload.source_cursor
-      : `cursor_${sha256(payload.source_cursor)}`;
+    const sourceCursor = payload.source_cursor === null
+      ? null
+      : /^cursor_[a-f0-9]{64}$/.test(payload.source_cursor)
+        ? payload.source_cursor
+        : `cursor_${sha256(payload.source_cursor)}`;
     return { ...payload, source_cursor: sourceCursor, subject_binding: opaqueBinding };
   }
   if (type === 'producer_terminal' && payload.source_cursor) {
@@ -1004,6 +1028,7 @@ function projectEventPayloadForPrivacy(state, type, payload) {
 function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyKey }) {
   assert(ORIGINS.has(origin), 'INVALID_ORIGIN');
   assert(!state.sealed, 'RUN_SEALED');
+  assert(payload && typeof payload === 'object' && !Array.isArray(payload), 'INVALID_EVENT_PAYLOAD');
   const normalizedPayload = normalizeEventPayloadForStorage(type, payload);
   validateEventPayloadStructure(state, type, origin, normalizedPayload);
   const projectedPayload = projectEventPayloadForPrivacy(state, type, normalizedPayload);
@@ -1084,6 +1109,14 @@ function requireParent(capability, { mutable = true } = {}) {
   return { record, runId, state };
 }
 
+function assertParentLeaseUnlocked(runId, state, capability) {
+  recoverClaimControlStateUnlocked(runId, state);
+  const record = getCapability(capability);
+  assert(record.kind === 'parent', 'PARENT_CAPABILITY_REQUIRED');
+  assert(!record.revoked, 'CAPABILITY_REVOKED');
+  assert(!state.sealed && state.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
+}
+
 function requireChild(capability) {
   const record = getCapability(capability);
   assert(record.kind === 'child', 'CHILD_CAPABILITY_REQUIRED');
@@ -1106,13 +1139,15 @@ function resolvePrivacyMode(requested) {
 export function beginRun(capability, { mode, objective = '', continuesFrom = '', privacyMode = '' }) {
   const parent = getCapability(capability);
   assert(parent.kind === 'parent', 'PARENT_CAPABILITY_REQUIRED');
-  assert(!parent.revoked, 'CAPABILITY_REVOKED');
   assert(mode === 'full' || mode === 'pr_only', 'INVALID_MODE');
   const privacy = resolvePrivacyMode(privacyMode);
   const continuationRef = String(continuesFrom || '').trim();
   if (privacy === 'proof' && continuationRef) assert(/^[a-f0-9]{64}$/.test(continuationRef), 'INVALID_CAPSULE_REF');
   continuesFrom = continuationRef;
-  return withLock(sessionLockPath(capability), () => {
+  return withLock(sessionLockPath(capability), () => withLock(continuationLockPath(), () => {
+    const currentParent = getCapability(capability);
+    assert(currentParent.kind === 'parent', 'PARENT_CAPABILITY_REQUIRED');
+    assert(!currentParent.revoked, 'CAPABILITY_REVOKED');
     const pendingPath = join(root(), 'pending', `${parent.session_hash}.json`);
     const pending = readJson(pendingPath, null);
     const current = activeRunFor(capability, { includeSealed: true });
@@ -1143,7 +1178,7 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
       if (!existsSync(anchorPath(current))) repairSeal(current);
     }
     if (!current && continuesFrom) {
-      const transferred = withLock(continuationLockPath(), () => {
+      const transferred = (() => {
         const resolved = resolveContinuesFrom(continuesFrom);
         if (resolved?.resolution === 'RESOLVED_LOCAL_ARCHIVE' && resolved.run_id) {
           return withLock(lockPath(resolved.run_id), () => {
@@ -1218,7 +1253,7 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
           completeContinuationLeaseProjectionUnlocked(prior, transferEvent);
           return prior;
         });
-      });
+      })();
       if (transferred) {
         const transferredIndex = readJson(sessionRunsPath(parent.session_hash), { run_ids: [] });
         const runIds = [...new Set([...(transferredIndex.run_ids || []), transferred.id])];
@@ -1304,7 +1339,7 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
     atomicWriteJson(sessionRunsPath(parent.session_hash), { run_ids: nextRunIds });
     if (pending) rmSync(pendingPath, { force: true });
     return state;
-  });
+  }));
 }
 
 const INVOCATION_NON_BOUNDARY_BEFORE = /[\p{L}\p{M}\p{N}_@]/u;
@@ -1408,6 +1443,7 @@ export function recordClaim(capability, statement, evidenceRefs = []) {
   const { runId } = requireParent(capability);
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
+    assertParentLeaseUnlocked(runId, state, capability);
     const { events } = parseLedger(runId);
     const ordinal = events.filter((event) => event.type === 'builder_claim').length + 1;
     const builderClaimId = `claim_${sha256(canonicalJson({ run_id: runId, event_type: 'builder_claim', ordinal })).slice(0, 24)}`;
@@ -1431,11 +1467,17 @@ export function recordHookForParent(capability, payload, idempotencyKey) {
   const active = activeRunFor(capability);
   if (!active) return null;
   const { runId } = requireParent(capability);
-  return appendEvent(runId, {
-    type: `hook_${String(payload.event || 'unknown').toLowerCase()}`,
-    origin: 'runtime_hook',
-    payload,
-    idempotencyKey
+  return withLock(lockPath(runId), () => {
+    const state = loadState(runId);
+    assertParentLeaseUnlocked(runId, state, capability);
+    const event = appendEventUnlocked(runId, state, {
+      type: `hook_${String(payload.event || 'unknown').toLowerCase()}`,
+      origin: 'runtime_hook',
+      payload,
+      idempotencyKey
+    });
+    saveState(state);
+    return event;
   });
 }
 
@@ -1485,7 +1527,7 @@ export function addPrSnapshot(capability, snapshot) {
     // re-read that dedupes its event and must NOT resurrect the existing record's status or drop fields.
     const id = !latest ? base : diverged ? `${base}-o${priorOccurrences.length + 1}` : latest.id;
     const normalized = { ...snapshot, id };
-    appendEventUnlocked(runId, state, {
+    const snapshotEvent = appendEventUnlocked(runId, state, {
       type: 'pr_snapshot',
       origin: 'github_observed',
       payload: {
@@ -1508,8 +1550,11 @@ export function addPrSnapshot(capability, snapshot) {
     });
     // Plain retry keeps the existing record untouched (no status resurrection, no lost refresh state);
     // a new (base or occurrence) observation is stored as itself.
-    if (latest && !diverged) state.pr_snapshots[id] ||= normalized;
-    else state.pr_snapshots[id] = normalized;
+    const storedSnapshot = state.privacy_mode === 'proof'
+      ? { ...normalized, failures: snapshotEvent.payload.failures || [] }
+      : normalized;
+    if (latest && !diverged) state.pr_snapshots[id] ||= storedSnapshot;
+    else state.pr_snapshots[id] = storedSnapshot;
     saveState(state);
     return state.pr_snapshots[id];
   });
@@ -1520,7 +1565,7 @@ export function beginEvaluation(capability, snapshotId, checkout = {}, trigger =
   const normalizedTrigger = EVALUATION_TRIGGERS.has(trigger) ? trigger : 'unspecified';
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
-    assert(!current.sealed && current.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
+    assertParentLeaseUnlocked(runId, current, capability);
     const snapshot = current.pr_snapshots[snapshotId];
     assert(snapshot, 'SNAPSHOT_NOT_FOUND');
     assert(snapshot.status === 'CONSISTENT', 'INCONSISTENT_SNAPSHOT');
@@ -1652,6 +1697,7 @@ export function markSnapshotRefreshed(capability, snapshotId, currentHead) {
   const { runId } = requireParent(capability);
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
+    assertParentLeaseUnlocked(runId, current, capability);
     const snapshot = current.pr_snapshots[snapshotId];
     assert(snapshot, 'SNAPSHOT_NOT_FOUND');
     const stale = currentHead !== snapshot.head_after;
@@ -1712,6 +1758,7 @@ export function declareClaimContract(capability, rawContract) {
   const { runId } = requireParent(capability);
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
+    assertParentLeaseUnlocked(runId, state, capability);
     assert(!state.claim_contract, 'CLAIM_CONTRACT_ALREADY_DECLARED');
     const issuedContractId = state.claim_contract_id || `contract_${sha256(canonicalJson({ kind: 'claim_contract', run_id: runId })).slice(0, 32)}`;
     assert(rawContract?.contract_id === undefined
@@ -1751,6 +1798,7 @@ export function requestClaimProducer(capability, contractId, producerId) {
   const { runId } = requireParent(capability);
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
+    assertParentLeaseUnlocked(runId, state, capability);
     assert(state.claim_contract?.contract_id === contractId, 'CLAIM_CONTRACT_NOT_FOUND');
     assert(state.claim_contract.named_producers.includes(producerId), 'PRODUCER_NOT_DECLARED');
     const profile = getClaimProfile(state.claim_contract.profile_id);
@@ -1776,6 +1824,7 @@ export function evaluateClaimGate(capability, contractId, gateId) {
   const { runId } = requireParent(capability);
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
+    assertParentLeaseUnlocked(runId, state, capability);
     assert(state.claim_contract?.contract_id === contractId, 'CLAIM_CONTRACT_NOT_FOUND');
     assert(state.claim_contract.declared_gate_ids.includes(gateId), 'GATE_NOT_DECLARED');
     const compiled = compileAndRecordUnlocked(runId, state);
@@ -1804,13 +1853,69 @@ function claimSupportPosition(compiled, contract) {
     : `evidence supports ${supported}, not requested ${contract.requested_state}`;
 }
 
+function resolveClaimDiagnosticUnlocked(runId, state, compiled) {
+  const prior = state.claim_diagnostic;
+  if (prior?.status !== 'OPEN') return false;
+  appendEventUnlocked(runId, state, {
+    type: 'diagnostic_resolved',
+    origin: 'runtime_hook',
+    payload: {
+      diagnostic_id: prior.diagnostic_id,
+      diagnostic_status: 'RESOLVED',
+      claim_contract_ref: state.claim_contract.claim_contract_ref,
+      input_digest: compiled.input_digest,
+      blocker_fingerprint: prior.blocker_fingerprint
+    },
+    idempotencyKey: `diagnostic-resolved:${prior.diagnostic_id}:${compiled.input_digest}`
+  });
+  state.claim_diagnostic = { ...prior, status: 'RESOLVED', input_digest: compiled.input_digest };
+  return true;
+}
+
+function ensureClaimDiagnosticUnlocked(runId, state, compiled, fingerprint, message) {
+  const prior = state.claim_diagnostic;
+  if (prior?.status === 'OPEN' && prior.blocker_fingerprint === fingerprint) {
+    return { diagnostic: prior, emitted: false };
+  }
+  resolveClaimDiagnosticUnlocked(runId, state, compiled);
+  const priorOccurrences = parseLedger(runId).events.filter((event) => (
+    event.type === 'diagnostic_emitted' && event.payload?.blocker_fingerprint === fingerprint
+  )).length;
+  const occurrence = priorOccurrences + 1;
+  const diagnosticId = `diag_${sha256(canonicalJson({ fingerprint, occurrence })).slice(0, 24)}`;
+  const event = appendEventUnlocked(runId, state, {
+    type: 'diagnostic_emitted',
+    origin: 'runtime_hook',
+    payload: {
+      diagnostic_id: diagnosticId,
+      diagnostic_status: 'OPEN',
+      claim_contract_ref: state.claim_contract.claim_contract_ref,
+      input_digest: compiled.input_digest,
+      blocker_fingerprint: fingerprint,
+      supported_state: compiled.highest_supported_state,
+      requested_state: state.claim_contract.requested_state,
+      missing: compiled.missing,
+      next_verifier: compiled.next_verifier,
+      message
+    },
+    idempotencyKey: `diagnostic:${fingerprint}:o${occurrence}`
+  });
+  const diagnostic = {
+    diagnostic_id: diagnosticId,
+    status: 'OPEN',
+    input_digest: event.payload.input_digest,
+    blocker_fingerprint: fingerprint
+  };
+  state.claim_diagnostic = diagnostic;
+  return { diagnostic, emitted: true };
+}
+
 export function claimInlineAdvisory(capability) {
   const runId = activeRunFor(capability);
   if (!runId) return null;
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
-    recoverClaimControlStateUnlocked(runId, state);
-    assert(state.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
+    assertParentLeaseUnlocked(runId, state, capability);
     if (state.sealed || !state.claim_contract) return null;
     const compiled = compileAndRecordUnlocked(runId, state);
     const requestedSupported = compiled.state_results?.[state.claim_contract.requested_state]?.supported === true;
@@ -1820,54 +1925,17 @@ export function claimInlineAdvisory(capability) {
       ...compiled.contradictions,
       ...(compiled.currentness === 'AS_WITNESSED' ? [] : ['CURRENTNESS_UNPROVEN'])
     ].sort();
-    const prior = state.claim_diagnostic;
     if (requestedSupported && inlineBlockers.length === 0) {
-      if (prior?.status === 'OPEN') {
-        appendEventUnlocked(runId, state, {
-          type: 'diagnostic_resolved',
-          origin: 'runtime_hook',
-          payload: {
-            diagnostic_id: prior.diagnostic_id,
-            diagnostic_status: 'RESOLVED',
-            claim_contract_ref: state.claim_contract.claim_contract_ref,
-            input_digest: compiled.input_digest
-          },
-          idempotencyKey: `diagnostic-resolved:${prior.diagnostic_id}:${compiled.input_digest}`
-        });
-        state.claim_diagnostic = { ...prior, status: 'RESOLVED', input_digest: compiled.input_digest };
-        saveState(state);
-      }
+      if (resolveClaimDiagnosticUnlocked(runId, state, compiled)) saveState(state);
       return null;
     }
     const gateId = state.claim_contract.declared_gate_ids[0];
     const fingerprint = blockerFingerprint(state.claim_contract, gateId, compiled);
-    if (prior?.status === 'OPEN' && prior.blocker_fingerprint === fingerprint) {
-      saveState(state);
-      return null;
-    }
-    const diagnosticId = `diag_${fingerprint.slice(0, 24)}`;
     const claimPosition = claimSupportPosition(compiled, state.claim_contract);
     const message = `Lyhna inline claim check: ${claimPosition}. Blockers: ${inlineBlockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${compiled.next_verifier}.`;
-    appendEventUnlocked(runId, state, {
-      type: 'diagnostic_emitted',
-      origin: 'runtime_hook',
-      payload: {
-        diagnostic_id: diagnosticId,
-        diagnostic_status: 'OPEN',
-        claim_contract_ref: state.claim_contract.claim_contract_ref,
-        input_digest: compiled.input_digest,
-        blocker_fingerprint: fingerprint,
-        supported_state: compiled.highest_supported_state,
-        requested_state: state.claim_contract.requested_state,
-        missing: compiled.missing,
-        next_verifier: compiled.next_verifier,
-        message
-      },
-      idempotencyKey: `diagnostic:${fingerprint}`
-    });
-    state.claim_diagnostic = { diagnostic_id: diagnosticId, status: 'OPEN', input_digest: compiled.input_digest, blocker_fingerprint: fingerprint };
+    const result = ensureClaimDiagnosticUnlocked(runId, state, compiled, fingerprint, message);
     saveState(state);
-    return message;
+    return result.emitted ? message : null;
   });
 }
 
@@ -1875,6 +1943,7 @@ export function requestClose(capability, reason) {
   const { runId } = requireParent(capability);
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
+    assertParentLeaseUnlocked(runId, state, capability);
     const requestOrdinal = parseLedger(runId).events.filter((event) => event.type === 'close_requested').length + 1;
     const requestId = `close_${sha256(canonicalJson({ run_id: runId, ordinal: requestOrdinal })).slice(0, 24)}`;
     const payload = state.privacy_mode === 'proof'
@@ -2107,8 +2176,11 @@ function finalizeRunSealUnlocked(runId, current, terminalStatus = 'SEALED', seal
 export function checkpointOrSeal(capability, deliveryKey = null) {
   const runId = activeRunFor(capability);
   if (!runId) return { status: 'NO_ACTIVE_RUN' };
-  return withLock(lockPath(runId), () => {
+  let claimBoundary = false;
+  try {
+    return withLock(lockPath(runId), () => {
     const current = loadState(runId);
+    claimBoundary = Boolean(current.claim_contract && current.parent_capability_hash === sha256(capability));
     recoverClaimControlStateUnlocked(runId, current);
     assert(current.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
     // Adopt a durable terminal run_sealed (crash after the seal append, before state/anchor) BEFORE the
@@ -2181,6 +2253,8 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
           eligible_evidence_frontier: interruptedAttempt.payload.eligible_evidence_frontier,
           material_control_frontier: interruptedAttempt.payload.material_control_frontier,
           input_digest: interruptedAttempt.payload.input_digest,
+          claim_contract_ref: current.claim_contract.claim_contract_ref,
+          fold_version: CURRENT_FOLD_VERSION,
           blockers,
           next_verifier: nextVerifier,
           narrative: reason
@@ -2266,37 +2340,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
           idempotencyKey: `closeout-attempt:${current.claim_contract.contract_id}:${attemptSequence}`
         });
         const reason = `Lyhna ${claimSupportPosition(compiled, current.claim_contract)}. Missing or conflicting evidence: ${blockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${compiled.next_verifier}.`;
-        const currentDiagnostic = current.claim_diagnostic?.status === 'OPEN'
-          && current.claim_diagnostic.blocker_fingerprint === fingerprint
-          ? current.claim_diagnostic
-          : null;
-        const diagnosticId = currentDiagnostic?.diagnostic_id || `diag_${fingerprint.slice(0, 24)}`;
-        const existingDiagnostic = currentDiagnostic || parseLedger(runId).events.find((event) => event.idempotency_key === `diagnostic:${fingerprint}`);
-        if (!existingDiagnostic) {
-          appendEventUnlocked(runId, current, {
-            type: 'diagnostic_emitted',
-            origin: 'runtime_hook',
-            payload: {
-              diagnostic_id: diagnosticId,
-              diagnostic_status: 'OPEN',
-              claim_contract_ref: current.claim_contract.claim_contract_ref,
-              input_digest: compiled.input_digest,
-              blocker_fingerprint: fingerprint,
-              supported_state: compiled.highest_supported_state,
-              requested_state: current.claim_contract.requested_state,
-              next_verifier: compiled.next_verifier,
-              message: reason
-            },
-            idempotencyKey: `diagnostic:${fingerprint}`
-          });
-        }
-        const diagnosticEvent = currentDiagnostic || existingDiagnostic;
-        current.claim_diagnostic = {
-          diagnostic_id: diagnosticId,
-          status: 'OPEN',
-          input_digest: diagnosticEvent?.payload?.input_digest || diagnosticEvent?.input_digest || compiled.input_digest,
-          blocker_fingerprint: fingerprint
-        };
+        ensureClaimDiagnosticUnlocked(runId, current, compiled, fingerprint, reason);
         if (ordinal < current.claim_contract.caps.max_unsupported_attempts) {
           saveState(current);
           writeCheckpointArtifacts(runId, current);
@@ -2321,6 +2365,8 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
           eligible_evidence_frontier: compiled.eligible_evidence_frontier,
           material_control_frontier: compiled.material_control_frontier,
           input_digest: compiled.input_digest,
+          claim_contract_ref: current.claim_contract.claim_contract_ref,
+          fold_version: CURRENT_FOLD_VERSION,
           blockers,
           next_verifier: compiled.next_verifier,
           narrative: reason
@@ -2341,6 +2387,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         });
       }
 
+      resolveClaimDiagnosticUnlocked(runId, current, compiled);
       const envelope = {
         envelope_id: `closeout_${sha256(canonicalJson({ run_id: runId, input_digest: compiled.input_digest })).slice(0, 24)}`,
         outcome: 'SUPPORTED',
@@ -2351,6 +2398,8 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         eligible_evidence_frontier: compiled.eligible_evidence_frontier,
         material_control_frontier: compiled.material_control_frontier,
         input_digest: compiled.input_digest,
+        claim_contract_ref: current.claim_contract.claim_contract_ref,
+        fold_version: CURRENT_FOLD_VERSION,
         blockers: [],
         next_verifier: compiled.next_verifier,
         narrative: `Evidence supports ${compiled.highest_supported_state} for profile ${current.claim_contract.profile_id}.`
@@ -2455,7 +2504,11 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       continuation_path: join(runDir(runId), 'continuation.json'),
       capsule_ref: capsule.capsule_ref
     };
-  });
+    });
+  } catch (error) {
+    if (claimBoundary && error && typeof error === 'object') error.lyhnaClaimBoundary = true;
+    throw error;
+  }
 }
 
 // CZ-14 seal-as-you-go. The ledger is the trust root for open packets: after the Stop's

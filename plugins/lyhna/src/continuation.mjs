@@ -79,7 +79,12 @@ function buildClaimCompilerProjection(events) {
   if (!contractEvent) return null;
   const compiledEvent = [...events].reverse().find((event) => event.type === 'claim_compiled');
   const producerRequests = events.filter((event) => event.type === 'producer_requested');
-  const producerTerminals = new Set(events.filter((event) => event.type === 'producer_terminal').map((event) => event.payload?.producer_id));
+  const claimContractRef = `sha256:${contractEvent.event_hash}`;
+  const producerTerminals = new Map();
+  for (const event of events) {
+    if (event.type !== 'producer_terminal' || event.payload?.claim_contract_ref !== claimContractRef) continue;
+    producerTerminals.set(event.payload?.producer_id, event.payload?.status);
+  }
   const diagnostics = new Map();
   for (const event of events) {
     if (event.type === 'diagnostic_emitted') diagnostics.set(event.payload?.diagnostic_id, { ...event.payload, event_ref: `sha256:${event.event_hash}` });
@@ -89,14 +94,14 @@ function buildClaimCompilerProjection(events) {
   }
   const latestAttempt = [...events].reverse().find((event) => event.type === 'closeout_attempted');
   return {
-    claim_contract_ref: `sha256:${contractEvent.event_hash}`,
+    claim_contract_ref: claimContractRef,
     contract: contractEvent.payload?.contract ?? null,
     profile_structural: contractEvent.payload?.profile_structural ?? null,
     profile_requirements_hash: contractEvent.payload?.profile_requirements_hash ?? null,
     compiled_state: compiledEvent?.payload ?? null,
     pending_producers: producerRequests
       .map((event) => event.payload?.producer_id)
-      .filter((id) => id && !producerTerminals.has(id))
+      .filter((id) => id && producerTerminals.get(id) !== 'CLEAN')
       .filter((id, index, all) => all.indexOf(id) === index)
       .sort(codepointCompare),
     diagnostics: [...diagnostics.values()].sort((a, b) => codepointCompare(a.diagnostic_id, b.diagnostic_id)),

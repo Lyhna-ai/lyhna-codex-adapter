@@ -299,7 +299,13 @@ export function buildReceipt(state, events) {
     reviews_observed: snapshot.reviews?.length ?? 0,
     review_comments_observed: snapshot.review_comments?.length ?? 0,
     issue_comments_observed: snapshot.issue_comments?.length ?? 0,
-    failures: snapshot.failures || []
+    failures: privacyMode === 'proof'
+      ? (snapshot.failures || []).map((failure) => ({
+          object: String(failure?.object || ''),
+          error_ref: failure?.error_ref || `sha256:${sha256(String(failure?.error || ''))}`,
+          text_withheld: true
+        }))
+      : snapshot.failures || []
   })).sort((a, b) => codepointCompare(a.id, b.id));
 
   const evaluations = Object.values(state.evaluations || {}).map((evaluation) => ({

@@ -85,7 +85,7 @@ try {
   process.stdout.write(`${JSON.stringify(main(hookInput))}\n`);
 } catch (error) {
   const code = error.code || 'HOOK_ERROR';
-  if ((hookInput.hook_event_name || hookInput.event_name) === 'Stop') {
+  if ((hookInput.hook_event_name || hookInput.event_name) === 'Stop' && error.lyhnaClaimBoundary === true) {
     process.stdout.write(`${JSON.stringify({
       decision: 'block',
       reason: `BLOCKED_TRANSPORT: Lyhna could not persist or verify the closeout boundary (${code}). The run remains unsupported; repair transport or ledger integrity before closing.`
