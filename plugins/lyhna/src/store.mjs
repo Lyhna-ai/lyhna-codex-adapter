@@ -865,15 +865,38 @@ function validateEventPayloadStructure(state, type, origin, payload) {
     assert(payload.producer_identity === expectedIdentity, 'INVALID_EVIDENCE_BINDING');
     assert(state.claim_contract.named_producers.includes(requirement.producer_id), 'INVALID_EVIDENCE_BINDING');
     assert(origin === 'mock_or_test' || requirement.eligible_origins.includes(origin), 'INVALID_EVIDENCE_BINDING');
-    assert(typeof payload.source_cursor === 'string' && payload.source_cursor.length > 0, 'INVALID_EVIDENCE_BINDING');
-    assert(isCanonicalObservedAt(payload.observed_at), 'INVALID_EVIDENCE_BINDING');
+    assert(typeof payload.source_cursor === 'string' && payload.source_cursor.length > 0 && payload.source_cursor.length <= 512, 'INVALID_EVIDENCE_BINDING');
+    assert(payload.observed_at === null || typeof payload.observed_at === 'string', 'INVALID_EVIDENCE_BINDING');
     assert(payload.subject_binding && typeof payload.subject_binding === 'object' && !Array.isArray(payload.subject_binding), 'INVALID_EVIDENCE_BINDING');
     const bindingKeys = Object.keys(payload.subject_binding);
     assert(bindingKeys.length === requirement.subject_fields.length, 'INVALID_EVIDENCE_BINDING');
     assert(bindingKeys.every((key) => requirement.subject_fields.includes(key)), 'INVALID_EVIDENCE_BINDING');
     assert(requirement.subject_fields.every((key) => (
-      typeof payload.subject_binding[key] === 'string' && payload.subject_binding[key].length > 0
+      typeof payload.subject_binding[key] === 'string'
+      && payload.subject_binding[key].length > 0
+      && payload.subject_binding[key].length <= 512
     )), 'INVALID_EVIDENCE_BINDING');
+  }
+
+  if (type === 'producer_terminal') {
+    assert(state.claim_contract && state.claim_profile, 'CLAIM_CONTRACT_REQUIRED');
+    const producer = state.claim_profile.producers?.[payload.producer_id];
+    assert(producer && state.claim_contract.named_producers.includes(payload.producer_id), 'INVALID_PRODUCER_TERMINAL');
+    assert(payload.contract_id === state.claim_contract.contract_id, 'INVALID_PRODUCER_TERMINAL');
+    assert(payload.claim_contract_ref === undefined
+      || payload.claim_contract_ref === state.claim_contract.claim_contract_ref, 'INVALID_PRODUCER_TERMINAL');
+    assert(payload.producer_identity === undefined
+      || payload.producer_identity === producer.expected_identity, 'INVALID_PRODUCER_TERMINAL');
+    assert(origin === 'runtime_hook', 'INVALID_PRODUCER_TERMINAL');
+    assert(typeof payload.status === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(payload.status), 'INVALID_PRODUCER_TERMINAL');
+    assert(payload.source_cursor === undefined
+      || (typeof payload.source_cursor === 'string' && payload.source_cursor.length > 0 && payload.source_cursor.length <= 512), 'INVALID_PRODUCER_TERMINAL');
+    assert(payload.observed_at === undefined
+      || payload.observed_at === null
+      || typeof payload.observed_at === 'string', 'INVALID_PRODUCER_TERMINAL');
+    assert(payload.evidence_refs === undefined
+      || (Array.isArray(payload.evidence_refs)
+        && payload.evidence_refs.every((ref) => /^sha256:[a-f0-9]{64}$/.test(String(ref)))), 'INVALID_PRODUCER_TERMINAL');
   }
 
   if (type === 'pr_snapshot') {
@@ -894,6 +917,18 @@ function validateEventPayloadStructure(state, type, origin, payload) {
     assertReferenceShape(payload.payload_ref);
     assertReferenceShape(payload.cwd_ref, true);
   }
+}
+
+// Invalid observed time is itself material currentness evidence. Preserve that fact without
+// preserving arbitrary timestamp-shaped input: null is the canonical malformed/missing marker the
+// pure compiler already treats as CURRENTNESS_UNPROVEN.
+function normalizeEventPayloadForStorage(type, payload) {
+  if ((type === 'evidence_observed' || type === 'producer_terminal')
+    && payload.observed_at !== undefined
+    && !isCanonicalObservedAt(payload.observed_at)) {
+    return { ...payload, observed_at: null };
+  }
+  return payload;
 }
 
 // Fold-v2 proof mode is an at-write guarantee. These projections happen after structural validation
@@ -949,6 +984,14 @@ function projectEventPayloadForPrivacy(state, type, payload) {
       : `cursor_${sha256(payload.source_cursor)}`;
     return { ...payload, source_cursor: sourceCursor, subject_binding: opaqueBinding };
   }
+  if (type === 'producer_terminal' && payload.source_cursor) {
+    return {
+      ...payload,
+      source_cursor: /^cursor_[a-f0-9]{64}$/.test(payload.source_cursor)
+        ? payload.source_cursor
+        : `cursor_${sha256(payload.source_cursor)}`
+    };
+  }
   return payload;
 }
 
@@ -956,7 +999,8 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
   assert(ORIGINS.has(origin), 'INVALID_ORIGIN');
   assert(!state.sealed, 'RUN_SEALED');
   validateEventPayloadStructure(state, type, origin, payload);
-  const projectedPayload = projectEventPayloadForPrivacy(state, type, payload);
+  const normalizedPayload = normalizeEventPayloadForStorage(type, payload);
+  const projectedPayload = projectEventPayloadForPrivacy(state, type, normalizedPayload);
   const { events, tip } = parseLedger(runId);
   const latestEnvelope = [...events].reverse().find((event) => event.type === 'closeout_envelope_generated');
   if (latestEnvelope && latestEnvelope.seq !== events.at(-1)?.seq) {

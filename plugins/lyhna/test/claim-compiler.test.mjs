@@ -188,6 +188,44 @@ test('every release requirement validates identity, origin, and exact subject sh
   assert.equal(bytes.includes('RAW_BINDING_'), false);
 });
 
+test('proof mode projects producer-terminal cursors and rejects unbound control values before hashing', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-proof-producer-terminal', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Project terminal producer control.', privacyMode: 'proof' });
+  const declared = declareClaimContract(parent, contract());
+  const rawCursor = 'RAW_TERMINAL_CURSOR_51E7';
+  const terminal = appendEvent(run.id, {
+    type: 'producer_terminal',
+    origin: 'runtime_hook',
+    payload: {
+      contract_id: declared.contract_id,
+      claim_contract_ref: declared.claim_contract_ref,
+      producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      status: 'INVALID',
+      source_cursor: rawCursor,
+      observed_at: '2026-08-05T12:00:00Z',
+      evidence_refs: []
+    },
+    idempotencyKey: 'proof-producer-terminal'
+  });
+  assert.equal(terminal.payload.source_cursor, `cursor_${sha256(rawCursor)}`);
+  assert.throws(() => appendEvent(run.id, {
+    type: 'producer_terminal',
+    origin: 'runtime_hook',
+    payload: {
+      contract_id: declared.contract_id,
+      producer_id: 'software_release/canary',
+      producer_identity: 'RAW_TERMINAL_IDENTITY_9B2A',
+      status: 'INVALID'
+    },
+    idempotencyKey: 'proof-producer-terminal-wrong-identity'
+  }), /INVALID_PRODUCER_TERMINAL/);
+  const bytes = readTree(data).join('\n');
+  assert.equal(bytes.includes(rawCursor), false);
+  assert.equal(bytes.includes('RAW_TERMINAL_IDENTITY_9B2A'), false);
+});
+
 function runHook(input, env) {
   const result = spawnSync(process.execPath, [join(pluginRoot, 'hooks', 'capture.mjs')], {
     input: JSON.stringify(input),
@@ -352,7 +390,7 @@ test('only exact registered producer identities support production state and a f
   assert.equal(getRunForTesting(run.id).state.compiled_claim.highest_supported_state, 'LIVE_PROVEN');
 });
 
-test('undeclared producers and malformed observation time are rejected before append', { concurrency: false }, (t) => {
+test('undeclared producers are rejected while malformed time becomes a sanitized blocker', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-producer-time-eligibility', cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'Reject unbound or undated evidence.' });
@@ -362,7 +400,7 @@ test('undeclared producers and malformed observation time are rejected before ap
   assert.throws(() => observe(run.id, declared, 'deployment_identity', 'deployment_identity_observed', 'registered_probe', 'software_release/deployment', { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' }), /INVALID_EVIDENCE_BINDING/);
   assert.throws(() => observe(run.id, declared, 'configuration_present', 'configuration_presence_observed', 'registered_probe', 'software_release/deployment', { artifact_ref: 'sha256:artifact', configuration_ref: 'sha256:config' }), /INVALID_EVIDENCE_BINDING/);
   observe(run.id, declared, 'registered_canary', 'registered_canary_observed', 'registered_probe', 'software_release/canary', { artifact_ref: 'sha256:artifact', canary_ref: 'sha256:canary' });
-  assert.throws(() => appendEvent(run.id, {
+  appendEvent(run.id, {
     type: 'evidence_observed',
     origin: 'registered_probe',
     payload: {
@@ -377,16 +415,16 @@ test('undeclared producers and malformed observation time are rejected before ap
       subject_binding: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
     },
     idempotencyKey: 'malformed-observation-time'
-  }), /INVALID_EVIDENCE_BINDING/);
+  });
   const compiled = evaluateClaimGate(parent, declared.contract_id, 'closeout');
   assert.equal(compiled.highest_supported_state, 'BUILT');
   assert(compiled.missing.includes('merge_identity'), 'an undeclared producer cannot append evidence');
-  assert(compiled.missing.includes('terminal_canary_state'), 'a malformed timestamp cannot append evidence');
-  assert.equal(compiled.currentness, 'AS_WITNESSED');
+  assert(compiled.missing.includes('terminal_canary_state'), 'a malformed timestamp cannot satisfy evidence');
+  assert.equal(compiled.currentness, 'CURRENTNESS_UNPROVEN');
 });
 
-test('malformed or wrong-kind observations cannot enter the ledger or stale a valid current claim', { concurrency: false }, (t) => {
-  isolatedData(t);
+test('malformed time is sanitized into a currentness blocker while wrong-kind evidence is rejected', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-currentness-gate', cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'Require witnessed currentness at closeout.' });
   const declared = declareClaimContract(parent, contract());
@@ -396,7 +434,8 @@ test('malformed or wrong-kind observations cannot enter the ledger or stale a va
   observe(run.id, declared, 'configuration_present', 'configuration_presence_observed', 'registered_probe', 'software_release/deployment', { artifact_ref: 'sha256:artifact', configuration_ref: 'sha256:config' });
   observe(run.id, declared, 'registered_canary', 'registered_canary_observed', 'registered_probe', 'software_release/canary', { artifact_ref: 'sha256:artifact', canary_ref: 'sha256:canary' });
   observe(run.id, declared, 'terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }, 'terminal-valid-old');
-  assert.throws(() => appendEvent(run.id, {
+  const malformedObservedAt = 'RAW_MALFORMED_TIME_3C91';
+  const malformed = appendEvent(run.id, {
     type: 'evidence_observed',
     origin: 'registered_probe',
     payload: {
@@ -407,11 +446,22 @@ test('malformed or wrong-kind observations cannot enter the ledger or stale a va
       producer_id: 'software_release/canary',
       producer_identity: 'registered_canary_probe',
       source_cursor: 'cursor-terminal-malformed-new',
-      observed_at: 'not-a-timestamp',
+      observed_at: malformedObservedAt,
       subject_binding: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
     },
     idempotencyKey: 'terminal-malformed-new'
-  }), /INVALID_EVIDENCE_BINDING/);
+  });
+  assert.equal(malformed.payload.observed_at, null);
+  const unproven = evaluateClaimGate(parent, declared.contract_id, 'closeout');
+  assert.equal(unproven.highest_supported_state, 'LIVE_PROVEN', 'older valid evidence remains visible but cannot close');
+  assert.equal(unproven.currentness, 'CURRENTNESS_UNPROVEN');
+  const currentnessAdvisory = claimInlineAdvisory(parent);
+  assert.match(currentnessAdvisory, /supports requested LIVE_PROVEN, but closeout is blocked/);
+  assert.match(currentnessAdvisory, /CURRENTNESS_UNPROVEN/);
+  requestClose(parent, 'Close only if currentness is witnessed.');
+  const blocked = checkpointOrSeal(parent, 'currentness-stop-1');
+  assert.equal(blocked.decision, 'block');
+  assert(blocked.blockers.includes('CURRENTNESS_UNPROVEN'));
 
   assert.throws(() => appendEvent(run.id, {
     type: 'evidence_observed',
@@ -429,10 +479,13 @@ test('malformed or wrong-kind observations cannot enter the ledger or stale a va
     },
     idempotencyKey: 'terminal-wrong-kind-newer'
   }), /INVALID_EVIDENCE_BINDING/);
+  assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'CURRENTNESS_UNPROVEN');
+  observe(run.id, declared, 'terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }, 'terminal-valid-new');
   assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'AS_WITNESSED');
-  assert.equal(claimInlineAdvisory(parent), null);
-  requestClose(parent, 'Close only if currentness is witnessed.');
-  assert.equal(checkpointOrSeal(parent, 'currentness-stop').status, 'SEALED');
+  assert.equal(claimInlineAdvisory(parent), null, 'restored currentness resolves without repeating the warning');
+  assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'diagnostic_resolved').length, 1);
+  assert.equal(checkpointOrSeal(parent, 'currentness-stop-2').status, 'SEALED');
+  assert.equal(readTree(data).join('\n').includes(malformedObservedAt), false);
 });
 
 test('a reused source cursor with conflicting witnessed times blocks closeout until a new cursor arrives', { concurrency: false }, (t) => {
@@ -689,8 +742,7 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
   const rawCursor = 'CURSOR_RAW_DO_NOT_PERSIST_6C20';
   const rawSource = 'SUBJECT_RAW_DO_NOT_PERSIST_B157';
   const rawObservedAt = 'OBSERVED_AT_RAW_DO_NOT_PERSIST_9C42';
-  assert.throws(
-    () => appendEvent(run.id, {
+  const malformed = appendEvent(run.id, {
       type: 'evidence_observed',
       origin: 'runtime_hook',
       payload: {
@@ -705,9 +757,8 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
         subject_binding: { source_ref: rawSource }
       },
       idempotencyKey: 'known-evidence-malformed-observed-at'
-    }),
-    /INVALID_EVIDENCE_BINDING/
-  );
+    });
+  assert.equal(malformed.payload.observed_at, null);
   const projected = appendEvent(run.id, {
     type: 'evidence_observed',
     origin: 'runtime_hook',
