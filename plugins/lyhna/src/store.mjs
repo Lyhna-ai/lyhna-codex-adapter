@@ -40,10 +40,12 @@ const COMPILED_CLAIM_FIELDS = [
   'material_control_frontier', 'input_digest', 'claim_contract_ref', 'fold_version'
 ];
 const HOOK_PROOF_FIELDS = ['event', 'event_id', 'model', 'tool_name', 'cwd_ref', 'payload_ref', 'support', 'outcome'];
-// Proof mode is an at-write contract. Every event family has a closed top-level schema so a new
-// caller or future field cannot silently smuggle prose into the hash chain before its projection is
-// deliberately specified here.
-const PROOF_EVENT_FIELDS = new Map([
+// Every fold-v2 event family has one closed top-level schema in both privacy modes. Structural
+// validation is mode-independent; proof mode then applies the narrower at-write text projection.
+// Keeping those jobs separate prevents verified-context payloads from bypassing the closed schema
+// and prevents untrusted identity-shaped values from being preserved merely because they look
+// structural.
+const EVENT_PAYLOAD_FIELDS = new Map([
   ['builder_claim', ['builder_claim_id', 'builder_claim_ordinal', 'evidence_refs', 'statement', 'statement_ref', 'statement_text', 'text_withheld']],
   ['checkpoint_anchor', ['covers_seq', 'tip_hash', 'state_hash', 'receipt_json_hash', 'receipt_markdown_hash', 'receipt_renderer', 'continuation_fold_version']],
   ['child_receipt_retrieved', ['receipt_id', 'content_ref']],
@@ -831,26 +833,74 @@ function dropCheckpointAnchor(runId) {
   }
 }
 
-// Fold-v2 proof mode is an at-write guarantee. These projections happen before the payload enters
-// canonical hashing, so neither the ledger nor any downstream artifact can recover withheld prose.
-// Legacy ledgers are never rewritten; this function is reached only for new appends.
+function assertReferenceShape(value, optional = false) {
+  if (optional && (value === null || value === undefined)) return;
+  assert(value && typeof value === 'object' && !Array.isArray(value), 'INVALID_EVENT_PAYLOAD');
+  const keys = Object.keys(value);
+  assert(keys.length === 2 && keys.includes('sha256') && keys.includes('bytes'), 'INVALID_EVENT_PAYLOAD');
+  assert(/^[a-f0-9]{64}$/.test(String(value.sha256 || '')), 'INVALID_EVENT_PAYLOAD');
+  assert(Number.isSafeInteger(value.bytes) && value.bytes >= 0, 'INVALID_EVENT_PAYLOAD');
+}
+
+// Structural validation is an invariant, not a privacy projection. It therefore runs before every
+// append in both verified_context and proof. Ineligible origins may still be witnessed as history,
+// but the envelope itself must be bound to the active frozen contract/profile and registered
+// producer identity so arbitrary values cannot ride a trusted-looking shape into the ledger.
+function validateEventPayloadStructure(state, type, origin, payload) {
+  assert(payload && typeof payload === 'object' && !Array.isArray(payload), 'INVALID_EVENT_PAYLOAD');
+  const registeredFields = EVENT_PAYLOAD_FIELDS.get(type);
+  assert(registeredFields, 'UNREGISTERED_EVENT_TYPE');
+  const unknown = Object.keys(payload).find((key) => !registeredFields.includes(key));
+  assert(!unknown, 'UNREGISTERED_EVENT_FIELD');
+
+  if (type === 'evidence_observed') {
+    assert(state.claim_contract && state.claim_profile, 'CLAIM_CONTRACT_REQUIRED');
+    const requirement = state.claim_profile.requirements?.find((item) => item.requirement_id === payload.requirement_id);
+    assert(requirement, 'INVALID_EVIDENCE_BINDING');
+    const expectedIdentity = state.claim_profile.producers?.[requirement.producer_id]?.expected_identity;
+    assert(payload.contract_id === state.claim_contract.contract_id, 'INVALID_EVIDENCE_BINDING');
+    assert(payload.profile_requirements_hash === state.claim_contract.profile_requirements_hash, 'INVALID_EVIDENCE_BINDING');
+    assert(payload.event_kind === requirement.event_kind, 'INVALID_EVIDENCE_BINDING');
+    assert(payload.producer_id === requirement.producer_id, 'INVALID_EVIDENCE_BINDING');
+    assert(payload.producer_identity === expectedIdentity, 'INVALID_EVIDENCE_BINDING');
+    assert(state.claim_contract.named_producers.includes(requirement.producer_id), 'INVALID_EVIDENCE_BINDING');
+    assert(origin === 'mock_or_test' || requirement.eligible_origins.includes(origin), 'INVALID_EVIDENCE_BINDING');
+    assert(typeof payload.source_cursor === 'string' && payload.source_cursor.length > 0, 'INVALID_EVIDENCE_BINDING');
+    assert(isCanonicalObservedAt(payload.observed_at), 'INVALID_EVIDENCE_BINDING');
+    assert(payload.subject_binding && typeof payload.subject_binding === 'object' && !Array.isArray(payload.subject_binding), 'INVALID_EVIDENCE_BINDING');
+    const bindingKeys = Object.keys(payload.subject_binding);
+    assert(bindingKeys.length === requirement.subject_fields.length, 'INVALID_EVIDENCE_BINDING');
+    assert(bindingKeys.every((key) => requirement.subject_fields.includes(key)), 'INVALID_EVIDENCE_BINDING');
+    assert(requirement.subject_fields.every((key) => (
+      typeof payload.subject_binding[key] === 'string' && payload.subject_binding[key].length > 0
+    )), 'INVALID_EVIDENCE_BINDING');
+  }
+
+  if (type === 'pr_snapshot') {
+    const countKeys = ['files', 'checks', 'reviews', 'review_comments', 'issue_comments'];
+    const counts = payload.counts || {};
+    assert(counts && typeof counts === 'object' && !Array.isArray(counts), 'INVALID_EVENT_PAYLOAD');
+    assert(!Object.keys(counts).find((key) => !countKeys.includes(key)), 'INVALID_EVENT_PAYLOAD');
+    assert(Object.values(counts).every((value) => Number.isSafeInteger(value) && value >= 0), 'INVALID_EVENT_PAYLOAD');
+    assert(Array.isArray(payload.failures || []), 'INVALID_EVENT_PAYLOAD');
+    for (const failure of payload.failures || []) {
+      assert(failure && typeof failure === 'object' && !Array.isArray(failure), 'INVALID_EVENT_PAYLOAD');
+      assert(!Object.keys(failure).find((key) => !['object', 'error'].includes(key)), 'INVALID_EVENT_PAYLOAD');
+      assert(typeof failure.object === 'string' && typeof failure.error === 'string', 'INVALID_EVENT_PAYLOAD');
+    }
+  }
+
+  if (type.startsWith('hook_')) {
+    assertReferenceShape(payload.payload_ref);
+    assertReferenceShape(payload.cwd_ref, true);
+  }
+}
+
+// Fold-v2 proof mode is an at-write guarantee. These projections happen after structural validation
+// but before canonical hashing, so neither the ledger nor any downstream artifact can recover
+// withheld prose. Legacy ledgers are never rewritten; this function is reached only for new appends.
 function projectEventPayloadForPrivacy(state, type, payload) {
-  if (state.privacy_mode !== 'proof' || !payload || typeof payload !== 'object') return payload;
-  const registeredFields = PROOF_EVENT_FIELDS.get(type);
-  assert(registeredFields, 'UNREGISTERED_PROOF_EVENT');
-  const only = (allowed = registeredFields) => {
-    const unknown = Object.keys(payload).find((key) => !allowed.includes(key));
-    assert(!unknown, 'UNREGISTERED_PROOF_FIELD');
-  };
-  const assertReferenceShape = (value, optional = false) => {
-    if (optional && (value === null || value === undefined)) return;
-    assert(value && typeof value === 'object' && !Array.isArray(value), 'UNREGISTERED_PROOF_FIELD');
-    const keys = Object.keys(value);
-    assert(keys.length === 2 && keys.includes('sha256') && keys.includes('bytes'), 'UNREGISTERED_PROOF_FIELD');
-    assert(/^[a-f0-9]{64}$/.test(String(value.sha256 || '')), 'UNREGISTERED_PROOF_FIELD');
-    assert(Number.isSafeInteger(value.bytes) && value.bytes >= 0, 'UNREGISTERED_PROOF_FIELD');
-  };
-  only();
+  if (state.privacy_mode !== 'proof') return payload;
   if (type === 'builder_claim') {
     return {
       builder_claim_id: payload.builder_claim_id,
@@ -879,9 +929,6 @@ function projectEventPayloadForPrivacy(state, type, payload) {
     return { ...structural, text_withheld: true };
   }
   if (type === 'pr_snapshot') {
-    const countKeys = ['files', 'checks', 'reviews', 'review_comments', 'issue_comments'];
-    const unknownCount = Object.keys(payload.counts || {}).find((key) => !countKeys.includes(key));
-    assert(!unknownCount, 'UNREGISTERED_PROOF_FIELD');
     return {
       ...payload,
       failures: (payload.failures || []).map((failure) => ({
@@ -893,13 +940,6 @@ function projectEventPayloadForPrivacy(state, type, payload) {
   }
   if (type === 'evidence_observed') {
     const requirement = state.claim_profile?.requirements?.find((item) => item.requirement_id === payload.requirement_id);
-    assert(requirement, 'UNREGISTERED_PROOF_FIELD');
-    assert(typeof payload.source_cursor === 'string' && payload.source_cursor.length > 0, 'UNREGISTERED_PROOF_FIELD');
-    assert(isCanonicalObservedAt(payload.observed_at), 'UNREGISTERED_PROOF_FIELD');
-    assert(payload.subject_binding && typeof payload.subject_binding === 'object' && !Array.isArray(payload.subject_binding), 'UNREGISTERED_PROOF_FIELD');
-    const unknownBinding = Object.keys(payload.subject_binding || {}).find((key) => !requirement.subject_fields.includes(key));
-    assert(!unknownBinding, 'UNREGISTERED_PROOF_FIELD');
-    assert(requirement.subject_fields.every((key) => typeof payload.subject_binding[key] === 'string'), 'UNREGISTERED_PROOF_FIELD');
     const opaqueBinding = Object.fromEntries(requirement.subject_fields.map((key) => {
       const value = payload.subject_binding[key];
       return [key, /^sha256:[a-f0-9]{64}$/.test(value) ? value : `sha256:${sha256(value)}`];
@@ -909,16 +949,13 @@ function projectEventPayloadForPrivacy(state, type, payload) {
       : `cursor_${sha256(payload.source_cursor)}`;
     return { ...payload, source_cursor: sourceCursor, subject_binding: opaqueBinding };
   }
-  if (type.startsWith('hook_')) {
-    assertReferenceShape(payload.payload_ref);
-    assertReferenceShape(payload.cwd_ref, true);
-  }
   return payload;
 }
 
 function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyKey }) {
   assert(ORIGINS.has(origin), 'INVALID_ORIGIN');
   assert(!state.sealed, 'RUN_SEALED');
+  validateEventPayloadStructure(state, type, origin, payload);
   const projectedPayload = projectEventPayloadForPrivacy(state, type, payload);
   const { events, tip } = parseLedger(runId);
   const latestEnvelope = [...events].reverse().find((event) => event.type === 'closeout_envelope_generated');

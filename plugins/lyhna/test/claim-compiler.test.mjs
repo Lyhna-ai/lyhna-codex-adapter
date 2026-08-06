@@ -77,6 +77,117 @@ function seedBuilt(runId, declared) {
   observe(runId, declared, 'checks_terminal', 'checks_terminal_observed', 'mock_or_test', 'software_release/local', { source_ref: 'sha256:source', checks_ref: 'sha256:checks' });
 }
 
+const REGISTERED_EVENT_TYPES = [
+  'builder_claim',
+  'checkpoint_anchor',
+  'child_receipt_retrieved',
+  'child_receipt_sealed',
+  'child_started',
+  'child_stop_observed',
+  'claim_compiled',
+  'claim_contract_declared',
+  'claim_rejected',
+  'close_deferred',
+  'close_requested',
+  'closeout_attempted',
+  'closeout_envelope_generated',
+  'continuation_lease_transferred',
+  'diagnostic_emitted',
+  'diagnostic_resolved',
+  'evaluation_claimed',
+  'evaluation_finding',
+  'evaluation_requested',
+  'evidence_observed',
+  'gate_evaluated',
+  'hook_permissionrequest',
+  'hook_posttooluse',
+  'hook_pretooluse',
+  'hook_subagentstart',
+  'hook_subagentstop',
+  'hook_userpromptsubmit',
+  'pr_refreshed',
+  'pr_snapshot',
+  'producer_requested',
+  'producer_terminal',
+  'run_begun',
+  'run_sealed',
+  'turn_checkpoint'
+];
+
+const REQUIREMENT_SUBJECTS = {
+  source_identity: { source_ref: 'sha256:source' },
+  checks_terminal: { source_ref: 'sha256:source', checks_ref: 'sha256:checks' },
+  merge_identity: { source_ref: 'sha256:source', base_ref: 'sha256:main', merge_ref: 'sha256:merge' },
+  deployment_identity: { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' },
+  configuration_present: { artifact_ref: 'sha256:artifact', configuration_ref: 'sha256:config' },
+  registered_canary: { artifact_ref: 'sha256:artifact', canary_ref: 'sha256:canary' },
+  terminal_canary_state: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
+};
+
+test('every registered event rejects unknown fields in both privacy modes before hashing', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  for (const privacyMode of ['verified_context', 'proof']) {
+    const parent = mintSession({ sessionId: `compiler-closed-event-${privacyMode}`, cwd: process.cwd() });
+    const run = beginRun(parent, { mode: 'full', objective: 'Exercise the closed event registry.', privacyMode });
+    declareClaimContract(parent, contract());
+    for (const type of REGISTERED_EVENT_TYPES) {
+      const marker = `RAW_UNKNOWN_${privacyMode}_${type}`;
+      assert.throws(
+        () => appendEvent(run.id, {
+          type,
+          origin: 'runtime_hook',
+          payload: { unregistered_full_output: marker },
+          idempotencyKey: `closed-event-${privacyMode}-${type}`
+        }),
+        /UNREGISTERED_EVENT_FIELD/
+      );
+    }
+  }
+  const bytes = readTree(data).join('\n');
+  assert.equal(bytes.includes('RAW_UNKNOWN_'), false);
+});
+
+test('every release requirement validates identity, origin, and exact subject shape in both privacy modes', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const origins = { local: 'runtime_hook', repository: 'github_observed', production: 'registered_probe' };
+  for (const privacyMode of ['verified_context', 'proof']) {
+    const parent = mintSession({ sessionId: `compiler-closed-evidence-${privacyMode}`, cwd: process.cwd() });
+    const run = beginRun(parent, { mode: 'full', objective: 'Exercise evidence bindings.', privacyMode });
+    const declared = declareClaimContract(parent, contract());
+    for (const requirement of SOFTWARE_RELEASE_PROFILE.requirements) {
+      const base = {
+        contract_id: declared.contract_id,
+        profile_requirements_hash: declared.profile_requirements_hash,
+        requirement_id: requirement.requirement_id,
+        event_kind: requirement.event_kind,
+        producer_id: requirement.producer_id,
+        producer_identity: SOFTWARE_RELEASE_PROFILE.producers[requirement.producer_id].expected_identity,
+        source_cursor: `cursor-${privacyMode}-${requirement.requirement_id}`,
+        observed_at: '2026-08-05T12:00:00Z',
+        subject_binding: REQUIREMENT_SUBJECTS[requirement.requirement_id]
+      };
+      assert.throws(() => appendEvent(run.id, {
+        type: 'evidence_observed', origin: origins[requirement.assurance_class],
+        payload: { ...base, producer_identity: `RAW_WRONG_IDENTITY_${requirement.requirement_id}` },
+        idempotencyKey: `wrong-identity-${privacyMode}-${requirement.requirement_id}`
+      }), /INVALID_EVIDENCE_BINDING/);
+      assert.throws(() => appendEvent(run.id, {
+        type: 'evidence_observed', origin: 'agent_reported', payload: base,
+        idempotencyKey: `wrong-origin-${privacyMode}-${requirement.requirement_id}`
+      }), /INVALID_EVIDENCE_BINDING/);
+      assert.throws(() => appendEvent(run.id, {
+        type: 'evidence_observed', origin: origins[requirement.assurance_class],
+        payload: { ...base, subject_binding: { ...base.subject_binding, unregistered_binding: `RAW_BINDING_${requirement.requirement_id}` } },
+        idempotencyKey: `wrong-binding-${privacyMode}-${requirement.requirement_id}`
+      }), /INVALID_EVIDENCE_BINDING/);
+    }
+    assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').highest_supported_state, null);
+  }
+  const bytes = readTree(data).join('\n');
+  assert.equal(bytes.includes('RAW_WRONG_IDENTITY_'), false);
+  assert.equal(bytes.includes('RAW_BINDING_'), false);
+});
+
 function runHook(input, env) {
   const result = spawnSync(process.execPath, [join(pluginRoot, 'hooks', 'capture.mjs')], {
     input: JSON.stringify(input),
@@ -208,7 +319,10 @@ test('only exact registered producer identities support production state and a f
   const declared = declareClaimContract(parent, contract());
   seedBuilt(run.id, declared);
   observe(run.id, declared, 'merge_identity', 'merge_identity_observed', 'github_observed', 'software_release/repository', { source_ref: 'sha256:source', base_ref: 'sha256:main', merge_ref: 'sha256:merge' });
-  observe(run.id, declared, 'deployment_identity', 'deployment_identity_observed', 'registered_probe', 'software_release/deployment', { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' }, 'wrong-deployment-identity', 'unregistered_probe');
+  assert.throws(
+    () => observe(run.id, declared, 'deployment_identity', 'deployment_identity_observed', 'registered_probe', 'software_release/deployment', { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' }, 'wrong-deployment-identity', 'unregistered_probe'),
+    /INVALID_EVIDENCE_BINDING/
+  );
   assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').highest_supported_state, 'MERGED');
   observe(run.id, declared, 'deployment_identity', 'deployment_identity_observed', 'registered_probe', 'software_release/deployment', { merge_ref: 'sha256:other-merge', artifact_ref: 'sha256:artifact' }, 'wrong-deployment-subject');
   const mismatched = evaluateClaimGate(parent, declared.contract_id, 'closeout');
@@ -238,17 +352,17 @@ test('only exact registered producer identities support production state and a f
   assert.equal(getRunForTesting(run.id).state.compiled_claim.highest_supported_state, 'LIVE_PROVEN');
 });
 
-test('undeclared producers and malformed observation time never support a claim', { concurrency: false }, (t) => {
+test('undeclared producers and malformed observation time are rejected before append', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-producer-time-eligibility', cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'Reject unbound or undated evidence.' });
   const declared = declareClaimContract(parent, contract({ named_producers: ['software_release/local', 'software_release/canary'] }));
   seedBuilt(run.id, declared);
-  observe(run.id, declared, 'merge_identity', 'merge_identity_observed', 'github_observed', 'software_release/repository', { source_ref: 'sha256:source', base_ref: 'sha256:main', merge_ref: 'sha256:merge' });
-  observe(run.id, declared, 'deployment_identity', 'deployment_identity_observed', 'registered_probe', 'software_release/deployment', { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' });
-  observe(run.id, declared, 'configuration_present', 'configuration_presence_observed', 'registered_probe', 'software_release/deployment', { artifact_ref: 'sha256:artifact', configuration_ref: 'sha256:config' });
+  assert.throws(() => observe(run.id, declared, 'merge_identity', 'merge_identity_observed', 'github_observed', 'software_release/repository', { source_ref: 'sha256:source', base_ref: 'sha256:main', merge_ref: 'sha256:merge' }), /INVALID_EVIDENCE_BINDING/);
+  assert.throws(() => observe(run.id, declared, 'deployment_identity', 'deployment_identity_observed', 'registered_probe', 'software_release/deployment', { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' }), /INVALID_EVIDENCE_BINDING/);
+  assert.throws(() => observe(run.id, declared, 'configuration_present', 'configuration_presence_observed', 'registered_probe', 'software_release/deployment', { artifact_ref: 'sha256:artifact', configuration_ref: 'sha256:config' }), /INVALID_EVIDENCE_BINDING/);
   observe(run.id, declared, 'registered_canary', 'registered_canary_observed', 'registered_probe', 'software_release/canary', { artifact_ref: 'sha256:artifact', canary_ref: 'sha256:canary' });
-  appendEvent(run.id, {
+  assert.throws(() => appendEvent(run.id, {
     type: 'evidence_observed',
     origin: 'registered_probe',
     payload: {
@@ -263,15 +377,15 @@ test('undeclared producers and malformed observation time never support a claim'
       subject_binding: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
     },
     idempotencyKey: 'malformed-observation-time'
-  });
+  }), /INVALID_EVIDENCE_BINDING/);
   const compiled = evaluateClaimGate(parent, declared.contract_id, 'closeout');
   assert.equal(compiled.highest_supported_state, 'BUILT');
-  assert(compiled.missing.includes('merge_identity'), 'evidence from an undeclared producer stays ineligible');
-  assert(compiled.missing.includes('terminal_canary_state'), 'malformed time stays ineligible');
-  assert.equal(compiled.currentness, 'CURRENTNESS_UNPROVEN');
+  assert(compiled.missing.includes('merge_identity'), 'an undeclared producer cannot append evidence');
+  assert(compiled.missing.includes('terminal_canary_state'), 'a malformed timestamp cannot append evidence');
+  assert.equal(compiled.currentness, 'AS_WITNESSED');
 });
 
-test('newer malformed time blocks closeout until a newer valid observation restores currentness', { concurrency: false }, (t) => {
+test('malformed or wrong-kind observations cannot enter the ledger or stale a valid current claim', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-currentness-gate', cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'Require witnessed currentness at closeout.' });
@@ -282,7 +396,7 @@ test('newer malformed time blocks closeout until a newer valid observation resto
   observe(run.id, declared, 'configuration_present', 'configuration_presence_observed', 'registered_probe', 'software_release/deployment', { artifact_ref: 'sha256:artifact', configuration_ref: 'sha256:config' });
   observe(run.id, declared, 'registered_canary', 'registered_canary_observed', 'registered_probe', 'software_release/canary', { artifact_ref: 'sha256:artifact', canary_ref: 'sha256:canary' });
   observe(run.id, declared, 'terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }, 'terminal-valid-old');
-  appendEvent(run.id, {
+  assert.throws(() => appendEvent(run.id, {
     type: 'evidence_observed',
     origin: 'registered_probe',
     payload: {
@@ -297,20 +411,9 @@ test('newer malformed time blocks closeout until a newer valid observation resto
       subject_binding: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
     },
     idempotencyKey: 'terminal-malformed-new'
-  });
-  const unproven = evaluateClaimGate(parent, declared.contract_id, 'closeout');
-  assert.equal(unproven.highest_supported_state, 'LIVE_PROVEN', 'older valid evidence remains visible but not closeable');
-  assert.equal(unproven.currentness, 'CURRENTNESS_UNPROVEN');
-  const currentnessAdvisory = claimInlineAdvisory(parent);
-  assert.match(currentnessAdvisory, /supports requested LIVE_PROVEN, but closeout is blocked/);
-  assert.match(currentnessAdvisory, /CURRENTNESS_UNPROVEN/);
-  assert.equal(claimInlineAdvisory(parent), null, 'unchanged currentness diagnostic is suppressed inline');
-  requestClose(parent, 'Close only if currentness is witnessed.');
-  const blocked = checkpointOrSeal(parent, 'currentness-stop-1');
-  assert.equal(blocked.decision, 'block');
-  assert(blocked.blockers.includes('CURRENTNESS_UNPROVEN'));
+  }), /INVALID_EVIDENCE_BINDING/);
 
-  appendEvent(run.id, {
+  assert.throws(() => appendEvent(run.id, {
     type: 'evidence_observed',
     origin: 'registered_probe',
     payload: {
@@ -325,18 +428,11 @@ test('newer malformed time blocks closeout until a newer valid observation resto
       subject_binding: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
     },
     idempotencyKey: 'terminal-wrong-kind-newer'
-  });
-  assert.equal(
-    evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness,
-    'CURRENTNESS_UNPROVEN',
-    'an ineligible event kind cannot restore currentness'
-  );
-
-  observe(run.id, declared, 'terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }, 'terminal-valid-new');
+  }), /INVALID_EVIDENCE_BINDING/);
   assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'AS_WITNESSED');
-  assert.equal(claimInlineAdvisory(parent), null, 'restored currentness resolves the inline diagnostic without another warning');
-  assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'diagnostic_resolved').length, 1);
-  assert.equal(checkpointOrSeal(parent, 'currentness-stop-2').status, 'SEALED');
+  assert.equal(claimInlineAdvisory(parent), null);
+  requestClose(parent, 'Close only if currentness is witnessed.');
+  assert.equal(checkpointOrSeal(parent, 'currentness-stop').status, 'SEALED');
 });
 
 test('a reused source cursor with conflicting witnessed times blocks closeout until a new cursor arrives', { concurrency: false }, (t) => {
@@ -445,12 +541,7 @@ test('unsupported closeout counts a contiguous fingerprint streak, seals honestl
   });
   const aAgain = checkpointOrSeal(parent, 'stop-a-again');
   assert.equal(aAgain.closeout_attempt_ordinal, 1, 'A-B-A restarts the A streak instead of resuming it');
-  appendEvent(run.id, {
-    type: 'evidence_observed',
-    origin: 'agent_reported',
-    payload: { contract_id: 'foreign', requirement_id: 'deployment_identity', event_kind: 'deployment_identity_observed' },
-    idempotencyKey: 'ineligible-noise-does-not-reset'
-  });
+  observe(run.id, declared, 'deployment_identity', 'deployment_identity_observed', 'mock_or_test', 'software_release/deployment', { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' }, 'ineligible-noise-does-not-reset');
   assert.equal(getRunForTesting(run.id).state.sealed, false);
   assert.equal(checkpointOrSeal(parent, 'stop-a2').closeout_attempt_ordinal, 2, 'ineligible evidence does not reset the eligible frontier');
   const terminal = checkpointOrSeal(parent, 'stop-a3');
@@ -552,7 +643,7 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
   assert.equal(declared.objective_ref, run.objective_ref);
   assert.throws(
     () => appendEvent(run.id, { type: 'future_text_event', origin: 'runtime_hook', payload: { objective: 'RAW_PROSE' }, idempotencyKey: 'future-text' }),
-    /UNREGISTERED_PROOF_EVENT/
+    /UNREGISTERED_EVENT_TYPE/
   );
   assert.throws(
     () => appendEvent(run.id, {
@@ -561,7 +652,7 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
       payload: { event: 'PostToolUse', unknown_text_field: 'RAW_PROSE_MARKER' },
       idempotencyKey: 'known-event-unknown-field'
     }),
-    /UNREGISTERED_PROOF_FIELD/
+    /UNREGISTERED_EVENT_FIELD/
   );
   assert.throws(
     () => appendEvent(run.id, {
@@ -574,7 +665,7 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
       },
       idempotencyKey: 'known-event-nested-field'
     }),
-    /UNREGISTERED_PROOF_FIELD/
+    /INVALID_EVENT_PAYLOAD/
   );
   assert.throws(
     () => appendEvent(run.id, {
@@ -593,7 +684,7 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
       },
       idempotencyKey: 'known-evidence-nested-field'
     }),
-    /UNREGISTERED_PROOF_FIELD/
+    /INVALID_EVIDENCE_BINDING/
   );
   const rawCursor = 'CURSOR_RAW_DO_NOT_PERSIST_6C20';
   const rawSource = 'SUBJECT_RAW_DO_NOT_PERSIST_B157';
@@ -615,7 +706,7 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
       },
       idempotencyKey: 'known-evidence-malformed-observed-at'
     }),
-    /UNREGISTERED_PROOF_FIELD/
+    /INVALID_EVIDENCE_BINDING/
   );
   const projected = appendEvent(run.id, {
     type: 'evidence_observed',
