@@ -82,6 +82,12 @@ const EVENT_PAYLOAD_FIELDS = new Map([
 ]);
 const PRODUCER_TERMINAL_STATUSES = new Set(['CLEAN', 'FINDINGS', 'INVALID', 'STALE']);
 const EVALUATION_TRIGGERS = new Set(['initial', 'post_fix_reeval', 'gate_audit', 're_examination']);
+const CLOSEOUT_STREAK_RESET_TYPES = new Set([
+  'producer_requested', 'producer_terminal',
+  'child_started', 'child_stop_observed', 'child_receipt_sealed', 'child_receipt_retrieved',
+  'pr_snapshot', 'pr_refreshed', 'evaluation_requested', 'evaluation_claimed', 'evaluation_finding',
+  'gate_sample_observed', 'claim_superseded'
+]);
 // An evaluation is terminal once its outcome is fixed: recorded, checkout-integrity excepted,
 // or superseded by a moved head. Non-terminal (OPEN/CLAIMED) means a retry re-attaches; terminal
 // means a fresh begin_evaluation on the same snapshot is a distinct re-examination.
@@ -130,18 +136,37 @@ function validateCloseoutAttemptBinding(state, origin, payload, eventSeq = null)
     payload.gate_id,
     state.compiled_claim
   ), code);
-  const priorAttempts = parseLedger(state.id).events.filter((event) => (
+  const ledgerEvents = parseLedger(state.id).events;
+  const priorAttempts = ledgerEvents.filter((event) => (
     event.type === 'closeout_attempted'
     && event.origin === 'runtime_hook'
     && event.payload?.claim_contract_ref === state.claim_contract.claim_contract_ref
     && (eventSeq === null || event.seq < eventSeq)
   ));
   const prior = priorAttempts.at(-1);
-  const expectedOrdinal = prior?.payload?.blocker_fingerprint === payload.blocker_fingerprint
+  const expectedOrdinal = closeoutAttemptStreakContinues(
+    ledgerEvents,
+    prior,
+    payload.blocker_fingerprint,
+    payload.eligible_evidence_frontier,
+    eventSeq
+  )
     ? Number(prior.payload.ordinal || 0) + 1
     : 1;
   assert(payload.attempt_sequence === priorAttempts.length + 1, code);
   assert(payload.ordinal === expectedOrdinal, code);
+}
+
+function closeoutAttemptStreakContinues(events, prior, fingerprint, eligibleEvidenceFrontier, beforeSeq = null) {
+  if (!prior || prior.payload?.blocker_fingerprint !== fingerprint) return false;
+  // Eligible evidence changes the effective support frontier. Ineligible observations remain
+  // history but do not reset the cap, matching the compiler's primary/eligible firewall.
+  if (prior.payload?.eligible_evidence_frontier !== eligibleEvidenceFrontier) return false;
+  return !events.some((event) => (
+    event.seq > prior.seq
+    && (beforeSeq === null || event.seq < beforeSeq)
+    && CLOSEOUT_STREAK_RESET_TYPES.has(event.type)
+  ));
 }
 
 function validateCloseoutEnvelopeBinding(state, origin, payload) {
@@ -1425,7 +1450,11 @@ export function appendEvent(runId, input) {
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
     recoverClaimControlStateUnlocked(runId, state);
-    const event = appendEventUnlocked(runId, state, input);
+    // This exported writer exists for deterministic adapters/tests. In proof mode its caller key is
+    // untrusted text, so derive idempotency only from the already-projected event structure. Internal
+    // product paths call appendEventUnlocked with supervisor-issued structural keys.
+    const safeInput = state.privacy_mode === 'proof' ? { ...input, idempotencyKey: null } : input;
+    const event = appendEventUnlocked(runId, state, safeInput);
     saveState(state);
     return event;
   });
@@ -2861,7 +2890,12 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         const attemptSequence = attemptEvents.filter((event) => event.type === 'closeout_attempted').length + 1;
         const latestAttempt = [...attemptEvents].reverse().find((event) => event.type === 'closeout_attempted');
         // Ordinals count only the maximal contiguous streak of one fingerprint: A-B-A is A1,B1,A1.
-        const ordinal = latestAttempt?.payload?.blocker_fingerprint === fingerprint
+        const ordinal = closeoutAttemptStreakContinues(
+          attemptEvents,
+          latestAttempt,
+          fingerprint,
+          compiled.eligible_evidence_frontier
+        )
           ? Number(latestAttempt.payload.ordinal || 0) + 1
           : 1;
         appendEventUnlocked(runId, current, {

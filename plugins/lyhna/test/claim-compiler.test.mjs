@@ -1282,6 +1282,40 @@ test('unsupported closeout counts a contiguous fingerprint streak, seals honestl
   assert.equal(fresh.claim_contract, null);
 });
 
+test('producer blocker transitions between Stops reset an otherwise matching attempt fingerprint', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-transient-producer-reset', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Count only genuinely unchanged closeout attempts.' });
+  const declared = declareClaimContract(parent, contract());
+  seedBuilt(run.id, declared);
+  requestClose(parent, 'The agent says this works in production.');
+
+  const first = checkpointOrSeal(parent, 'transient-stop-a1');
+  assert.equal(first.closeout_attempt_ordinal, 1);
+  const originalFingerprint = getRunForTesting(run.id).events
+    .filter((event) => event.type === 'closeout_attempted').at(-1).payload.blocker_fingerprint;
+
+  requestClaimProducer(parent, declared.contract_id, 'software_release/canary');
+  appendEvent(run.id, {
+    type: 'producer_terminal',
+    origin: 'runtime_hook',
+    payload: {
+      contract_id: declared.contract_id,
+      claim_contract_ref: declared.claim_contract_ref,
+      producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      status: 'CLEAN'
+    },
+    idempotencyKey: 'transient-producer-clean'
+  });
+
+  const afterTransition = checkpointOrSeal(parent, 'transient-stop-a-again');
+  assert.equal(afterTransition.closeout_attempt_ordinal, 1);
+  const attempts = getRunForTesting(run.id).events.filter((event) => event.type === 'closeout_attempted');
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[1].payload.blocker_fingerprint, originalFingerprint);
+});
+
 test('an unbound closeout envelope cannot be appended or sealed during crash recovery', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-closeout-envelope-firewall', cwd: process.cwd() });
@@ -1596,7 +1630,9 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
     idempotencyKey: rawIdempotencyProse
   });
   assert.match(idempotencyEvent.idempotency_key, /^idempotency_[a-f0-9]{64}$/);
-  assert.equal(JSON.stringify(getRunForTesting(run.id).events).includes(rawIdempotencyProse), false);
+  const proofAfterIdempotency = JSON.stringify(getRunForTesting(run.id).events);
+  assert.equal(proofAfterIdempotency.includes(rawIdempotencyProse), false);
+  assert.equal(proofAfterIdempotency.includes(sha256(rawIdempotencyProse)), false);
 });
 
 test('proof-mode evaluator prose is withheld from state and child receipts, not only from the ledger', { concurrency: false }, (t) => {
