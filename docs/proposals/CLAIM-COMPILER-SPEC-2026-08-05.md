@@ -68,11 +68,13 @@ projection. Multiple incomparable supported internal nodes are returned as
 `maximal_supported_nodes`; `highest_supported_state` is populated only by the unique ordered
 surface projection. A profile with an ambiguous or missing projection is rejected before use.
 
-A profile snapshot is canonicalized and stored as ledger-owned immutable bytes in
-`claim_contract_declared`; its hash is the profile identity. The schema separates machine-required
-structural fields from optional human-authored display metadata. A `verified_context` v2 capsule
-carries the full canonical snapshot. A `proof` capsule carries the complete structural projection,
-the full snapshot hash, and deterministic withheld markers instead of display metadata. Either
+A profile snapshot is canonicalized as ledger-owned immutable bytes in `claim_contract_declared`;
+its mode-appropriate canonical hash is the profile identity. The schema separates machine-required
+structural fields from optional human-authored display metadata. In `verified_context`, the event
+and v2 capsule carry the full bounded, redacted canonical snapshot. In `proof`, the event payload is
+projected before canonical ledger hashing: it carries the complete structural projection and
+deterministic `text_withheld` markers, never display metadata or a hash derived from that withheld
+text. The proof-mode v2 capsule carries that same canonical structural projection and hash. Either
 projection contains everything the pure compiler needs, so deleting or editing a project profile
 after declaration cannot change offline continuation or refolding. A locally declared profile
 states the chosen requirements; it does not prove those requirements are sufficient.
@@ -249,11 +251,14 @@ actors and verdicts, checks, unresolved-thread state, source cursors, and local 
 Any change restarts the barrier.
 
 At an unsupported Stop, `blocker_fingerprint` is derived from contract, gate, normalized blocker
-set, and the eligible evidence frontier. Control events never change it. The persisted
+set, and the eligible evidence frontier. A producer or gate control transition that changes the
+effective normalized blocker set changes the fingerprint and resets the ordinal even when eligible
+evidence is unchanged. Control chatter that leaves the effective blocker set unchanged, plus
+self-generated close attempts and derived events, never changes it. The persisted
 `closeout_attempted` event records that fingerprint and the next ordinal for its uninterrupted
 occurrence. Attempts one and two return `decision: "block"`; attempt three appends the generated
-non-success envelope and terminal seal. A changed eligible evidence frontier recomputes blockers
-and resets the ordinal for the resulting fingerprint.
+non-success envelope and terminal seal. A changed eligible evidence frontier also recomputes the
+blocker set and resulting fingerprint.
 
 ## Privacy projection
 
@@ -262,18 +267,21 @@ The canonical privacy enum remains the shipped `verified_context | proof`.
 The selected value comes only from `begin_run` and its chained `run_begun` event. Contract
 declaration inherits that value by reference and cannot change it.
 
-- `verified_context` retains bounded, redacted contract and diagnostic text for the owner.
-- `proof` follows the existing at-egress projection model: the local ledger retains the same
-  bounded redacted source text, while capsule, receipt, handoff, continuation prompt, and exported
-  packet project objective-like prose, contract text, diagnostic prose, evaluator finding prose, and closeout narrative
-  away before those artifact hashes are derived. Stable labels, state IDs, the privacy-safe
-  structural profile projection, evidence references, producer identities, digests, and
-  deterministic `text_withheld` markers remain.
+- `verified_context` retains bounded, redacted contract, profile-display, diagnostic,
+  evaluator-finding, objective, and closeout text for the owner.
+- `proof` is an at-write guarantee for every new v2 event family. Before canonical event hashing,
+  objective-like prose, contract text, profile display metadata, diagnostic prose, evaluator
+  finding prose, and closeout narrative are replaced with stable structural fields and
+  deterministic `text_withheld` markers. The raw prose and any digest derived from it never enter
+  the proof-mode ledger. Capsule, receipt, handoff, continuation prompt, and exported packet are
+  then folded only from that already-projected chain. Stable labels, state IDs, the privacy-safe
+  structural profile projection, evidence references, producer identities, and control digests
+  remain.
 
-Proof-mode exported artifacts must not contain the withheld text. The local ledger is protected by
-the existing local-data boundary and redaction rules; proof mode is not represented as an at-write
-storage guarantee. The v2 anchor seals the selected privacy mode, and the retained structural
-fields must still permit compilation, deduplication, lineage verification, and continuation.
+Proof-mode events and exported artifacts must not contain the withheld text. This v2 at-write rule
+does not rewrite or change the bytes of any legacy v1 event, ledger, fixture, or receipt. The v2
+anchor seals the selected privacy mode, and the retained structural fields must still permit
+compilation, deduplication, lineage verification, and continuation.
 
 ## Continuation fold v2
 
@@ -284,9 +292,20 @@ The implementation must:
 - add a v2 reducer to the lineage verifier;
 - keep every existing legacy fixture byte-identical;
 - carry the mode-appropriate full or structural profile projection, contract, compiled state,
-  pending producers, diagnostic state, close-attempt frontier, and gate samples in the v2 capsule;
+  pending producers, diagnostic state, close-attempt frontier, gate samples, and unresolved
+  enforcement-obligation references in the v2 capsule;
 - inherit an open contract as open across a window boundary;
 - never reopen a sealed contract.
+
+Open-contract inheritance is a supervisor transition, not a second agent declaration. After
+`begin_run(..., continues_from: capsule_ref)` validates an open predecessor capsule, the supervisor
+appends one `claim_contract_declared` event with `declaration_kind: inherited`, the original
+contract ID and mode-appropriate profile hash, the unchanged requested state, gates, producer
+identities, verifier, and caps, plus `inherited_from_contract_ref` and the validated `capsule_ref`.
+That event activates compilation and gate enforcement immediately. It consumes the run's sole
+declaration slot, so a later `declare_claim_contract` call is rejected. If the inherited contract
+cannot be reconstructed and verified from the capsule, successor creation fails closed instead of
+opening an unenforced display-only contract.
 
 A later contradiction does not open a run automatically. After a new explicit Lyhna invocation,
 the shipped `begin_run(..., continues_from: capsule_ref)` path opens the successor. The previous
@@ -306,9 +325,13 @@ One initial incident plus two distinct confirmed recurrences may append one deri
 `ENFORCEMENT_REQUIRED` obligation only to the current explicitly invoked open run. It carries the
 failure class, `recurrence_frontier`, sorted incident/contract refs, and per-ledger tips instead of a
 single `claim_contract_ref`. No source ledger is modified, and a sealed current run cannot receive
-it. The deterministic idempotency key is the failure class plus the threshold-crossing recurrence
-frontier; replay reconstructs the same aggregate and emits no duplicate. With no open run, the
-reducer reports the obligation read-only and appends nothing. It never edits code, policy,
+it. Before append, the reducer searches the verified lineage for an existing obligation with that
+`failure_class_id`; one class may have at most one durable obligation. Its idempotency key is the
+failure class alone, while the event records the threshold-crossing recurrence frontier. Replay or
+a fourth and later incident reconstructs the richer aggregate but appends no second obligation; it
+reports the existing obligation and newer incident set read-only. An unresolved obligation ref is
+carried in v2 continuation until an explicit future disposition contract resolves it. With no open
+run, the reducer reports the obligation read-only and appends nothing. It never edits code, policy,
 infrastructure, or deployment.
 
 ## Build order and kill gate
@@ -347,9 +370,10 @@ custom profile, cross-process diagnostic deduplication and resolution, three cro
 attempts with one stable blocker fingerprint, eligible evidence resetting that fingerprint,
 material control changing compiler state without satisfying evidence, evaluator command/argument
 or finding-prose leakage, recurrence across three sealed source ledgers with no post-seal append,
-recurrence replay deduplication, post-seal append corruption, explicit successor supersession, proof-mode profile/display
-and other export leakage,
-open-contract continuation, free-form completion narration, full backward-compatible `tools/list`,
+fourth-incident and replay deduplication, post-seal append corruption, explicit successor
+supersession, proof-mode event/profile/display and downstream artifact leakage, open-contract
+continuation with immediate gate enforcement and second-declaration rejection, free-form completion
+narration, full backward-compatible `tools/list`,
 privacy-mode override rejection, and three distinct recurrence incidents.
 
 Adam authorizes Codex to squash-merge this ratification PR #13 and four future slices only when
