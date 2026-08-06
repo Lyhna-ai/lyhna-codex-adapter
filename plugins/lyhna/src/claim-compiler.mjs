@@ -284,7 +284,7 @@ function eligibleEvidenceProjection(event) {
   };
 }
 
-function evidenceMatches(requirement, event, contract, profile) {
+function evidenceStructureMatches(requirement, event, contract, profile) {
   const payload = event.payload || {};
   if (event.type !== 'evidence_observed' || payload.contract_id !== contract.contract_id) return false;
   if (payload.profile_requirements_hash !== contract.profile_requirements_hash) return false;
@@ -295,8 +295,15 @@ function evidenceMatches(requirement, event, contract, profile) {
     || payload.producer_id !== requirement.producer_id
     || payload.producer_identity !== expectedIdentity) return false;
   if (requirement.assurance_class === 'production' && (event.origin !== 'registered_probe' || payload.producer_id !== requirement.producer_id)) return false;
-  if (!payload.source_cursor || !isCanonicalObservedAt(payload.observed_at) || !payload.subject_binding || typeof payload.subject_binding !== 'object') return false;
+  if (!payload.subject_binding || typeof payload.subject_binding !== 'object') return false;
   return requirement.subject_fields.every((field) => typeof payload.subject_binding[field] === 'string' && payload.subject_binding[field].length > 0);
+}
+
+function evidenceMatches(requirement, event, contract, profile) {
+  return evidenceStructureMatches(requirement, event, contract, profile)
+    && typeof event.payload?.source_cursor === 'string'
+    && event.payload.source_cursor.length > 0
+    && isCanonicalObservedAt(event.payload?.observed_at);
 }
 
 function isCanonicalObservedAt(value) {
@@ -385,19 +392,29 @@ export function compileClaim({ profile, contract, events }) {
   const pending_producers = [...new Set(producerRequests.map((event) => event.payload?.producer_id).filter((id) => id && !producerTerminals.has(id)))].sort(codepointCompare);
   const relevantEligible = eligiblePrimary;
   const latestBoundCurrentness = new Map();
+  const boundCurrentnessHistory = new Map();
   for (const event of primary) {
     const requirement = requirements.get(event.payload?.requirement_id);
     if (!requirement || event.payload?.contract_id !== contract.contract_id) continue;
-    const expectedIdentity = profile.producers[requirement.producer_id]?.expected_identity;
-    const boundProducer = contract.named_producers.includes(requirement.producer_id)
-      && requirement.eligible_origins.includes(event.origin)
-      && event.payload?.producer_id === requirement.producer_id
-      && event.payload?.producer_identity === expectedIdentity;
-    if (boundProducer) latestBoundCurrentness.set(requirement.requirement_id, event);
+    if (evidenceStructureMatches(requirement, event, contract, profile)) {
+      latestBoundCurrentness.set(requirement.requirement_id, event);
+      const history = boundCurrentnessHistory.get(requirement.requirement_id) || [];
+      history.push(event);
+      boundCurrentnessHistory.set(requirement.requirement_id, history);
+    }
   }
   const malformedCurrentnessCandidate = [...latestBoundCurrentness.values()]
-    .some((event) => !event.payload?.source_cursor || !isCanonicalObservedAt(event.payload?.observed_at));
-  const currentness = relevantEligible.length > 0 && !malformedCurrentnessCandidate
+    .some((event) => typeof event.payload?.source_cursor !== 'string'
+      || event.payload.source_cursor.length === 0
+      || !isCanonicalObservedAt(event.payload?.observed_at));
+  const conflictingCurrentnessCandidate = [...latestBoundCurrentness.entries()].some(([requirementId, latest]) => {
+    if (!latest.payload?.source_cursor) return false;
+    const timestamps = new Set((boundCurrentnessHistory.get(requirementId) || [])
+      .filter((event) => event.payload?.source_cursor === latest.payload.source_cursor)
+      .map((event) => event.payload?.observed_at));
+    return timestamps.size > 1;
+  });
+  const currentness = relevantEligible.length > 0 && !malformedCurrentnessCandidate && !conflictingCurrentnessCandidate
     ? 'AS_WITNESSED'
     : 'CURRENTNESS_UNPROVEN';
   const firstMissing = missing.length ? requirements.get(missing[0]) : null;

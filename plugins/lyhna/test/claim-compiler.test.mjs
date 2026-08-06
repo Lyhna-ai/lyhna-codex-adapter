@@ -306,9 +306,68 @@ test('newer malformed time blocks closeout until a newer valid observation resto
   assert.equal(blocked.decision, 'block');
   assert(blocked.blockers.includes('CURRENTNESS_UNPROVEN'));
 
+  appendEvent(run.id, {
+    type: 'evidence_observed',
+    origin: 'registered_probe',
+    payload: {
+      contract_id: declared.contract_id,
+      profile_requirements_hash: declared.profile_requirements_hash,
+      requirement_id: 'terminal_canary_state',
+      event_kind: 'wrong_terminal_event_kind',
+      producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      source_cursor: 'cursor-terminal-wrong-kind-newer',
+      observed_at: '2026-08-05T12:01:00Z',
+      subject_binding: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
+    },
+    idempotencyKey: 'terminal-wrong-kind-newer'
+  });
+  assert.equal(
+    evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness,
+    'CURRENTNESS_UNPROVEN',
+    'an ineligible event kind cannot restore currentness'
+  );
+
   observe(run.id, declared, 'terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }, 'terminal-valid-new');
   assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'AS_WITNESSED');
   assert.equal(checkpointOrSeal(parent, 'currentness-stop-2').status, 'SEALED');
+});
+
+test('a reused source cursor with conflicting witnessed times blocks closeout until a new cursor arrives', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-currentness-cursor-conflict', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Reject ambiguous source frontiers.' });
+  const declared = declareClaimContract(parent, contract());
+  seedBuilt(run.id, declared);
+  const evidence = [
+    ['merge_identity', 'merge_identity_observed', 'github_observed', 'software_release/repository', { source_ref: 'sha256:source', base_ref: 'sha256:main', merge_ref: 'sha256:merge' }],
+    ['deployment_identity', 'deployment_identity_observed', 'registered_probe', 'software_release/deployment', { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' }],
+    ['configuration_present', 'configuration_presence_observed', 'registered_probe', 'software_release/deployment', { artifact_ref: 'sha256:artifact', configuration_ref: 'sha256:config' }],
+    ['registered_canary', 'registered_canary_observed', 'registered_probe', 'software_release/canary', { artifact_ref: 'sha256:artifact', canary_ref: 'sha256:canary' }],
+    ['terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }]
+  ];
+  for (const args of evidence) observe(run.id, declared, ...args);
+  appendEvent(run.id, {
+    type: 'evidence_observed',
+    origin: 'registered_probe',
+    payload: {
+      contract_id: declared.contract_id,
+      profile_requirements_hash: declared.profile_requirements_hash,
+      requirement_id: 'terminal_canary_state',
+      event_kind: 'terminal_canary_state_observed',
+      producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      source_cursor: 'cursor_terminal_canary_state',
+      observed_at: '2026-08-05T12:01:00Z',
+      subject_binding: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
+    },
+    idempotencyKey: 'terminal-cursor-conflict'
+  });
+  assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'CURRENTNESS_UNPROVEN');
+  requestClose(parent, 'Close only after an unambiguous source frontier.');
+  assert(checkpointOrSeal(parent, 'cursor-conflict-stop').blockers.includes('CURRENTNESS_UNPROVEN'));
+  observe(run.id, declared, 'terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }, 'terminal-cursor-new');
+  assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'AS_WITNESSED');
 });
 
 test('unsupported closeout counts a contiguous fingerprint streak, seals honestly, and releases the session', { concurrency: false }, (t) => {
@@ -467,8 +526,28 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
     }),
     /UNREGISTERED_PROOF_FIELD/
   );
+  const rawCursor = 'CURSOR_RAW_DO_NOT_PERSIST_6C20';
+  const rawSource = 'SUBJECT_RAW_DO_NOT_PERSIST_B157';
+  const projected = appendEvent(run.id, {
+    type: 'evidence_observed',
+    origin: 'runtime_hook',
+    payload: {
+      contract_id: declared.contract_id,
+      profile_requirements_hash: declared.profile_requirements_hash,
+      requirement_id: 'source_identity',
+      event_kind: 'source_identity_observed',
+      producer_id: 'software_release/local',
+      producer_identity: 'local_verifier',
+      source_cursor: rawCursor,
+      observed_at: '2026-08-05T12:00:00Z',
+      subject_binding: { source_ref: rawSource }
+    },
+    idempotencyKey: 'known-evidence-opaque-projection'
+  });
+  assert.equal(projected.payload.source_cursor, `cursor_${sha256(rawCursor)}`);
+  assert.equal(projected.payload.subject_binding.source_ref, `sha256:${sha256(rawSource)}`);
   const proofLedger = JSON.stringify(getRunForTesting(run.id).events);
-  for (const marker of ['RAW_PROSE', 'NESTED_HOOK_PROSE', 'NESTED_SUBJECT_PROSE']) assert.equal(proofLedger.includes(marker), false);
+  for (const marker of ['RAW_PROSE', 'NESTED_HOOK_PROSE', 'NESTED_SUBJECT_PROSE', rawCursor, rawSource]) assert.equal(proofLedger.includes(marker), false);
 });
 
 test('proof-mode evaluator prose is withheld from state and child receipts, not only from the ledger', { concurrency: false }, (t) => {
@@ -682,6 +761,15 @@ test('a committed lease-transfer event completes idempotently after projection w
   writeFileSync(childPath, `${JSON.stringify(childRecord, null, 2)}\n`);
   rmSync(join(data, 'active', `${sha256(secondParent)}.json`), { force: true });
   writeFileSync(join(data, 'active', `${sha256(firstParent)}.json`), `${JSON.stringify({ run_id: run.id }, null, 2)}\n`);
+
+  const predecessorPath = join(data, 'capabilities', `${sha256(firstParent)}.json`);
+  const predecessorRecord = JSON.parse(readFileSync(predecessorPath, 'utf8'));
+  delete predecessorRecord.revoked;
+  writeFileSync(predecessorPath, `${JSON.stringify(predecessorRecord, null, 2)}\n`);
+  assert.throws(
+    () => beginRun(firstParent, { mode: 'full', objective: 'Crash recovery must not reattach the predecessor.' }),
+    /CAPABILITY_REVOKED/
+  );
 
   const replayed = beginRun(secondParent, { mode: 'full', objective: 'Replay transfer.', continuesFrom: capsuleRef });
   assert.equal(replayed.id, run.id);

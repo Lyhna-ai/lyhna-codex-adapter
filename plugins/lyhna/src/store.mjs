@@ -893,10 +893,19 @@ function projectEventPayloadForPrivacy(state, type, payload) {
   if (type === 'evidence_observed') {
     const requirement = state.claim_profile?.requirements?.find((item) => item.requirement_id === payload.requirement_id);
     assert(requirement, 'UNREGISTERED_PROOF_FIELD');
+    assert(typeof payload.source_cursor === 'string' && payload.source_cursor.length > 0, 'UNREGISTERED_PROOF_FIELD');
     assert(payload.subject_binding && typeof payload.subject_binding === 'object' && !Array.isArray(payload.subject_binding), 'UNREGISTERED_PROOF_FIELD');
     const unknownBinding = Object.keys(payload.subject_binding || {}).find((key) => !requirement.subject_fields.includes(key));
     assert(!unknownBinding, 'UNREGISTERED_PROOF_FIELD');
     assert(requirement.subject_fields.every((key) => typeof payload.subject_binding[key] === 'string'), 'UNREGISTERED_PROOF_FIELD');
+    const opaqueBinding = Object.fromEntries(requirement.subject_fields.map((key) => {
+      const value = payload.subject_binding[key];
+      return [key, /^sha256:[a-f0-9]{64}$/.test(value) ? value : `sha256:${sha256(value)}`];
+    }));
+    const sourceCursor = /^cursor_[a-f0-9]{64}$/.test(payload.source_cursor)
+      ? payload.source_cursor
+      : `cursor_${sha256(payload.source_cursor)}`;
+    return { ...payload, source_cursor: sourceCursor, subject_binding: opaqueBinding };
   }
   if (type.startsWith('hook_')) {
     assertReferenceShape(payload.payload_ref);
@@ -1022,6 +1031,15 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
         adoptTerminalLedgerSeal(current, recovered);
         return recovered;
       });
+      const callerHash = sha256(capability);
+      if (state.parent_capability_hash !== callerHash) {
+        const transfer = [...parseLedger(current).events].reverse().find((event) => (
+          event.type === 'continuation_lease_transferred'
+          && event.payload?.predecessor_parent_ref === callerHash
+        ));
+        assert(!transfer, 'CAPABILITY_REVOKED');
+        assert(false, 'CAPABILITY_RUN_MISMATCH');
+      }
       // A durable terminal run_sealed whose state.sealed lagged (crash after the seal append, before
       // state/anchor) must be adopted here too — begin_run is a likely recovery path. Otherwise
       // reattach hands back a run every mutable tool now rejects with RUN_SEALED, wedging the session;
