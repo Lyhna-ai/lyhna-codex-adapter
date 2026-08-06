@@ -155,7 +155,7 @@ closeout_envelope_generated
 enforcement_required
 ```
 
-Every derived event carries `claim_contract_ref`, `fold_version`, `input_digest`, the eligible
+Every claim-scoped derived event carries `claim_contract_ref`, `fold_version`, `input_digest`, the eligible
 evidence frontier, and the material-control frontier it summarized. The eligible frontier is the
 canonical digest of requirement-eligible `evidence_observed` projections only and alone can support
 a requirement. The material-control frontier covers the contract, producer requests and terminal
@@ -236,6 +236,13 @@ STALE
 A successful review job with findings is `FINDINGS`, not `CLEAN`. Free-form review prose is not a
 terminal structured verdict.
 
+The shipped `record_evaluation(..., finding, ...)` input remains accepted for compatibility, but
+the store treats it as human-authored prose: it writes only a bounded redacted finding summary plus
+a stable finding ID, structural severity/count, and evidence hashes or references. It never stores
+full commands, output, tokens, environment, or private paths embedded in that input. In `proof`
+exports the finding summary is projected away; finding ID, severity/count, verdict, and evidence
+references remain.
+
 The default software-release quiet barrier requires two primary samples at least 120 witnessed
 seconds apart with identical profile and contract hashes, exact head, producer statuses, reviewer
 actors and verdicts, checks, unresolved-thread state, source cursors, and local verifier result.
@@ -258,7 +265,7 @@ declaration inherits that value by reference and cannot change it.
 - `verified_context` retains bounded, redacted contract and diagnostic text for the owner.
 - `proof` follows the existing at-egress projection model: the local ledger retains the same
   bounded redacted source text, while capsule, receipt, handoff, continuation prompt, and exported
-  packet project objective-like prose, contract text, diagnostic prose, and closeout narrative
+  packet project objective-like prose, contract text, diagnostic prose, evaluator finding prose, and closeout narrative
   away before those artifact hashes are derived. Stable labels, state IDs, the privacy-safe
   structural profile projection, evidence references, producer identities, digests, and
   deterministic `text_withheld` markers remain.
@@ -289,12 +296,20 @@ may record `claim_superseded`. Post-seal activity without explicit invocation cr
 ## Recurrence reducer
 
 Profiles register stable `failure_class_id` values. An incident supplies a distinct incident
-reference and eligible primary evidence references. The reducer reconstructs recurrence from the
-validated ledgers rather than a second mutable database.
+reference and eligible evidence references. The reducer reconstructs recurrence from validated
+ledgers rather than a second mutable database. Its immutable aggregate input is the canonical sort
+of unique records containing `failure_class_id`, `incident_ref`, `source_run_id`,
+`source_contract_ref`, `source_ledger_tip`, and eligible evidence references. The
+`recurrence_frontier` is the digest of those sorted records.
 
-One initial incident plus two distinct confirmed recurrences emits one derived
-`ENFORCEMENT_REQUIRED` obligation. Replay emits no duplicate. The reducer does not edit code,
-policy, infrastructure, or deployment.
+One initial incident plus two distinct confirmed recurrences may append one derived
+`ENFORCEMENT_REQUIRED` obligation only to the current explicitly invoked open run. It carries the
+failure class, `recurrence_frontier`, sorted incident/contract refs, and per-ledger tips instead of a
+single `claim_contract_ref`. No source ledger is modified, and a sealed current run cannot receive
+it. The deterministic idempotency key is the failure class plus the threshold-crossing recurrence
+frontier; replay reconstructs the same aggregate and emits no duplicate. With no open run, the
+reducer reports the obligation read-only and appends nothing. It never edits code, policy,
+infrastructure, or deployment.
 
 ## Build order and kill gate
 
@@ -331,7 +346,8 @@ page-two GitHub data, a diamond profile with ambiguous surface projection, delet
 custom profile, cross-process diagnostic deduplication and resolution, three cross-process Stop
 attempts with one stable blocker fingerprint, eligible evidence resetting that fingerprint,
 material control changing compiler state without satisfying evidence, evaluator command/argument
-leakage, post-seal append corruption, explicit successor supersession, proof-mode profile/display
+or finding-prose leakage, recurrence across three sealed source ledgers with no post-seal append,
+recurrence replay deduplication, post-seal append corruption, explicit successor supersession, proof-mode profile/display
 and other export leakage,
 open-contract continuation, free-form completion narration, full backward-compatible `tools/list`,
 privacy-mode override rejection, and three distinct recurrence incidents.

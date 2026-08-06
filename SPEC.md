@@ -14,9 +14,10 @@ block the underlying external action.
 For v0.1.33 and later, implementations and reviews must also follow
 [`docs/proposals/CLAIM-COMPILER-SPEC-2026-08-05.md`](docs/proposals/CLAIM-COMPILER-SPEC-2026-08-05.md).
 It remains normative until a named successor specification explicitly supersedes it. That ratified
-addendum supplements this specification and supersedes it only where it explicitly defines
-unsupported-seal refusal and the five-PR merge authorization. Every other invariant in this
-specification remains binding.
+addendum supplements this specification and controls every claim-compiler-specific technical
+requirement where the two documents conflict, including fold v2, profile compilation, unsupported
+seal refusal, and the five-PR merge authorization. Every base invariant it does not explicitly
+change remains binding.
 
 ## Repository boundary
 
