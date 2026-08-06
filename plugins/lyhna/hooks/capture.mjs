@@ -27,6 +27,14 @@ function readInput() {
   return raw.trim() ? JSON.parse(raw) : {};
 }
 
+function deliveryIdentity(input, payload, { includeTurn = false } = {}) {
+  const childIdentity = payload.event === 'SubagentStart' || payload.event === 'SubagentStop'
+    ? input.agent_id
+    : null;
+  const explicit = payload.event_id || childIdentity || (includeTurn ? input.turn_id : null);
+  return explicit ? `id_${sha256(String(explicit))}` : null;
+}
+
 function main(input) {
   const event = input.hook_event_name || input.event_name || '';
   if (event === 'SessionStart') {
@@ -38,7 +46,7 @@ function main(input) {
 
   const parentCapability = findParentCapabilityBySession(input.session_id);
   const payload = sanitizeHook(input);
-  const deliveryKey = input.event_id || input.tool_use_id || input.call_id || sha256(JSON.stringify(payload));
+  const deliveryKey = deliveryIdentity(input, payload);
   // SubagentStart/Stop record their own child-lifecycle events; Stop records its single durable
   // marker atomically inside checkpointOrSeal (the delivery-keyed turn_checkpoint IS the Stop
   // observation). Recording a separate hook_stop here would make the Stop marker span two
@@ -46,7 +54,7 @@ function main(input) {
   // after blockers cleared. Excluding Stop keeps the turn_checkpoint the sole, first-written marker.
   const ownsOwnRecord = event === 'SubagentStart' || event === 'SubagentStop' || event === 'Stop';
   if (parentCapability && activeRunFor(parentCapability) && !ownsOwnRecord) {
-    recordHookForParent(parentCapability, payload, `hook:${event}:${deliveryKey}`);
+    recordHookForParent(parentCapability, payload, deliveryKey ? `hook:${event}:${deliveryKey}` : null);
   }
 
   if (event === 'SubagentStart') {
@@ -54,7 +62,7 @@ function main(input) {
       sessionId: input.session_id,
       agentId: input.agent_id,
       hookPayload: payload,
-      hookDeliveryKey: `hook:${event}:${deliveryKey}`
+      hookDeliveryKey: deliveryKey ? `hook:${event}:${deliveryKey}` : null
     });
     if (child) return contextOutput('SubagentStart', `This child has a hook-issued Lyhna identity. Use LYHNA_CHILD_CAPABILITY=${child} only for an assigned evaluator request. It cannot act as the parent builder.`);
   }
@@ -64,7 +72,7 @@ function main(input) {
       sessionId: input.session_id,
       agentId: input.agent_id,
       hookPayload: payload,
-      hookDeliveryKey: `hook:${event}:${deliveryKey}`
+      hookDeliveryKey: deliveryKey ? `hook:${event}:${deliveryKey}` : null
     });
   }
   if (event === 'PostToolUse' && parentCapability) {
@@ -72,8 +80,8 @@ function main(input) {
     if (advisory) return contextOutput('PostToolUse', advisory);
   }
   if (event === 'Stop' && parentCapability) {
-    const deliveryKey = input.event_id || input.turn_id || sha256(JSON.stringify(sanitizeHook(input)));
-    const result = checkpointOrSeal(parentCapability, deliveryKey);
+    const stopDeliveryKey = deliveryIdentity(input, payload, { includeTurn: true });
+    const result = checkpointOrSeal(parentCapability, stopDeliveryKey);
     if (result?.decision === 'block') return { decision: 'block', reason: result.reason };
   }
   return {};

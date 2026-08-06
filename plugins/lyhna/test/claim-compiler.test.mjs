@@ -29,6 +29,7 @@ import {
 } from '../src/store.mjs';
 import { isolatedData } from './helpers.mjs';
 import { canonicalJson, sha256 } from '../src/util.mjs';
+import { sanitizeHook } from '../src/redact.mjs';
 import { compileClaim, profileRequirementsHash, SOFTWARE_RELEASE_PROFILE, validateProfile } from '../src/claim-compiler.mjs';
 import { buildContinuation } from '../src/continuation.mjs';
 
@@ -827,7 +828,12 @@ test('recovery restores evaluator capability binding, child role, and canonical 
   const cache = JSON.parse(readFileSync(statePath, 'utf8'));
   const agentHash = getCapability(child).agent_hash;
   delete cache.evaluations[evaluation.id].child_capability_hash;
-  cache.children.wrong_cached_agent_key = { ...cache.children[agentHash], role: 'delegated_agent' };
+  cache.evaluations[evaluation.id].child_receipt_id = 'child_fake_receipt';
+  cache.evaluations[evaluation.id].child_receipt_retrieved = true;
+  cache.evaluations[evaluation.id].findings = [{ statement: 'stale cache finding' }];
+  cache.children.wrong_cached_agent_key = {
+    ...cache.children[agentHash], role: 'delegated_agent', receipt_id: 'child_fake_receipt'
+  };
   delete cache.children[agentHash];
   writeFileSync(statePath, JSON.stringify(cache, null, 2) + '\n');
 
@@ -837,8 +843,42 @@ test('recovery restores evaluator capability binding, child role, and canonical 
   }));
   const recovered = getRunForTesting(run.id).state;
   assert.equal(recovered.evaluations[evaluation.id].child_capability_hash, sha256(child));
+  assert.equal(recovered.evaluations[evaluation.id].child_receipt_id, null);
+  assert.equal(recovered.evaluations[evaluation.id].child_receipt_retrieved, false);
+  assert.equal(recovered.evaluations[evaluation.id].findings.length, 1, 'only the durable finding survives recovery');
   assert.equal(recovered.children[agentHash].role, 'evaluator');
+  assert.equal(recovered.children[agentHash].receipt_id, null);
   assert.equal(recovered.children.wrong_cached_agent_key, undefined);
+});
+
+test('legacy closeout ignores cached child receipts absent from the durable ledger', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'compiler-rebuild-legacy-child-receipt';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Never close from a cached child receipt.' });
+  const childCapability = mintChild({ sessionId, agentId: 'legacy-unreceipted-child' });
+  const agentHash = getCapability(childCapability).agent_hash;
+  const packet = getRunForTesting(run.id);
+  const child = packet.state.children[agentHash];
+  appendRawLedgerEventForRecoveryTest(packet, {
+    type: 'child_stop_observed',
+    origin: 'runtime_hook',
+    payload: { child_id: child.id, role: child.role, status: 'STOP_OBSERVED' },
+    key: `child-stop:${child.id}`
+  });
+  const statePath = join(packet.directory, 'state.json');
+  const cache = JSON.parse(readFileSync(statePath, 'utf8'));
+  cache.children[agentHash].status = 'STOP_OBSERVED';
+  cache.children[agentHash].receipt_id = 'child_fake_receipt';
+  writeFileSync(statePath, JSON.stringify(cache, null, 2) + '\n');
+
+  requestClose(parent, 'Attempt legacy closeout with an unreceipted child.');
+  const blocked = checkpointOrSeal(parent, 'legacy-fake-child-receipt-stop');
+  assert.equal(blocked.status, 'CLOSE_DEFERRED');
+  assert(blocked.blockers.includes(`CHILD_${child.id}_OPEN`));
+  const recovered = getRunForTesting(run.id).state;
+  assert.equal(recovered.children[agentHash].receipt_id, null);
+  assert.equal(recovered.sealed, false);
 });
 test('supported closeout derives child join from the ledger in normal and envelope-replay paths', { concurrency: false }, (t) => {
   isolatedData(t);
@@ -1363,9 +1403,9 @@ test('proof-mode v2 withholds objective, claim, diagnostic, and closeout prose b
     failures: [{ object: 'checks', error: snapshotFailure }]
   });
   requestClose(parent, closeReason);
-  checkpointOrSeal(parent, 'proof-stop-1');
-  checkpointOrSeal(parent, 'proof-stop-2');
-  checkpointOrSeal(parent, 'proof-stop-3');
+  checkpointOrSeal(parent, `id_${sha256('proof-stop-1')}`);
+  checkpointOrSeal(parent, `id_${sha256('proof-stop-2')}`);
+  checkpointOrSeal(parent, `id_${sha256('proof-stop-3')}`);
 
   const packet = getRunForTesting(run.id);
   const files = readTree(packet.directory).join('\n');
@@ -1492,19 +1532,35 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
   assert.equal(projected.payload.source_cursor, `cursor_${sha256(rawCursor)}`);
   assert.equal(projected.payload.subject_binding.source_ref, `sha256:${sha256(rawSource)}`);
   const rawHookProse = 'HOOK_RAW_DO_NOT_PERSIST_7B31';
-  const rawHookDigest = sha256(rawHookProse);
-  const hookEvent = appendEvent(run.id, {
-    type: 'hook_posttooluse',
-    origin: 'runtime_hook',
-    payload: {
-      event: 'PostToolUse', event_id: 'proof-hook', model: null, tool_name: 'example', cwd_ref: null,
-      payload_ref: { sha256: rawHookDigest, bytes: rawHookProse.length },
-      support: 'tool_returned', outcome: 'returned'
-    },
-    idempotencyKey: 'proof-hook-payload-ref'
-  });
+  const hookInput = {
+    hook_event_name: 'PostToolUse', session_id: 'compiler-proof-shape', event_id: 'proof-hook',
+    tool_name: 'example', tool_output: rawHookProse, status: 'returned'
+  };
+  const sanitizedHook = sanitizeHook(hookInput);
+  const rawHookDigest = sanitizedHook.payload_ref.sha256;
+  const oldFallbackDigest = sha256(JSON.stringify(sanitizedHook));
+  runHook(hookInput, { ...process.env, LYHNA_CODEX_DATA: data });
+  const hookEvent = getRunForTesting(run.id).events.find((event) => event.type === 'hook_posttooluse');
   assert.equal(hookEvent.payload.payload_ref, undefined);
   assert.equal(hookEvent.payload.text_withheld, true);
+  assert.match(hookEvent.idempotency_key, /^hook:PostToolUse:id_[a-f0-9]{64}$/);
+  const unidentifiedHookInput = {
+    hook_event_name: 'PostToolUse', session_id: 'compiler-proof-shape',
+    tool_name: 'example', tool_output: 'SECOND_HIDDEN_HOOK_RESULT', status: 'returned'
+  };
+  const unidentifiedHook = sanitizeHook(unidentifiedHookInput);
+  const unidentifiedHookFallback = sha256(JSON.stringify(unidentifiedHook));
+  const unidentifiedResult = runHook(unidentifiedHookInput, { ...process.env, LYHNA_CODEX_DATA: data });
+  assert.match(unidentifiedResult.systemMessage, /PROOF_HOOK_DELIVERY_ID_REQUIRED/);
+  assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'hook_posttooluse').length, 1);
+  const unidentifiedStopInput = {
+    hook_event_name: 'Stop', session_id: 'compiler-proof-shape', tool_output: 'HIDDEN_STOP_RESULT'
+  };
+  const unidentifiedStopFallback = sha256(JSON.stringify(sanitizeHook(unidentifiedStopInput)));
+  const unidentifiedStop = runHook(unidentifiedStopInput, { ...process.env, LYHNA_CODEX_DATA: data });
+  assert.equal(unidentifiedStop.decision, 'block');
+  assert.match(unidentifiedStop.reason, /PROOF_STOP_DELIVERY_ID_REQUIRED/);
+  assert.equal(getRunForTesting(run.id).events.some((event) => event.type === 'turn_checkpoint'), false);
   const rawFailureProse = 'SNAPSHOT_FAILURE_RAW_DO_NOT_PERSIST_8C42';
   const rawFailureDigest = sha256(rawFailureProse);
   const proofSnapshot = addPrSnapshot(parent, {
@@ -1516,14 +1572,18 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
   assert.deepEqual(proofSnapshot.failures, [{ object: 'checks', text_withheld: true }]);
   assert.doesNotThrow(() => evaluateClaimGate(parent, declared.contract_id, 'closeout'));
   assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'gate_evaluated').length, 1);
-  assert.equal(checkpointOrSeal(parent, 'proof-projection-checkpoint').status, 'CHECKPOINTED');
+  assert.equal(checkpointOrSeal(parent, `id_${sha256('proof-projection-checkpoint')}`).status, 'CHECKPOINTED');
   const proofLedger = JSON.stringify(getRunForTesting(run.id).events);
   for (const marker of [
     'RAW_PROSE', 'NESTED_HOOK_PROSE', 'NESTED_SUBJECT_PROSE', rawCursor, rawSource, rawObservedAt,
-    rawHookProse, rawHookDigest, rawFailureProse, rawFailureDigest
+    rawHookProse, rawHookDigest, oldFallbackDigest, unidentifiedHookFallback, unidentifiedStopFallback,
+    rawFailureProse, rawFailureDigest
   ]) assert.equal(proofLedger.includes(marker), false);
   const proofArtifacts = readTree(data).join('\n');
-  for (const marker of [rawHookProse, rawHookDigest, rawFailureProse, rawFailureDigest]) {
+  for (const marker of [
+    rawHookProse, rawHookDigest, oldFallbackDigest, unidentifiedHookFallback, unidentifiedStopFallback,
+    rawFailureProse, rawFailureDigest
+  ]) {
     assert.equal(proofArtifacts.includes(marker), false);
   }
   assert.equal(readTree(data).join('\n').includes(rawContinuation), false);
@@ -1816,6 +1876,31 @@ test('a replayed third unsupported Stop finishes sealing after a crash behind th
   assert.equal(final.events.filter((event) => event.type === 'closeout_attempted').length, 3);
   assert.equal(final.events.filter((event) => event.type === 'closeout_envelope_generated').length, 1);
   assert.equal(final.events.at(-1).type, 'run_sealed');
+});
+
+test('a replayed closeout Stop resumes when the checkpoint landed before the attempt', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-checkpoint-before-attempt-crash', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Do not escape the claim gate after a torn Stop.' });
+  declareClaimContract(parent, contract());
+  requestClose(parent, 'Close only through the declared claim gate.');
+  const packet = getRunForTesting(run.id);
+  appendRawLedgerEventForRecoveryTest(packet, {
+    type: 'turn_checkpoint',
+    origin: 'runtime_hook',
+    payload: { status: 'OPEN', receipt_renderer: '0.1.33' },
+    key: 'checkpoint:checkpoint-before-attempt'
+  });
+
+  const replayed = checkpointOrSeal(parent, 'checkpoint-before-attempt');
+  assert.equal(replayed.status, 'CLOSE_DEFERRED');
+  assert.equal(replayed.decision, 'block');
+  assert.equal(replayed.closeout_attempt_ordinal, 1);
+  assert.equal(replayed.replayed_delivery, undefined);
+  const final = getRunForTesting(run.id);
+  assert.equal(final.events.filter((event) => event.type === 'turn_checkpoint').length, 1);
+  assert.equal(final.events.filter((event) => event.type === 'closeout_attempted').length, 1);
+  assert.equal(final.state.sealed, false);
 });
 
 test('a replayed Stop resumes a durable closeout attempt without escaping or incrementing the cap', { concurrency: false }, (t) => {

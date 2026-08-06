@@ -61,7 +61,10 @@ function runWindow({ sessionId, objective, continuesFrom, privacyMode, claims = 
   for (const claim of claims) recordClaim(parent, claim.statement, claim.evidence_refs || []);
   evaluateAndRetrieve(sessionId, parent, stableSnapshot, `${sessionId}-evaluator`);
   requestClose(parent, 'Window complete.');
-  const sealed = checkpointOrSeal(parent, `${sessionId}-stop`);
+  const deliveryKey = privacyMode === 'proof'
+    ? `id_${sha256(`${sessionId}-stop`)}`
+    : `${sessionId}-stop`;
+  const sealed = checkpointOrSeal(parent, deliveryKey);
   assert.equal(sealed.status, 'SEALED');
   return { parent, run, sealed, directory: getRunForTesting(run.id).directory };
 }

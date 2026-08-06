@@ -529,6 +529,7 @@ export function mintChild({ sessionId, agentId, hookPayload = null, hookDelivery
     }
     let startEvent = null;
     if (hookPayload) {
+      assert(current.privacy_mode !== 'proof' || /^hook:[^:]+:id_[a-f0-9]{64}$/.test(String(hookDeliveryKey || '')), 'PROOF_HOOK_DELIVERY_ID_REQUIRED');
       startEvent = appendEventUnlocked(activeRunId, current, {
         type: 'hook_subagentstart',
         origin: 'runtime_hook',
@@ -797,7 +798,8 @@ function reconcileLifecycleProjectionUnlocked(state, events) {
         role: payload.role,
         status: 'STARTED',
         start_event_ref: event.event_hash,
-        stop_event_ref: null
+        stop_event_ref: null,
+        receipt_id: null
       });
     } else if (event.type === 'child_stop_observed' && event.origin === 'runtime_hook') {
       const child = childEvents.get(payload.child_id);
@@ -811,9 +813,11 @@ function reconcileLifecycleProjectionUnlocked(state, events) {
         expected_head: payload.expected_head,
         status: 'OPEN',
         trigger: payload.trigger,
-        child_capability_hash: prior.child_capability_hash || null,
-        child_agent_hash: prior.child_agent_hash || null,
-        findings: prior.findings || []
+        child_capability_hash: null,
+        child_agent_hash: null,
+        child_receipt_id: null,
+        child_receipt_retrieved: false,
+        findings: []
       });
     } else if (event.type === 'evaluation_claimed' && event.origin === 'mcp_routed') {
       const evaluation = evaluationEvents.get(payload.evaluation_request_id);
@@ -872,7 +876,13 @@ function reconcileLifecycleProjectionUnlocked(state, events) {
       item.child_agent_hash
       && `child_agent_${sha256(`${state.id}\0${item.child_agent_hash}`).slice(0, 24)}` === childId
     ));
-    const receiptId = evaluation ? `child_${evaluation.id}` : childId;
+    // A stale or otherwise non-recordable evaluation can still finish as an ordinary
+    // lifecycle child. Prefer the evaluation receipt only when that durable receipt
+    // actually exists; never manufacture its identity from cached assignment state.
+    const evaluationReceiptId = evaluation ? `child_${evaluation.id}` : null;
+    const receiptId = evaluationReceiptId && receiptEvents.has(evaluationReceiptId)
+      ? evaluationReceiptId
+      : childId;
     if (evaluation) child.role = 'evaluator';
     if (receiptEvents.has(receiptId)) {
       child.receipt_id = receiptId;
@@ -1372,6 +1382,9 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
     state.ledger_tip = tip;
   }
   assert(events.length === state.ledger_count && tip === state.ledger_tip, 'LOCAL_CHAIN_BROKEN');
+  if (state.privacy_mode === 'proof' && type.startsWith('hook_')) {
+    assert(/^hook:[^:]+:id_[a-f0-9]{64}$/.test(String(idempotencyKey || '')), 'PROOF_HOOK_DELIVERY_ID_REQUIRED');
+  }
   const key = idempotencyKey || sha256(canonicalJson({ origin, payload: projectedPayload, type }));
   const contentHash = sha256(canonicalJson({ origin, payload: projectedPayload, type }));
   const duplicate = events.find((event) => event.idempotency_key === key);
@@ -2433,6 +2446,7 @@ export function sealChildByAgent({ sessionId, agentId, hookPayload = null, hookD
     recoverClaimControlStateUnlocked(runId, current);
     let stopEvent = null;
     if (hookPayload) {
+      assert(current.privacy_mode !== 'proof' || /^hook:[^:]+:id_[a-f0-9]{64}$/.test(String(hookDeliveryKey || '')), 'PROOF_HOOK_DELIVERY_ID_REQUIRED');
       stopEvent = appendEventUnlocked(runId, current, {
         type: 'hook_subagentstop',
         origin: 'runtime_hook',
@@ -2664,6 +2678,9 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     const current = loadState(runId);
     recoverClaimControlStateUnlocked(runId, current, parsedBeforeState);
     assert(current.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
+    if (current.privacy_mode === 'proof') {
+      assert(/^id_[a-f0-9]{64}$/.test(String(deliveryKey || '')), 'PROOF_STOP_DELIVERY_ID_REQUIRED');
+    }
     atomicWriteJson(activePath(capability), { run_id: runId });
     // Adopt a durable terminal run_sealed (crash after the seal append, before state/anchor) BEFORE the
     // replay guard, which would otherwise short-circuit and leave an unsealed run no later Stop repairs.
@@ -2695,6 +2712,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     // the closeout never ran — the dup would still be the tip, so a redelivery would wrongly seal.)
     const checkpointKey = `checkpoint:${deliveryKey || preEvents.length + 1}`;
     const priorCheckpoint = preEvents.find((event) => event.idempotency_key === checkpointKey);
+    let resumeCloseoutAfterCheckpoint = false;
     if (priorCheckpoint) {
       const nextCheckpoint = preEvents.find((event) => event.seq > priorCheckpoint.seq && event.type === 'turn_checkpoint');
       const deliveryTail = preEvents.filter((event) => (
@@ -2763,30 +2781,40 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
           closeout_envelope_ref: current.closeout_envelope.event_ref
         });
       }
-      // The Stop was observed. If the original delivery crashed after appending the turn_checkpoint
-      // but before writeCheckpointArtifacts wrote the packet, no checkpoint_anchor follows it — finish
-      // that interrupted packet now so every observed Stop has its verifiable checkpoint. If an anchor
-      // already follows this checkpoint the packet is complete; do NOT re-anchor (that would fold later
-      // activity into a fresh anchor for a repeated hook). Never re-seal or re-defer.
-      const packetComplete = preEvents.some((event) => event.type === 'checkpoint_anchor' && event.seq > priorCheckpoint.seq);
-      if (!packetComplete) writeCheckpointArtifacts(runId, current);
-      // An anchor proves the packet was anchored, NOT that every derived artifact landed. Artifact
-      // writes run continuation → handoff → index, so a crash in that tail leaves an anchored packet
-      // whose capsule no successor can resolve — and the anchor is exactly what makes this branch
-      // skip the repair. Reconcile the index from the capsule already on disk; it restates a fact
-      // the packet holds, so it can never invent a link.
-      else ensureStopArtifacts(runId, current);
-      return { status: current.close_requested ? 'CLOSE_DEFERRED' : 'CHECKPOINTED', run_id: runId, replayed_delivery: true };
+      // A close-requested claim Stop that crashed after its checkpoint but before its durable attempt
+      // has not finished the gate. Resume below without appending a second checkpoint; returning a
+      // bare CLOSE_DEFERRED here would omit decision:block and let the parent stop through the gate.
+      resumeCloseoutAfterCheckpoint = Boolean(
+        current.close_requested && current.claim_contract && !nextCheckpoint && !attemptCompleted
+      );
+      if (!resumeCloseoutAfterCheckpoint) {
+        // The Stop was observed. If the original delivery crashed after appending the turn_checkpoint
+        // but before writeCheckpointArtifacts wrote the packet, no checkpoint_anchor follows it — finish
+        // that interrupted packet now so every observed Stop has its verifiable checkpoint. If an anchor
+        // already follows this checkpoint the packet is complete; do NOT re-anchor (that would fold later
+        // activity into a fresh anchor for a repeated hook). Never re-seal or re-defer.
+        const packetComplete = preEvents.some((event) => event.type === 'checkpoint_anchor' && event.seq > priorCheckpoint.seq);
+        if (!packetComplete) writeCheckpointArtifacts(runId, current);
+        // An anchor proves the packet was anchored, NOT that every derived artifact landed. Artifact
+        // writes run continuation → handoff → index, so a crash in that tail leaves an anchored packet
+        // whose capsule no successor can resolve — and the anchor is exactly what makes this branch
+        // skip the repair. Reconcile the index from the capsule already on disk; it restates a fact
+        // the packet holds, so it can never invent a link.
+        else ensureStopArtifacts(runId, current);
+        return { status: current.close_requested ? 'CLOSE_DEFERRED' : 'CHECKPOINTED', run_id: runId, replayed_delivery: true };
+      }
     }
-    appendEventUnlocked(runId, current, {
-      type: 'turn_checkpoint',
-      origin: 'runtime_hook',
-      // The renderer version rides in this event for observability; the verification gate reads the
-      // checkpoint_anchor event that writeCheckpointArtifacts appends (never the mutable anchor
-      // file), mirroring how run_sealed pins the seal renderer.
-      payload: { status: 'OPEN', receipt_renderer: ADAPTER_VERSION },
-      idempotencyKey: checkpointKey
-    });
+    if (!resumeCloseoutAfterCheckpoint) {
+      appendEventUnlocked(runId, current, {
+        type: 'turn_checkpoint',
+        origin: 'runtime_hook',
+        // The renderer version rides in this event for observability; the verification gate reads the
+        // checkpoint_anchor event that writeCheckpointArtifacts appends (never the mutable anchor
+        // file), mirroring how run_sealed pins the seal renderer.
+        payload: { status: 'OPEN', receipt_renderer: ADAPTER_VERSION },
+        idempotencyKey: checkpointKey
+      });
+    }
     saveState(current);
     if (!current.close_requested) {
       writeCheckpointArtifacts(runId, current);
