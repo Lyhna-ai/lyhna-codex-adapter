@@ -715,6 +715,97 @@ test('a supported contract waits behind active child lifecycle obligations', { c
   assert.equal(getRunForTesting(run.id).events.some((event) => event.type === 'run_sealed'), false);
 });
 
+test('supported envelopes require an explicit close request and stale evaluations do not block', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-supported-close-request-firewall', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Seal only after an explicit close request.' });
+  const declared = declareClaimContract(parent, contract({
+    requested_state: 'BUILT',
+    named_producers: ['software_release/local'],
+    verifier_id: 'software_release/local_verifier'
+  }));
+  seedBuilt(run.id, declared);
+  const compiled = evaluateClaimGate(parent, declared.contract_id, 'closeout');
+  const envelope = {
+    envelope_id: 'supported-without-request',
+    outcome: 'SUPPORTED',
+    profile_id: declared.profile_id,
+    requested_state: declared.requested_state,
+    supported_state: compiled.highest_supported_state,
+    scope_ref: declared.objective_ref,
+    eligible_evidence_frontier: compiled.eligible_evidence_frontier,
+    material_control_frontier: compiled.material_control_frontier,
+    input_digest: compiled.input_digest,
+    claim_contract_ref: declared.claim_contract_ref,
+    fold_version: 'v2',
+    blockers: [],
+    next_verifier: compiled.next_verifier
+  };
+  assert.throws(() => appendEvent(run.id, {
+    type: 'closeout_envelope_generated',
+    origin: 'runtime_hook',
+    payload: envelope,
+    idempotencyKey: 'supported-without-request'
+  }), /INVALID_CLOSEOUT_ENVELOPE/);
+
+  const packet = getRunForTesting(run.id);
+  appendRawLedgerEventForRecoveryTest(packet, {
+    type: 'evaluation_requested',
+    origin: 'mcp_routed',
+    payload: {
+      evaluation_request_id: 'eval_stale_claim',
+      snapshot_id: 'snapshot_stale_claim',
+      expected_head: 'a'.repeat(40),
+      trigger: 'gate_audit'
+    },
+    key: 'stale-evaluation-request'
+  });
+  appendRawLedgerEventForRecoveryTest(packet, {
+    type: 'pr_refreshed',
+    origin: 'github_observed',
+    payload: {
+      snapshot_id: 'snapshot_stale_claim',
+      observed_head: 'b'.repeat(40),
+      status: 'STALE'
+    },
+    key: 'stale-evaluation-refresh'
+  });
+  requestClose(parent, 'Now request the supported seal.');
+  const sealed = checkpointOrSeal(parent, 'supported-after-stale-evaluation');
+  assert.equal(sealed.status, 'SEALED');
+  assert.equal(getRunForTesting(run.id).state.evaluations.eval_stale_claim.status, 'STALE');
+});
+
+test('recovery rebuilds lifecycle receipt retrieval projection from durable events', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'compiler-rebuild-child-receipt-projection';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Rebuild lifecycle projection after a torn write.' });
+  const declared = declareClaimContract(parent, contract({
+    requested_state: 'BUILT',
+    named_producers: ['software_release/local'],
+    verifier_id: 'software_release/local_verifier'
+  }));
+  seedBuilt(run.id, declared);
+  mintChild({ sessionId, agentId: 'projection-child' });
+  const receipt = sealChildByAgent({ sessionId, agentId: 'projection-child' });
+  const packet = getRunForTesting(run.id);
+  const receiptRecord = packet.state.child_receipts[receipt.id];
+  appendRawLedgerEventForRecoveryTest(packet, {
+    type: 'child_receipt_retrieved',
+    origin: 'mcp_routed',
+    payload: { receipt_id: receipt.id, content_ref: receiptRecord.content_hash },
+    key: 'projection-child-retrieved'
+  });
+  const statePath = join(packet.directory, 'state.json');
+  const cache = JSON.parse(readFileSync(statePath, 'utf8'));
+  cache.child_receipts[receipt.id].retrieved = false;
+  writeFileSync(statePath, JSON.stringify(cache, null, 2) + '\n');
+  requestClose(parent, 'Close after durable child receipt retrieval.');
+  const sealed = checkpointOrSeal(parent, 'projection-child-stop');
+  assert.equal(sealed.status, 'SEALED');
+  assert.equal(getRunForTesting(run.id).state.child_receipts[receipt.id].retrieved, true);
+});
 test('supported closeout derives child join from the ledger in normal and envelope-replay paths', { concurrency: false }, (t) => {
   isolatedData(t);
   const makeSupportedRunWithActiveChild = (suffix) => {

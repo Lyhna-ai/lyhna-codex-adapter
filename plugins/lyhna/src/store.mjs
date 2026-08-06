@@ -163,6 +163,7 @@ function validateCloseoutEnvelopeBinding(state, origin, payload) {
   assert(Array.isArray(payload.blockers) && payload.blockers.every((item) => typeof item === 'string'), code);
   assert(payload.outcome === 'SUPPORTED' || payload.outcome === 'CLOSED_UNSUPPORTED', code);
   if (payload.outcome === 'SUPPORTED') {
+    assert(state.close_requested, code);
     assert(state.compiled_claim.state_results?.[state.claim_contract.requested_state]?.supported === true, code);
     assert(state.compiled_claim.currentness === 'AS_WITNESSED', code);
     assert(state.compiled_claim.pending_producers.length === 0, code);
@@ -732,7 +733,7 @@ function recoverClaimControlStateUnlocked(runId, state, parsed = parseLedger(run
   const rebuilt = reconstructClaimControl(parsed.events);
   const fields = ['claim_contract', 'claim_profile', 'compiled_claim', 'claim_diagnostic', 'closeout_envelope', 'close_requested', 'continuation_lease'];
   if (!lagging) {
-    let repaired = false;
+    let repaired = reconcileLifecycleProjectionUnlocked(state, parsed.events);
     for (const field of fields) {
       if ((state[field] === null || state[field] === undefined) && rebuilt[field] !== null) {
         state[field] = rebuilt[field];
@@ -756,11 +757,125 @@ function recoverClaimControlStateUnlocked(runId, state, parsed = parseLedger(run
       state.parent_capability_hash = rebuilt.lease_event.payload.successor_parent_ref;
       state.continuation_lease = rebuilt.continuation_lease;
     }
+    reconcileLifecycleProjectionUnlocked(state, parsed.events);
     state.ledger_count = parsed.events.length;
     state.ledger_tip = parsed.tip;
     saveState(state);
   }
   return { ...parsed, rebuilt };
+}
+
+function reconcileLifecycleProjectionUnlocked(state, events) {
+  const priorChildren = state.children || {};
+  const priorEvaluations = state.evaluations || {};
+  const priorReceipts = state.child_receipts || {};
+  const capabilityRecords = [];
+  const capabilityDir = join(root(), 'capabilities');
+  if (existsSync(capabilityDir)) {
+    for (const entry of readdirSync(capabilityDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const record = readJson(join(capabilityDir, entry.name), null);
+      if (record?.kind === 'child' && record.parent_run_id === state.id) capabilityRecords.push(record);
+    }
+  }
+  const childEvents = new Map();
+  const evaluationEvents = new Map();
+  const receiptEvents = new Map();
+  const retrieved = new Map();
+  const staleSnapshots = new Set();
+  for (const event of events) {
+    const payload = event.payload || {};
+    if (event.type === 'child_started' && event.origin === 'runtime_hook') {
+      childEvents.set(payload.child_id, {
+        ...childEvents.get(payload.child_id),
+        id: payload.child_id,
+        role: payload.role,
+        status: 'STARTED',
+        start_event_ref: event.event_hash,
+        stop_event_ref: null
+      });
+    } else if (event.type === 'child_stop_observed' && event.origin === 'runtime_hook') {
+      const child = childEvents.get(payload.child_id);
+      if (child) Object.assign(child, { role: payload.role, status: 'STOP_OBSERVED', stop_event_ref: event.event_hash });
+    } else if (event.type === 'evaluation_requested' && event.origin === 'mcp_routed') {
+      const prior = priorEvaluations[payload.evaluation_request_id] || {};
+      evaluationEvents.set(payload.evaluation_request_id, {
+        ...prior,
+        id: payload.evaluation_request_id,
+        snapshot_id: payload.snapshot_id,
+        expected_head: payload.expected_head,
+        status: 'OPEN',
+        trigger: payload.trigger,
+        child_capability_hash: prior.child_capability_hash || null,
+        child_agent_hash: prior.child_agent_hash || null,
+        findings: prior.findings || []
+      });
+    } else if (event.type === 'evaluation_claimed' && event.origin === 'mcp_routed') {
+      const evaluation = evaluationEvents.get(payload.evaluation_request_id);
+      if (evaluation) Object.assign(evaluation, { status: 'CLAIMED', child_agent_hash: payload.child_agent_hash });
+    } else if (event.type === 'evaluation_finding' && event.origin === 'evaluator_reported') {
+      const evaluation = evaluationEvents.get(payload.evaluation_request_id);
+      if (evaluation) {
+        evaluation.status = payload.checkout_integrity === 'CONSISTENT_CLEAN' && evaluation.status !== 'CHECKOUT_INTEGRITY_EXCEPTION'
+          ? 'RECORDED'
+          : 'CHECKOUT_INTEGRITY_EXCEPTION';
+        evaluation.findings ||= [];
+        if (!evaluation.findings.some((finding) => sha256(canonicalJson(finding)) === sha256(canonicalJson(payload)))) evaluation.findings.push(payload);
+        for (const key of ['expected_head', 'checkout_head_before', 'checkout_head_after', 'checkout_clean_before', 'checkout_clean_after', 'checkout_detached_before', 'checkout_detached_after']) {
+          if (Object.hasOwn(payload, key)) evaluation[key] = payload[key];
+        }
+      }
+    } else if (event.type === 'pr_refreshed' && event.origin === 'github_observed' && payload.status === 'STALE') {
+      staleSnapshots.add(payload.snapshot_id);
+    } else if (event.type === 'child_receipt_sealed' && event.origin === 'runtime_hook') {
+      receiptEvents.set(payload.receipt_id, {
+        id: payload.receipt_id,
+        role: payload.role,
+        status: payload.status,
+        content_hash: payload.content_ref,
+        retrieved: false
+      });
+    } else if (event.type === 'child_receipt_retrieved' && event.origin === 'mcp_routed') {
+      retrieved.set(payload.receipt_id, payload.content_ref);
+    }
+  }
+  for (const [receiptId, receipt] of receiptEvents) {
+    receipt.retrieved = retrieved.get(receiptId) === receipt.content_hash
+  }
+  for (const evaluation of evaluationEvents.values()) {
+    if (staleSnapshots.has(evaluation.snapshot_id)) evaluation.status = 'STALE';
+    const receiptId = `child_${evaluation.id}`;
+    const receipt = receiptEvents.get(receiptId);
+    if (receipt) {
+      evaluation.child_receipt_id = receiptId;
+      receipt.retrieved = retrieved.get(receiptId) === receipt.content_hash;
+      evaluation.child_receipt_retrieved = receipt.retrieved;
+    }
+  }
+  const children = {};
+  for (const [childId, eventChild] of childEvents) {
+    const priorEntry = Object.entries(priorChildren).find(([, child]) => child.id === childId);
+    const capability = capabilityRecords.find((record) => `child_agent_${sha256(`${state.id}\0${record.agent_hash}`).slice(0, 24)}` === childId);
+    const agentHash = priorEntry?.[0] || capability?.agent_hash || `agent_${sha256(childId).slice(0, 24)}`;
+    const child = { ...(priorEntry?.[1] || {}), ...eventChild };
+    const evaluation = [...evaluationEvents.values()].find((item) => (
+      item.child_agent_hash
+      && `child_agent_${sha256(`${state.id}\0${item.child_agent_hash}`).slice(0, 24)}` === childId
+    ));
+    const receiptId = evaluation ? `child_${evaluation.id}` : childId;
+    if (receiptEvents.has(receiptId)) {
+      child.receipt_id = receiptId;
+      child.role = receiptEvents.get(receiptId).role || child.role;
+    }
+    children[agentHash] = child;
+  }
+  if (process.env.DEBUG_LYHNA) console.error('DEBUG_RECON', [...retrieved], [...receiptEvents]);
+  const childReceipts = Object.fromEntries(receiptEvents);
+  state.children = children;
+  state.evaluations = Object.fromEntries(evaluationEvents);
+  state.child_receipts = childReceipts;
+  return canonicalJson({ children: priorChildren, evaluations: priorEvaluations, child_receipts: priorReceipts })
+    !== canonicalJson({ children, evaluations: state.evaluations, child_receipts: childReceipts });
 }
 
 function completeContinuationLeaseProjectionUnlocked(state, transferEvent) {
@@ -2139,6 +2254,7 @@ function claimLifecycleBlockers(state) {
 
   const blockers = [];
   for (const evaluation of evaluations.values()) {
+    if (evaluation.status === 'STALE' || evaluation.status === 'INVALID') continue;
     if (!['RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION'].includes(evaluation.status)) {
       blockers.push(`EVALUATION_${evaluation.id}_${evaluation.status}`);
     }
