@@ -91,6 +91,7 @@ objective_ref
 verifier
 caps
 run_privacy_mode_ref
+recurrence_scope_ref (required only when the profile enables recurrence)
 ```
 
 `run_privacy_mode_ref` is copied by the supervisor from the chained `run_begun` event. It is not
@@ -112,9 +113,11 @@ evaluate_claim_gate(session_capability, contract_id, gate_id)
 ```
 
 The shipped `request_close.reason` remains narration only. It asks the supervisor to evaluate the
-already declared contract. There is no agent-facing `submit_evidence`, `record_probe`, or
-contract-amendment tool. `tools/list` must retain all ten shipped tools and expose the three
-additions with backward-compatible existing schemas.
+already declared contract when one exists. A run with no claim contract follows the shipped v1
+`request_close` and Stop closure behavior unchanged: it is never compiler-blocked, never receives a
+compiler terminal state, and seals under the existing evidence-scoped rules. There is no
+agent-facing `submit_evidence`, `record_probe`, or contract-amendment tool. `tools/list` must retain
+all ten shipped tools and expose the three additions with backward-compatible existing schemas.
 
 Evidence enters through supervisor-owned hooks, the GitHub observer, or registered project probe
 adapters. A producer request is not evidence.
@@ -238,17 +241,24 @@ STALE
 A successful review job with findings is `FINDINGS`, not `CLEAN`. Free-form review prose is not a
 terminal structured verdict.
 
-The shipped `record_evaluation(..., finding, ...)` input remains accepted for compatibility, but
-the store treats it as human-authored prose: it writes only a bounded redacted finding summary plus
-a stable finding ID, structural severity/count, and evidence hashes or references. It never stores
-full commands, output, tokens, environment, or private paths embedded in that input. In `proof`
-exports the finding summary is projected away; finding ID, severity/count, verdict, and evidence
-references remain.
+The shipped `record_evaluation(..., finding, ...)` input remains accepted for compatibility, with
+optional backward-compatible structured `severity` and finding-count fields. The store treats the
+string finding as human-authored prose: it writes only a bounded redacted finding summary plus a
+supervisor-generated finding ID derived from the sealed evaluator receipt reference and finding
+ordinal, never from the prose. Severity uses a closed enum and defaults to `UNSPECIFIED`; count is
+validated against the structured findings or deterministically calculated. It never stores full
+commands, output, tokens, environment, or private paths embedded in the input. In `proof`, the
+finding summary is projected away; finding ID, severity/count, verdict, and evidence references
+remain. Replay of the same sealed receipt and ordinal resolves to the same ID and appends no
+duplicate.
 
 The default software-release quiet barrier requires two primary samples at least 120 witnessed
 seconds apart with identical profile and contract hashes, exact head, producer statuses, reviewer
-actors and verdicts, checks, unresolved-thread state, source cursors, and local verifier result.
-Any change restarts the barrier.
+actors and verdicts, checks, unresolved-thread state, source cursors, pagination-completeness
+markers, and local verifier result. GitHub checks, reviews, comments, and unresolved threads are
+terminal only after every page is observed and the final cursor or explicit end marker is bound
+into the sample. A truncated page set, missing final cursor, or cursor change is `INVALID` or
+`STALE`, never clean. Any change restarts the barrier.
 
 At an unsupported Stop, `blocker_fingerprint` is derived from contract, gate, normalized blocker
 set, and the eligible evidence frontier. A producer or gate control transition that changes the
@@ -302,22 +312,32 @@ Open-contract inheritance is a supervisor transition, not a second agent declara
 appends one `claim_contract_declared` event with `declaration_kind: inherited`, the original
 contract ID and mode-appropriate profile hash, the unchanged requested state, gates, producer
 identities, verifier, and caps, plus `inherited_from_contract_ref` and the validated `capsule_ref`.
-That event activates compilation and gate enforcement immediately. It consumes the run's sole
-declaration slot, so a later `declare_claim_contract` call is rejected. If the inherited contract
-cannot be reconstructed and verified from the capsule, successor creation fails closed instead of
-opening an unenforced display-only contract.
+The same event carries a canonical `inherited_control_state` projection copied from the verified v2
+capsule: compiled state, pending producer cursors, unresolved diagnostic IDs and resolutions,
+blocker fingerprint and close-attempt ordinal, quiet-period samples, gate-sample cursors, and
+unresolved enforcement refs. The successor reducer initializes from that ledger event before any
+new hook boundary, so process or window changes cannot reset diagnostics, attempts, joins, or quiet
+samples. That event activates compilation and gate enforcement immediately and consumes the run's
+sole declaration slot, so a later `declare_claim_contract` call is rejected. If either contract or
+control state cannot be reconstructed and verified from the capsule, successor creation fails
+closed instead of opening an unenforced or reset contract.
 
 A later contradiction does not open a run automatically. After a new explicit Lyhna invocation,
 the shipped `begin_run(..., continues_from: capsule_ref)` path opens the successor. The previous
 sealed packet remains an immutable as-of result, while the successor links it by `capsule_ref` and
-may record `claim_superseded`. Post-seal activity without explicit invocation creates no Lyhna run.
+may record `claim_superseded`. That event must carry `supersedes_ref` identifying the exact prior
+claim or closeout envelope plus the already validated predecessor `capsule_ref`; the reducer rejects
+a missing reference, a reference outside that capsule, or a reference that does not hash to the
+named prior record. Post-seal activity without explicit invocation creates no Lyhna run.
 
 ## Recurrence reducer
 
-Profiles register stable `failure_class_id` values. An incident supplies a distinct incident
-reference and eligible evidence references. The reducer reconstructs recurrence from validated
-ledgers rather than a second mutable database. Its immutable aggregate input is the canonical sort
-of unique records containing `failure_class_id`, `incident_ref`, `source_run_id`,
+Profiles register stable `failure_class_id` values. A recurrence-enabled contract also declares a
+stable structural `recurrence_scope_ref` for the project or work domain; free-form objective text
+cannot supply it. An incident supplies a distinct incident reference and eligible evidence
+references. The reducer reconstructs recurrence from validated ledgers rather than a second mutable
+database. Its immutable aggregate input is the canonical sort of unique records containing
+`profile_hash`, `recurrence_scope_ref`, `failure_class_id`, `incident_ref`, `source_run_id`,
 `source_contract_ref`, `source_ledger_tip`, and eligible evidence references. The
 `recurrence_frontier` is the digest of those sorted records.
 
@@ -325,14 +345,19 @@ One initial incident plus two distinct confirmed recurrences may append one deri
 `ENFORCEMENT_REQUIRED` obligation only to the current explicitly invoked open run. It carries the
 failure class, `recurrence_frontier`, sorted incident/contract refs, and per-ledger tips instead of a
 single `claim_contract_ref`. No source ledger is modified, and a sealed current run cannot receive
-it. Before append, the reducer searches the verified lineage for an existing obligation with that
-`failure_class_id`; one class may have at most one durable obligation. Its idempotency key is the
-failure class alone, while the event records the threshold-crossing recurrence frontier. Replay or
-a fourth and later incident reconstructs the richer aggregate but appends no second obligation; it
-reports the existing obligation and newer incident set read-only. An unresolved obligation ref is
-carried in v2 continuation until an explicit future disposition contract resolves it. With no open
-run, the reducer reports the obligation read-only and appends nothing. It never edits code, policy,
-infrastructure, or deployment.
+it. The supervisor snapshots a canonical sorted candidate set from the local capsule index for the
+same `profile_hash` and `recurrence_scope_ref`, then independently verifies and re-walks every
+candidate ledger. Under the store's single-writer lock it re-samples that index and appends only if
+the candidate set and ledger tips are unchanged; otherwise it retries from a new snapshot. Before
+append, it searches that complete verified set for an existing obligation with the same
+`profile_hash`, `recurrence_scope_ref`, and `failure_class_id`; that tuple may have at most one
+durable obligation and is its stable idempotency key. The event records the threshold-crossing
+recurrence frontier. Replay, an unrelated scope/profile, or a fourth and later incident cannot
+silently suppress or duplicate the obligation: unrelated tuples reduce separately, while the same
+tuple reports its existing obligation and newer incident set read-only. An unresolved obligation
+ref is carried in v2 continuation until an explicit future disposition contract resolves it. With
+no open run, the reducer reports the obligation read-only and appends nothing. It never edits code,
+policy, infrastructure, or deployment.
 
 ## Build order and kill gate
 
@@ -349,7 +374,7 @@ The four versioned slices are:
 
 1. `0.1.33` — contract, compiler, fold v2, privacy projection, and sealed unsupported closeout.
 2. `0.1.34` — inline diagnostics, named joins, quiet barrier, and successor supersession.
-3. `0.1.35` — paginated GitHub evidence and registered-probe identity envelopes.
+3. `0.1.35` — terminally paginated GitHub evidence and registered-probe identity envelopes.
 4. `0.1.36` — recurrence reducer and one enforcement obligation.
 
 The Slice 1 kill fixture uses only `software_release/v1` vocabulary: source identity and checks are
@@ -358,22 +383,31 @@ required replay are absent. It must compile exactly `BUILT`, warn inline, and re
 
 ## Acceptance and authorized merge policy
 
-Every slice requires executable tests, mutation proof, clean Windows CI, fresh independent review
-at the exact final head, zero unresolved actionable threads, and two unchanged remote-state samples
-120 seconds apart. A changed head invalidates every earlier review.
+PR #13 and every implementation slice require executable tests, mutation proof where runtime code
+exists, clean Windows CI, fresh independent review at the exact final head, zero unresolved
+actionable threads, and two unchanged remote-state samples 120 seconds apart. A changed head
+invalidates every earlier review. PR #13's gate mapping is repository
+`Lyhna-ai/lyhna-codex-adapter`, PR `13`, base `main`, change class `spec_ratification`, branch
+`claude/gatea-witnesslane-reconcile-1zlfsb`, exact reviewed head recorded immediately before merge,
+and package version unchanged at `0.1.32`.
 
 Required mutations include derived self-evidence, a profile attempting to accept a control event,
 forged control events and production payloads, production-shaped mocks, builder/same-capability/
 attached-checkout review, actor and head mismatch, pending and late-finding reviewers, decisive
-page-two GitHub data, a diamond profile with ambiguous surface projection, deletion of a declared
-custom profile, cross-process diagnostic deduplication and resolution, three cross-process Stop
+page-two GitHub data, truncated pagination and missing final cursors, a diamond profile with
+ambiguous surface projection, deletion of a declared custom profile, cross-process diagnostic
+deduplication and resolution, prose-independent evaluator finding IDs and replay deduplication,
+three cross-process Stop
 attempts with one stable blocker fingerprint, eligible evidence resetting that fingerprint,
 material control changing compiler state without satisfying evidence, evaluator command/argument
 or finding-prose leakage, recurrence across three sealed source ledgers with no post-seal append,
-fourth-incident and replay deduplication, post-seal append corruption, explicit successor
-supersession, proof-mode event/profile/display and downstream artifact leakage, open-contract
-continuation with immediate gate enforcement and second-declaration rejection, free-form completion
-narration, full backward-compatible `tools/list`,
+recurrence-scope separation and atomic candidate-set resampling, fourth-incident and replay
+deduplication, post-seal append corruption, exact-reference successor supersession and invalid
+supersession rejection, proof-mode event/profile/display and downstream artifact leakage,
+open-contract continuation with inherited diagnostics, attempts, producers, quiet samples,
+immediate gate enforcement, and second-declaration rejection, no-contract v1 close compatibility,
+free-form completion narration,
+full backward-compatible `tools/list`,
 privacy-mode override rejection, and three distinct recurrence incidents.
 
 Adam authorizes Codex to squash-merge this ratification PR #13 and four future slices only when
