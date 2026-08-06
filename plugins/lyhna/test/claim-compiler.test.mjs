@@ -482,6 +482,30 @@ test('missing or malformed time becomes a sanitized currentness blocker while wr
     idempotencyKey: 'terminal-malformed-new'
   });
   assert.equal(malformed.payload.observed_at, null);
+  const malformedNonStringTimes = [
+    ['numeric', 1_754_392_460_000],
+    ['object', { raw: 'RAW_NONSTRING_TIME_70B4' }]
+  ];
+  for (const [label, observedAt] of malformedNonStringTimes) {
+    const malformedNonString = appendEvent(run.id, {
+      type: 'evidence_observed',
+      origin: 'registered_probe',
+      payload: {
+        contract_id: declared.contract_id,
+        profile_requirements_hash: declared.profile_requirements_hash,
+        requirement_id: 'terminal_canary_state',
+        event_kind: 'terminal_canary_state_observed',
+        producer_id: 'software_release/canary',
+        producer_identity: 'registered_canary_probe',
+        source_cursor: `cursor-terminal-${label}-time`,
+        observed_at: observedAt,
+        subject_binding: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
+      },
+      idempotencyKey: `terminal-${label}-time`
+    });
+    assert.equal(malformedNonString.payload.observed_at, null);
+    assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').currentness, 'CURRENTNESS_UNPROVEN');
+  }
   const unproven = evaluateClaimGate(parent, declared.contract_id, 'closeout');
   assert.equal(unproven.highest_supported_state, 'LIVE_PROVEN', 'older valid evidence remains visible but cannot close');
   assert.equal(unproven.currentness, 'CURRENTNESS_UNPROVEN');
@@ -516,6 +540,7 @@ test('missing or malformed time becomes a sanitized currentness blocker while wr
   assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'diagnostic_resolved').length, 1);
   assert.equal(checkpointOrSeal(parent, 'currentness-stop-2').status, 'SEALED');
   assert.equal(readTree(data).join('\n').includes(malformedObservedAt), false);
+  assert.equal(readTree(data).join('\n').includes('RAW_NONSTRING_TIME_70B4'), false);
 });
 
 test('a reused source cursor with conflicting witnessed times blocks closeout until a new cursor arrives', { concurrency: false }, (t) => {

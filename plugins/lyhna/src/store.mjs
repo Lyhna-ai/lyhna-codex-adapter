@@ -1004,8 +1004,8 @@ function projectEventPayloadForPrivacy(state, type, payload) {
 function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyKey }) {
   assert(ORIGINS.has(origin), 'INVALID_ORIGIN');
   assert(!state.sealed, 'RUN_SEALED');
-  validateEventPayloadStructure(state, type, origin, payload);
   const normalizedPayload = normalizeEventPayloadForStorage(type, payload);
+  validateEventPayloadStructure(state, type, origin, normalizedPayload);
   const projectedPayload = projectEventPayloadForPrivacy(state, type, normalizedPayload);
   const { events, tip } = parseLedger(runId);
   const latestEnvelope = [...events].reverse().find((event) => event.type === 'closeout_envelope_generated');
