@@ -77,8 +77,20 @@ function includesObjectiveText(foldVersion) {
 function buildClaimCompilerProjection(events) {
   const contractEvent = events.find((event) => event.type === 'claim_contract_declared');
   if (!contractEvent) return null;
-  const producerRequests = events.filter((event) => event.type === 'producer_requested');
   const claimContractRef = `sha256:${contractEvent.event_hash}`;
+  const producerRequests = events.filter((event) => {
+    if (event.type !== 'producer_requested'
+      || event.origin !== 'mcp_routed'
+      || event.payload?.contract_id !== contractEvent.payload?.contract?.contract_id
+      || event.payload?.claim_contract_ref !== claimContractRef) return false;
+    const producer = contractEvent.payload?.profile_structural?.producers?.[event.payload?.producer_id];
+    const namedProducers = contractEvent.payload?.contract?.named_producers || [];
+    return Boolean(
+      producer
+      && namedProducers.includes(event.payload.producer_id)
+      && event.payload.expected_identity === producer.expected_identity
+    );
+  });
   const compiledBindings = events.filter((event) => (
     event.type === 'claim_compiled'
     && event.origin === 'runtime_hook'
@@ -121,7 +133,11 @@ function buildClaimCompilerProjection(events) {
       diagnostics.set(event.payload.diagnostic_id, { ...diagnostics.get(event.payload.diagnostic_id), status: 'RESOLVED', resolved_ref: `sha256:${event.event_hash}` });
     }
   }
-  const latestAttempt = [...events].reverse().find((event) => event.type === 'closeout_attempted');
+  const latestAttempt = [...events].reverse().find((event) => (
+    event.type === 'closeout_attempted'
+    && event.origin === 'runtime_hook'
+    && event.payload?.claim_contract_ref === claimContractRef
+  ));
   return {
     claim_contract_ref: claimContractRef,
     contract: contractEvent.payload?.contract ?? null,

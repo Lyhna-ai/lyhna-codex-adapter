@@ -388,7 +388,18 @@ export function compileClaim({ profile, contract, events }) {
   const missing = profile.requirements
     .map((item) => item.requirement_id)
     .filter((requirementId) => requestedRequirements.has(requirementId) && !satisfied.get(requirementId));
-  const producerRequests = events.filter((event) => event.type === 'producer_requested' && event.payload?.contract_id === contract.contract_id);
+  const producerRequests = events.filter((event) => {
+    if (event.type !== 'producer_requested'
+      || event.origin !== 'mcp_routed'
+      || event.payload?.contract_id !== contract.contract_id
+      || event.payload?.claim_contract_ref !== contract.claim_contract_ref) return false;
+    const producer = profile.producers?.[event.payload?.producer_id];
+    return Boolean(
+      producer
+      && contract.named_producers.includes(event.payload.producer_id)
+      && event.payload.expected_identity === producer.expected_identity
+    );
+  });
   const producerTerminals = new Map();
   for (const event of events) {
     if (event.type !== 'producer_terminal'

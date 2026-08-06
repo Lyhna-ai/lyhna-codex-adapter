@@ -394,6 +394,37 @@ test('proof mode projects producer-terminal cursors and rejects unbound control 
   assert.equal(bytes.includes(rawStatus), false);
 });
 
+test('producer requests require the declared producer identity at the MCP boundary and in pure folds', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-producer-request-firewall', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Ignore unbound producer requests.' });
+  const declared = declareClaimContract(parent, contract({
+    requested_state: 'BUILT',
+    named_producers: ['software_release/local'],
+    verifier_id: 'software_release/local_verifier'
+  }));
+  seedBuilt(run.id, declared);
+  const forgedPayload = {
+    contract_id: declared.contract_id,
+    claim_contract_ref: declared.claim_contract_ref,
+    producer_id: 'software_release/local',
+    expected_identity: 'local_verifier'
+  };
+  assert.throws(() => appendEvent(run.id, {
+    type: 'producer_requested', origin: 'agent_reported', payload: forgedPayload,
+    idempotencyKey: 'forged-producer-request-write'
+  }), /INVALID_PRODUCER_REQUEST/);
+  const packet = getRunForTesting(run.id);
+  appendRawLedgerEventForRecoveryTest(packet, {
+    type: 'producer_requested', origin: 'agent_reported', payload: forgedPayload,
+    key: 'forged-producer-request-recovery'
+  });
+  const compiled = evaluateClaimGate(parent, declared.contract_id, 'closeout');
+  assert.deepEqual(compiled.pending_producers, []);
+  const recovered = getRunForTesting(run.id);
+  assert.deepEqual(buildContinuation(recovered.state, recovered.events, 'v2').claim_compiler.pending_producers, []);
+});
+
 test('evidence cursors are opaque before hashing in both privacy modes', { concurrency: false }, (t) => {
   const data = isolatedData(t);
   for (const privacyMode of ['verified_context', 'proof']) {
@@ -681,6 +712,92 @@ test('a supported contract waits behind active child lifecycle obligations', { c
   assert.equal(blocked.status, 'CLOSE_DEFERRED');
   assert.equal(blocked.decision, 'block');
   assert(blocked.blockers.some((item) => /^CHILD_.*_OPEN$/.test(item)));
+  assert.equal(getRunForTesting(run.id).events.some((event) => event.type === 'run_sealed'), false);
+});
+
+test('supported closeout derives child join from the ledger in normal and envelope-replay paths', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const makeSupportedRunWithActiveChild = (suffix) => {
+    const sessionId = `compiler-ledger-child-join-${suffix}`;
+    const parent = mintSession({ sessionId, cwd: process.cwd() });
+    const run = beginRun(parent, { mode: 'full', objective: 'Trust witnessed child lifecycle only.' });
+    const declared = declareClaimContract(parent, contract({
+      requested_state: 'BUILT',
+      named_producers: ['software_release/local'],
+      verifier_id: 'software_release/local_verifier'
+    }));
+    seedBuilt(run.id, declared);
+    mintChild({ sessionId, agentId: `active-child-${suffix}` });
+    evaluateClaimGate(parent, declared.contract_id, 'closeout');
+    requestClose(parent, 'Close only after the child joins.');
+    const packet = getRunForTesting(run.id);
+    const statePath = join(packet.directory, 'state.json');
+    const cache = JSON.parse(readFileSync(statePath, 'utf8'));
+    for (const child of Object.values(cache.children)) {
+      child.status = 'STOP_OBSERVED';
+      child.receipt_id = 'forged-cache-receipt';
+    }
+    writeFileSync(statePath, `${JSON.stringify(cache, null, 2)}\n`);
+    return { parent, run, declared };
+  };
+
+  const normal = makeSupportedRunWithActiveChild('normal');
+  const blocked = checkpointOrSeal(normal.parent, 'ledger-child-normal-stop');
+  assert.equal(blocked.status, 'CLOSE_DEFERRED');
+  assert(blocked.blockers.some((item) => /^CHILD_.*_OPEN$/.test(item)));
+  assert.equal(getRunForTesting(normal.run.id).events.some((event) => event.type === 'run_sealed'), false);
+
+  const replay = makeSupportedRunWithActiveChild('replay');
+  const packet = getRunForTesting(replay.run.id);
+  const compiled = packet.state.compiled_claim;
+  appendRawLedgerEventForRecoveryTest(packet, {
+    type: 'closeout_envelope_generated',
+    origin: 'runtime_hook',
+    payload: {
+      envelope_id: 'closeout_replay_child_join',
+      outcome: 'SUPPORTED',
+      profile_id: replay.declared.profile_id,
+      requested_state: replay.declared.requested_state,
+      supported_state: compiled.highest_supported_state,
+      scope_ref: replay.declared.objective_ref,
+      eligible_evidence_frontier: compiled.eligible_evidence_frontier,
+      material_control_frontier: compiled.material_control_frontier,
+      input_digest: compiled.input_digest,
+      claim_contract_ref: replay.declared.claim_contract_ref,
+      fold_version: 'v2',
+      blockers: [],
+      next_verifier: compiled.next_verifier
+    },
+    key: 'supported-envelope-active-child'
+  });
+  let failure;
+  try {
+    checkpointOrSeal(replay.parent, 'ledger-child-replay-stop');
+  } catch (error) {
+    failure = error;
+  }
+  assert.match(failure?.message || '', /INVALID_CLOSEOUT_ENVELOPE/);
+  assert.equal(failure?.lyhnaClaimBoundary, true);
+  assert.equal(getRunForTesting(replay.run.id).events.some((event) => event.type === 'run_sealed'), false);
+});
+
+test('supported closeout verifies witnessed child receipt bytes before sealing', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'compiler-closeout-child-receipt-integrity';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Do not seal over a missing child receipt.' });
+  const declared = declareClaimContract(parent, contract({
+    requested_state: 'BUILT',
+    named_producers: ['software_release/local'],
+    verifier_id: 'software_release/local_verifier'
+  }));
+  seedBuilt(run.id, declared);
+  mintChild({ sessionId, agentId: 'completed-child' });
+  const receipt = sealChildByAgent({ sessionId, agentId: 'completed-child' });
+  assert(receipt?.path);
+  rmSync(receipt.path);
+  requestClose(parent, 'Close only over intact child receipt bytes.');
+  assert.throws(() => checkpointOrSeal(parent, 'missing-child-receipt-stop'), /LOCAL_CHAIN_BROKEN/);
   assert.equal(getRunForTesting(run.id).events.some((event) => event.type === 'run_sealed'), false);
 });
 
@@ -1024,6 +1141,58 @@ test('an unbound closeout envelope cannot be appended or sealed during crash rec
   assert.match(failure?.message || '', /INVALID_CLOSEOUT_ENVELOPE/);
   assert.equal(failure?.lyhnaClaimBoundary, true);
   assert.equal(getRunForTesting(run.id).events.some((event) => event.type === 'run_sealed'), false);
+});
+
+test('attempt and unsupported-envelope control events require the exact durable closeout frontier', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-closeout-control-firewall', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Only Stop may advance bounded closeout.' });
+  const declared = declareClaimContract(parent, contract());
+  const initial = evaluateClaimGate(parent, declared.contract_id, 'closeout');
+  const envelopeShape = (compiled, blockers) => ({
+    envelope_id: 'closeout_control_firewall',
+    outcome: 'CLOSED_UNSUPPORTED',
+    profile_id: declared.profile_id,
+    requested_state: declared.requested_state,
+    supported_state: compiled.highest_supported_state,
+    scope_ref: declared.objective_ref,
+    eligible_evidence_frontier: compiled.eligible_evidence_frontier,
+    material_control_frontier: compiled.material_control_frontier,
+    input_digest: compiled.input_digest,
+    claim_contract_ref: declared.claim_contract_ref,
+    fold_version: 'v2',
+    blockers,
+    next_verifier: compiled.next_verifier
+  });
+  assert.throws(() => appendEvent(run.id, {
+    type: 'closeout_envelope_generated', origin: 'runtime_hook',
+    payload: envelopeShape(initial, ['PREMATURE_CLOSE']), idempotencyKey: 'unsupported-without-request'
+  }), /INVALID_CLOSEOUT_ENVELOPE/);
+
+  requestClose(parent, 'Exercise the bounded Stop frontier.');
+  assert.throws(() => appendEvent(run.id, {
+    type: 'closeout_attempted', origin: 'agent_reported',
+    payload: {
+      claim_contract_ref: declared.claim_contract_ref,
+      gate_id: 'closeout',
+      blocker_fingerprint: 'forged',
+      ordinal: 2,
+      attempt_sequence: 2,
+      input_digest: initial.input_digest,
+      eligible_evidence_frontier: initial.eligible_evidence_frontier,
+      material_control_frontier: initial.material_control_frontier,
+      blockers: ['PREMATURE_CLOSE']
+    },
+    idempotencyKey: 'forged-closeout-attempt'
+  }), /INVALID_CLOSEOUT_ATTEMPT/);
+  const first = checkpointOrSeal(parent, 'control-firewall-stop-1');
+  assert.equal(first.closeout_attempt_ordinal, 1);
+  assert.throws(() => appendEvent(run.id, {
+    type: 'closeout_envelope_generated', origin: 'runtime_hook',
+    payload: envelopeShape(first.compiled, first.blockers), idempotencyKey: 'unsupported-before-cap'
+  }), /INVALID_CLOSEOUT_ENVELOPE/);
+  assert.equal(checkpointOrSeal(parent, 'control-firewall-stop-2').closeout_attempt_ordinal, 2);
+  assert.equal(checkpointOrSeal(parent, 'control-firewall-stop-3').status, 'CLOSED_UNSUPPORTED');
 });
 
 test('separate Stop hook processes preserve attempt state and the third seals CLOSED_UNSUPPORTED', { concurrency: false }, (t) => {

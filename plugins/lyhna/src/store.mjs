@@ -113,6 +113,37 @@ function assertCurrentCompiledBinding(state, payload, code) {
   assert(payload.material_control_frontier === compiled.material_control_frontier, code);
 }
 
+function validateCloseoutAttemptBinding(state, origin, payload, eventSeq = null) {
+  const code = 'INVALID_CLOSEOUT_ATTEMPT';
+  assert(origin === 'runtime_hook' && state.close_requested, code);
+  assert(state.claim_contract && state.compiled_claim, code);
+  assert(payload.claim_contract_ref === state.claim_contract.claim_contract_ref, code);
+  assert(payload.input_digest === state.compiled_claim.input_digest, code);
+  assert(payload.eligible_evidence_frontier === state.compiled_claim.eligible_evidence_frontier, code);
+  assert(payload.material_control_frontier === state.compiled_claim.material_control_frontier, code);
+  assert(state.claim_contract.declared_gate_ids.includes(payload.gate_id), code);
+  const blockers = claimCloseoutBlockers(state, state.compiled_claim);
+  assert(blockers.length > 0, code);
+  assert(canonicalJson(payload.blockers) === canonicalJson(blockers), code);
+  assert(payload.blocker_fingerprint === claimCloseoutBlockerFingerprint(
+    state,
+    payload.gate_id,
+    state.compiled_claim
+  ), code);
+  const priorAttempts = parseLedger(state.id).events.filter((event) => (
+    event.type === 'closeout_attempted'
+    && event.origin === 'runtime_hook'
+    && event.payload?.claim_contract_ref === state.claim_contract.claim_contract_ref
+    && (eventSeq === null || event.seq < eventSeq)
+  ));
+  const prior = priorAttempts.at(-1);
+  const expectedOrdinal = prior?.payload?.blocker_fingerprint === payload.blocker_fingerprint
+    ? Number(prior.payload.ordinal || 0) + 1
+    : 1;
+  assert(payload.attempt_sequence === priorAttempts.length + 1, code);
+  assert(payload.ordinal === expectedOrdinal, code);
+}
+
 function validateCloseoutEnvelopeBinding(state, origin, payload) {
   const code = 'INVALID_CLOSEOUT_ENVELOPE';
   assert(origin === 'runtime_hook', code);
@@ -136,9 +167,25 @@ function validateCloseoutEnvelopeBinding(state, origin, payload) {
     assert(state.compiled_claim.currentness === 'AS_WITNESSED', code);
     assert(state.compiled_claim.pending_producers.length === 0, code);
     assert(state.compiled_claim.contradictions.length === 0, code);
+    // A durable envelope replay is still a closeout. Re-evaluate the same ledger-derived join
+    // predicate used by the ordinary path so an envelope cannot outlive a newly-open child,
+    // evaluator, or corrupted/missing child receipt artifact.
+    assert(claimCloseoutBlockers(state, state.compiled_claim).length === 0, code);
     assert(payload.blockers.length === 0, code);
   } else {
-    assert(payload.blockers.length > 0, code);
+    assert(state.close_requested, code);
+    const blockers = claimCloseoutBlockers(state, state.compiled_claim);
+    assert(blockers.length > 0 && canonicalJson(payload.blockers) === canonicalJson(blockers), code);
+    const attempts = parseLedger(state.id).events.filter((event) => (
+      event.type === 'closeout_attempted'
+      && event.origin === 'runtime_hook'
+      && event.payload?.claim_contract_ref === state.claim_contract.claim_contract_ref
+    ));
+    const latestAttempt = attempts.at(-1);
+    assert(latestAttempt, code);
+    validateCloseoutAttemptBinding(state, latestAttempt.origin, latestAttempt.payload, latestAttempt.seq);
+    assert(latestAttempt.payload.ordinal === state.claim_contract.caps.max_unsupported_attempts, code);
+    assert(latestAttempt.payload.attempt_sequence === attempts.length, code);
   }
 }
 
@@ -991,6 +1038,20 @@ function validateEventPayloadStructure(state, type, origin, payload) {
     assert(payload.evidence_refs === undefined
       || (Array.isArray(payload.evidence_refs)
         && payload.evidence_refs.every((ref) => /^sha256:[a-f0-9]{64}$/.test(String(ref)))), 'INVALID_PRODUCER_TERMINAL');
+  }
+
+  if (type === 'producer_requested') {
+    const code = 'INVALID_PRODUCER_REQUEST';
+    assert(origin === 'mcp_routed' && state.claim_contract && state.claim_profile, code);
+    const producer = state.claim_profile.producers?.[payload.producer_id];
+    assert(producer && state.claim_contract.named_producers.includes(payload.producer_id), code);
+    assert(payload.contract_id === state.claim_contract.contract_id, code);
+    assert(payload.claim_contract_ref === state.claim_contract.claim_contract_ref, code);
+    assert(payload.expected_identity === producer.expected_identity, code);
+  }
+
+  if (type === 'closeout_attempted') {
+    validateCloseoutAttemptBinding(state, origin, payload);
   }
 
   if (type === 'diagnostic_emitted' || type === 'diagnostic_resolved') {
@@ -2020,16 +2081,82 @@ function claimSupportPosition(compiled, contract) {
 }
 
 function claimLifecycleBlockers(state) {
+  // Lifecycle caches are projections for the UI and mutation paths; they are not closeout
+  // authority. Rebuild the join from witnessed events every time so editing state.json cannot
+  // turn an active child or evaluator into a completed one.
+  const { events } = parseLedger(state.id);
+  const children = new Map();
+  const evaluations = new Map();
+  const sealedReceipts = new Map();
+  const retrievedReceipts = new Map();
+
+  for (const event of events) {
+    const payload = event.payload || {};
+    if (event.type === 'child_started' && event.origin === 'runtime_hook') {
+      children.set(payload.child_id, { stopped: false, receipt_id: null });
+    } else if (event.type === 'child_stop_observed' && event.origin === 'runtime_hook') {
+      const child = children.get(payload.child_id);
+      if (child) child.stopped = true;
+    } else if (event.type === 'evaluation_requested' && event.origin === 'mcp_routed') {
+      evaluations.set(payload.evaluation_request_id, {
+        id: payload.evaluation_request_id,
+        snapshot_id: payload.snapshot_id,
+        status: 'OPEN',
+        child_agent_hash: null
+      });
+    } else if (event.type === 'evaluation_claimed' && event.origin === 'mcp_routed') {
+      const evaluation = evaluations.get(payload.evaluation_request_id);
+      if (evaluation) {
+        evaluation.status = 'CLAIMED';
+        evaluation.child_agent_hash = payload.child_agent_hash;
+      }
+    } else if (event.type === 'evaluation_finding' && event.origin === 'evaluator_reported') {
+      const evaluation = evaluations.get(payload.evaluation_request_id);
+      if (evaluation && evaluation.status !== 'CHECKOUT_INTEGRITY_EXCEPTION') {
+        evaluation.status = payload.checkout_integrity === 'CONSISTENT_CLEAN'
+          ? 'RECORDED'
+          : 'CHECKOUT_INTEGRITY_EXCEPTION';
+      }
+    } else if (event.type === 'pr_refreshed' && event.origin === 'github_observed' && payload.status === 'STALE') {
+      for (const evaluation of evaluations.values()) {
+        if (evaluation.snapshot_id === payload.snapshot_id) evaluation.status = 'STALE';
+      }
+    } else if (event.type === 'child_receipt_sealed' && event.origin === 'runtime_hook') {
+      sealedReceipts.set(payload.receipt_id, payload.content_ref);
+    } else if (event.type === 'child_receipt_retrieved' && event.origin === 'mcp_routed') {
+      retrievedReceipts.set(payload.receipt_id, payload.content_ref);
+    }
+  }
+
+  // A ledger claim that a child receipt was sealed is joined only while the exact artifact still
+  // exists and hashes to the witnessed content reference. Closing over missing bytes would create
+  // a parent receipt that its own verifier rejects immediately afterward.
+  for (const [receiptId, contentRef] of sealedReceipts) {
+    const path = childReceiptPath(state.id, receiptId);
+    assert(typeof contentRef === 'string' && contentRef.length > 0 && existsSync(path), 'LOCAL_CHAIN_BROKEN');
+    assert(sha256(readFileSync(path, 'utf8')) === contentRef, 'LOCAL_CHAIN_BROKEN');
+  }
+
   const blockers = [];
-  for (const evaluation of Object.values(state.evaluations || {})) {
+  for (const evaluation of evaluations.values()) {
     if (!['RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION'].includes(evaluation.status)) {
       blockers.push(`EVALUATION_${evaluation.id}_${evaluation.status}`);
     }
-    if (!evaluation.child_receipt_id) blockers.push(`CHILD_RECEIPT_${evaluation.id}_OPEN`);
-    if (!evaluation.child_receipt_retrieved) blockers.push(`CHILD_RECEIPT_${evaluation.id}_NOT_RETRIEVED`);
+    const receiptId = `child_${evaluation.id}`;
+    const sealedRef = sealedReceipts.get(receiptId);
+    if (!sealedRef) blockers.push(`CHILD_RECEIPT_${evaluation.id}_OPEN`);
+    if (!sealedRef || retrievedReceipts.get(receiptId) !== sealedRef) {
+      blockers.push(`CHILD_RECEIPT_${evaluation.id}_NOT_RETRIEVED`);
+    }
   }
-  for (const child of Object.values(state.children || {})) {
-    if (child.status !== 'STOP_OBSERVED' || !child.receipt_id) blockers.push(`CHILD_${child.id}_OPEN`);
+  for (const [childId, child] of children) {
+    const evaluatorReceipt = [...evaluations.values()].find((evaluation) => (
+      evaluation.child_agent_hash
+      && childId === `child_agent_${sha256(`${state.id}\0${evaluation.child_agent_hash}`).slice(0, 24)}`
+    ));
+    const receiptId = evaluatorReceipt ? `child_${evaluatorReceipt.id}` : childId;
+    child.receipt_id = sealedReceipts.has(receiptId) ? receiptId : null;
+    if (!child.stopped || !child.receipt_id) blockers.push(`CHILD_${childId}_OPEN`);
   }
   return [...new Set(blockers)].sort();
 }
@@ -2448,6 +2575,12 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         event.type === 'checkpoint_anchor' || event.type === 'closeout_envelope_generated'
       ));
       if (interruptedAttempt && !attemptCompleted) {
+        validateCloseoutAttemptBinding(
+          current,
+          interruptedAttempt.origin,
+          interruptedAttempt.payload,
+          interruptedAttempt.seq
+        );
         const blockers = [...(interruptedAttempt.payload?.blockers || [])];
         const ordinal = Number(interruptedAttempt.payload?.ordinal || 0);
         const requested = current.claim_contract?.requested_state || 'UNDECLARED_STATE';
