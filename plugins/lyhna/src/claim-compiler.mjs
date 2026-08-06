@@ -393,7 +393,12 @@ export function compileClaim({ profile, contract, events }) {
   for (const event of events) {
     if (event.type !== 'producer_terminal'
       || event.payload?.contract_id !== contract.contract_id
-      || event.payload?.claim_contract_ref !== contract.claim_contract_ref) continue;
+      || event.payload?.claim_contract_ref !== contract.claim_contract_ref
+      || event.origin !== 'runtime_hook') continue;
+    const producer = profile.producers?.[event.payload?.producer_id];
+    if (!producer
+      || !contract.named_producers.includes(event.payload.producer_id)
+      || event.payload?.producer_identity !== producer.expected_identity) continue;
     producerTerminals.set(event.payload.producer_id, event.payload.status);
   }
   const requestedProducerIds = [...new Set(producerRequests.map((event) => event.payload?.producer_id).filter(Boolean))];

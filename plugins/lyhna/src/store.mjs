@@ -60,8 +60,8 @@ const EVENT_PAYLOAD_FIELDS = new Map([
   ['closeout_attempted', ['claim_contract_ref', 'gate_id', 'blocker_fingerprint', 'ordinal', 'attempt_sequence', 'input_digest', 'eligible_evidence_frontier', 'material_control_frontier', 'blockers']],
   ['closeout_envelope_generated', ['envelope_id', 'outcome', 'profile_id', 'requested_state', 'supported_state', 'scope_ref', 'eligible_evidence_frontier', 'material_control_frontier', 'input_digest', 'claim_contract_ref', 'fold_version', 'blockers', 'next_verifier', 'narrative', 'text_withheld']],
   ['continuation_lease_transferred', ['capsule_ref', 'predecessor_parent_ref', 'successor_parent_ref', 'active_child_refs']],
-  ['diagnostic_emitted', ['diagnostic_id', 'diagnostic_status', 'claim_contract_ref', 'input_digest', 'blocker_fingerprint', 'supported_state', 'requested_state', 'missing', 'next_verifier', 'message', 'narrative', 'text_withheld']],
-  ['diagnostic_resolved', ['diagnostic_id', 'diagnostic_status', 'claim_contract_ref', 'input_digest', 'blocker_fingerprint', 'supported_state', 'requested_state', 'missing', 'next_verifier', 'message', 'narrative', 'text_withheld']],
+  ['diagnostic_emitted', ['diagnostic_id', 'diagnostic_status', 'claim_contract_ref', 'fold_version', 'input_digest', 'eligible_evidence_frontier', 'material_control_frontier', 'blocker_fingerprint', 'supported_state', 'requested_state', 'missing', 'next_verifier', 'message', 'narrative', 'text_withheld']],
+  ['diagnostic_resolved', ['diagnostic_id', 'diagnostic_status', 'claim_contract_ref', 'fold_version', 'input_digest', 'eligible_evidence_frontier', 'material_control_frontier', 'blocker_fingerprint', 'supported_state', 'requested_state', 'missing', 'next_verifier', 'message', 'narrative', 'text_withheld']],
   ['evaluation_claimed', ['evaluation_request_id', 'child_agent_hash']],
   ['evaluation_finding', ['finding_id', 'finding_ordinal', 'statement', 'statement_text', 'statement_ref', 'evidence_refs', 'evaluation_request_id', 'expected_head', 'checkout_head_before', 'checkout_head_after', 'checkout_clean_before', 'checkout_clean_after', 'checkout_detached_before', 'checkout_detached_after', 'checkout_integrity', 'text_withheld']],
   ['evaluation_requested', ['evaluation_request_id', 'snapshot_id', 'expected_head', 'trigger']],
@@ -98,6 +98,11 @@ export function isEvaluationFinished(evaluation) {
   return Boolean(evaluation.child_receipt_id && evaluation.child_receipt_retrieved);
 }
 const CAPABILITY_SHAPE = /^lyhna_(session|child)_[a-f0-9]{32,}$/;
+const GIT_OBJECT_ID_SHAPE = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
+
+function proofSafeGitObjectId(value) {
+  return typeof value === 'string' && GIT_OBJECT_ID_SHAPE.test(value) ? value : null;
+}
 
 function root() {
   const value = dataRoot();
@@ -974,7 +979,13 @@ function projectEventPayloadForPrivacy(state, type, payload) {
   }
   if (type === 'evaluation_finding') {
     const { statement: _statement, statement_text: _text, statement_ref: _ref, ...structural } = payload;
-    return { ...structural, text_withheld: true };
+    return {
+      ...structural,
+      expected_head: proofSafeGitObjectId(structural.expected_head),
+      checkout_head_before: proofSafeGitObjectId(structural.checkout_head_before),
+      checkout_head_after: proofSafeGitObjectId(structural.checkout_head_after),
+      text_withheld: true
+    };
   }
   if (type === 'close_requested') {
     return { request_id: payload.request_id, text_withheld: true };
@@ -1123,6 +1134,16 @@ function requireChild(capability) {
   const state = loadState(record.parent_run_id);
   assert(!state.sealed, 'RUN_SEALED');
   return { record, runId: record.parent_run_id, state };
+}
+
+function assertChildLeaseUnlocked(runId, state, capability) {
+  recoverClaimControlStateUnlocked(runId, state);
+  const record = getCapability(capability);
+  assert(record.kind === 'child', 'CHILD_CAPABILITY_REQUIRED');
+  assert(record.parent_run_id === runId, 'EVALUATOR_PARENT_MISMATCH');
+  assert(record.parent_capability_hash === state.parent_capability_hash, 'EVALUATOR_PARENT_MISMATCH');
+  assert(!state.sealed, 'RUN_SEALED');
+  return record;
 }
 
 export const PRIVACY_MODES = new Set(['verified_context', 'proof']);
@@ -1609,12 +1630,11 @@ export function beginEvaluation(capability, snapshotId, checkout = {}, trigger =
 }
 
 export function claimEvaluation(childCapability, evaluationId) {
-  const { record, runId } = requireChild(childCapability);
+  const { runId } = requireChild(childCapability);
   const childHash = sha256(childCapability);
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
-    assert(!current.sealed, 'RUN_SEALED');
-    assert(record.parent_capability_hash === current.parent_capability_hash, 'EVALUATOR_PARENT_MISMATCH');
+    const record = assertChildLeaseUnlocked(runId, current, childCapability);
     assert(childHash !== current.parent_capability_hash, 'SELF_REVIEW_REJECTED');
     const item = current.evaluations[evaluationId];
     assert(item, 'EVALUATION_NOT_FOUND');
@@ -1637,9 +1657,10 @@ export function claimEvaluation(childCapability, evaluationId) {
 }
 
 export function recordEvaluation(childCapability, evaluationId, finding, evidenceRefs = [], checkout = {}) {
-  const { record, runId } = requireChild(childCapability);
+  const { runId } = requireChild(childCapability);
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
+    const record = assertChildLeaseUnlocked(runId, current, childCapability);
     const item = current.evaluations[evaluationId];
     assert(item, 'EVALUATION_NOT_FOUND');
     assert(item.child_capability_hash === sha256(childCapability), 'EVALUATOR_NOT_BOUND');
@@ -1649,11 +1670,15 @@ export function recordEvaluation(childCapability, evaluationId, finding, evidenc
     const priorIntegrityException = item.status === 'CHECKOUT_INTEGRITY_EXCEPTION';
     const cleanBefore = checkout.clean_before ?? item.checkout_clean_before;
     const cleanAfter = checkout.clean_after ?? null;
-    const headBefore = checkout.head_before ?? item.checkout_head_before;
-    const headAfter = checkout.head_after ?? null;
+    const observedHeadBefore = checkout.head_before ?? item.checkout_head_before;
+    const observedHeadAfter = checkout.head_after ?? null;
+    const headBefore = current.privacy_mode === 'proof' ? proofSafeGitObjectId(observedHeadBefore) : observedHeadBefore;
+    const headAfter = current.privacy_mode === 'proof' ? proofSafeGitObjectId(observedHeadAfter) : observedHeadAfter;
     const detachedBefore = checkout.detached_before ?? item.checkout_detached_before;
     const detachedAfter = checkout.detached_after ?? null;
-    const integrityOk = headBefore === item.expected_head && headAfter === item.expected_head && cleanBefore === true && cleanAfter === true && detachedBefore === true && detachedAfter === true;
+    const integrityOk = observedHeadBefore === item.expected_head && observedHeadAfter === item.expected_head
+      && headBefore !== null && headAfter !== null
+      && cleanBefore === true && cleanAfter === true && detachedBefore === true && detachedAfter === true;
     const findingOrdinal = item.findings.length + 1;
     const findingId = `finding_${sha256(canonicalJson({ run_id: runId, evaluation_id: evaluationId, ordinal: findingOrdinal })).slice(0, 24)}`;
     const payload = {
@@ -1863,7 +1888,10 @@ function resolveClaimDiagnosticUnlocked(runId, state, compiled) {
       diagnostic_id: prior.diagnostic_id,
       diagnostic_status: 'RESOLVED',
       claim_contract_ref: state.claim_contract.claim_contract_ref,
+      fold_version: CURRENT_FOLD_VERSION,
       input_digest: compiled.input_digest,
+      eligible_evidence_frontier: compiled.eligible_evidence_frontier,
+      material_control_frontier: compiled.material_control_frontier,
       blocker_fingerprint: prior.blocker_fingerprint
     },
     idempotencyKey: `diagnostic-resolved:${prior.diagnostic_id}:${compiled.input_digest}`
@@ -1890,7 +1918,10 @@ function ensureClaimDiagnosticUnlocked(runId, state, compiled, fingerprint, mess
       diagnostic_id: diagnosticId,
       diagnostic_status: 'OPEN',
       claim_contract_ref: state.claim_contract.claim_contract_ref,
+      fold_version: CURRENT_FOLD_VERSION,
       input_digest: compiled.input_digest,
+      eligible_evidence_frontier: compiled.eligible_evidence_frontier,
+      material_control_frontier: compiled.material_control_frontier,
       blocker_fingerprint: fingerprint,
       supported_state: compiled.highest_supported_state,
       requested_state: state.claim_contract.requested_state,
@@ -2108,6 +2139,8 @@ export function readSealedReceipt(capability, receiptId) {
   assert(initial.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
+    if (!current.sealed) assertParentLeaseUnlocked(runId, current, capability);
+    else assert(current.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
     if (current.sealed) repairSeal(runId);
     const receipt = current.child_receipts[receiptId];
     assert(receipt, 'CHILD_RECEIPT_NOT_FOUND');
@@ -2179,9 +2212,29 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
   let claimBoundary = false;
   try {
     return withLock(lockPath(runId), () => {
+    // The ledger, not the mutable state cache, decides whether this caller owns an open claim
+    // boundary. This both fails closed when state.json is missing and avoids blocking a predecessor
+    // after a durable lease transfer whose state projection has not yet caught up.
+    let parsedBeforeState;
+    try {
+      parsedBeforeState = parseLedger(runId);
+    } catch (error) {
+      // If the chain itself cannot be read, the last intact cache may only be used to choose the
+      // transport posture; it never repairs or evidences the run. A cached current owner with a
+      // declared open contract still fails closed.
+      const cached = readJson(statePath(runId), null);
+      claimBoundary = Boolean(cached?.claim_contract && !cached?.sealed
+        && cached?.parent_capability_hash === sha256(capability));
+      throw error;
+    }
+    const contractDeclared = parsedBeforeState.events.some((event) => event.type === 'claim_contract_declared');
+    const sealedInLedger = parsedBeforeState.events.some((event) => event.type === 'run_sealed');
+    const latestLease = [...parsedBeforeState.events].reverse().find((event) => event.type === 'continuation_lease_transferred');
+    claimBoundary = contractDeclared && !sealedInLedger && (
+      !latestLease || latestLease.payload?.successor_parent_ref === sha256(capability)
+    );
     const current = loadState(runId);
-    claimBoundary = Boolean(current.claim_contract && current.parent_capability_hash === sha256(capability));
-    recoverClaimControlStateUnlocked(runId, current);
+    recoverClaimControlStateUnlocked(runId, current, parsedBeforeState);
     assert(current.parent_capability_hash === sha256(capability), 'CAPABILITY_RUN_MISMATCH');
     // Adopt a durable terminal run_sealed (crash after the seal append, before state/anchor) BEFORE the
     // replay guard, which would otherwise short-circuit and leave an unsealed run no later Stop repairs.

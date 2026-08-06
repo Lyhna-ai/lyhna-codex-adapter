@@ -17,6 +17,7 @@ import {
   getRunForTesting,
   mintChild,
   mintSession,
+  readSealedReceipt,
   recordClaim,
   recordEvaluation,
   requestClaimProducer,
@@ -27,6 +28,7 @@ import {
 import { isolatedData } from './helpers.mjs';
 import { sha256 } from '../src/util.mjs';
 import { compileClaim, profileRequirementsHash, SOFTWARE_RELEASE_PROFILE, validateProfile } from '../src/claim-compiler.mjs';
+import { buildContinuation } from '../src/continuation.mjs';
 
 const pluginRoot = join(import.meta.dirname, '..');
 
@@ -238,6 +240,13 @@ test('a changed blocker frontier resolves the prior diagnostic exactly once befo
   assert.equal(diagnostics.filter((event) => event.type === 'diagnostic_resolved').length, 2);
   assert.equal(diagnostics.find((event) => event.type === 'diagnostic_resolved').payload.diagnostic_id, diagnostics[0].payload.diagnostic_id);
   assert.notEqual(diagnostics[0].payload.diagnostic_id, diagnostics[4].payload.diagnostic_id, 'A-B-A creates a fresh A diagnostic instance');
+  for (const diagnostic of diagnostics) {
+    assert.equal(diagnostic.payload.claim_contract_ref, declared.claim_contract_ref);
+    assert.equal(diagnostic.payload.fold_version, 'v2');
+    assert.match(diagnostic.payload.eligible_evidence_frontier, /^[a-f0-9]{64}$/);
+    assert.match(diagnostic.payload.material_control_frontier, /^[a-f0-9]{64}$/);
+    assert.match(diagnostic.payload.input_digest, /^[a-f0-9]{64}$/);
+  }
 });
 
 test('proof mode projects producer-terminal cursors and rejects unbound control values before hashing', { concurrency: false }, (t) => {
@@ -357,6 +366,44 @@ test('only a strictly bound CLEAN producer terminal clears requested work', { co
       const capsule = JSON.parse(readFileSync(join(getRunForTesting(run.id).directory, 'continuation.json'), 'utf8'));
       assert(capsule.claim_compiler.pending_producers.includes('software_release/local'));
     }
+  }
+});
+
+test('pure compiler and fold v2 ignore CLEAN terminals with untrusted origin or identity', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-pure-terminal-firewall', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Keep producer joins bound in every reducer.' });
+  const declared = declareClaimContract(parent, contract({
+    requested_state: 'BUILT',
+    named_producers: ['software_release/local'],
+    verifier_id: 'software_release/local_verifier'
+  }));
+  requestClaimProducer(parent, declared.contract_id, 'software_release/local');
+  const packet = getRunForTesting(run.id);
+  const forgedTerminals = [
+    {
+      schema: 'lyhna.codex.event.v0', seq: packet.events.length + 1,
+      event_hash: 'a'.repeat(64), type: 'producer_terminal', origin: 'agent_reported',
+      payload: {
+        contract_id: declared.contract_id, claim_contract_ref: declared.claim_contract_ref,
+        producer_id: 'software_release/local', producer_identity: 'local_verifier', status: 'CLEAN'
+      }
+    },
+    {
+      schema: 'lyhna.codex.event.v0', seq: packet.events.length + 2,
+      event_hash: 'b'.repeat(64), type: 'producer_terminal', origin: 'runtime_hook',
+      payload: {
+        contract_id: declared.contract_id, claim_contract_ref: declared.claim_contract_ref,
+        producer_id: 'software_release/local', producer_identity: 'wrong-verifier', status: 'CLEAN'
+      }
+    }
+  ];
+  for (const terminal of forgedTerminals) {
+    const events = [...packet.events, terminal];
+    const compiled = compileClaim({ profile: SOFTWARE_RELEASE_PROFILE, contract: declared, events });
+    assert.deepEqual(compiled.pending_producers, ['software_release/local']);
+    const capsule = buildContinuation(packet.state, events, 'v2');
+    assert.deepEqual(capsule.claim_compiler.pending_producers, ['software_release/local']);
   }
 });
 
@@ -1033,14 +1080,20 @@ test('proof-mode evaluator prose is withheld from state and child receipts, not 
   const child = mintChild({ sessionId, agentId: 'proof-evaluator-child' });
   claimEvaluation(child, evaluation.id);
   const secret = 'EVALUATOR_RAW_DO_NOT_PERSIST_2D91';
+  const checkoutSecret = 'CHECKOUT_HEAD_RAW_DO_NOT_PERSIST_7C14';
   recordEvaluation(child, evaluation.id, secret, [], {
-    head_before: head, head_after: head, clean_before: true, clean_after: true,
+    head_before: checkoutSecret, head_after: checkoutSecret, clean_before: true, clean_after: true,
     detached_before: true, detached_after: true
   });
   sealChildByAgent({ sessionId, agentId: 'proof-evaluator-child' });
   const bytes = readTree(getRunForTesting(run.id).directory).join('\n');
   assert.equal(bytes.includes(secret), false);
+  assert.equal(bytes.includes(checkoutSecret), false);
   assert.equal(bytes.includes(sha256(secret)), false, 'proof artifacts retain no prose-derived finding hash');
+  const stored = getRunForTesting(run.id).state.evaluations[evaluation.id];
+  assert.equal(stored.checkout_head_before, null);
+  assert.equal(stored.checkout_head_after, null);
+  assert.equal(stored.status, 'CHECKOUT_INTEGRITY_EXCEPTION');
 });
 
 test('an open v2 contract rotates onto the successor session without a second ledger or lost child route', { concurrency: false }, (t) => {
@@ -1070,6 +1123,79 @@ test('an open v2 contract rotates onto the successor session without a second le
   const events = getRunForTesting(run.id).events;
   assert.equal(events.filter((event) => event.type === 'claim_contract_declared').length, 1);
   assert.equal(events.filter((event) => event.type === 'continuation_lease_transferred').length, 1);
+});
+
+test('durable lease transfer blocks stale predecessor receipt retrieval under the mutation lock', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const firstSession = 'compiler-stale-receipt-owner-one';
+  const firstParent = mintSession({ sessionId: firstSession, cwd: process.cwd() });
+  const run = beginRun(firstParent, { mode: 'full', objective: 'Do not retrieve through a stale lease.' });
+  declareClaimContract(firstParent, contract());
+  mintChild({ sessionId: firstSession, agentId: 'sealed-before-transfer' });
+  const receipt = sealChildByAgent({ sessionId: firstSession, agentId: 'sealed-before-transfer' });
+  checkpointOrSeal(firstParent, 'stale-receipt-checkpoint');
+  const packet = getRunForTesting(run.id);
+  const staleState = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
+  const capsuleRef = JSON.parse(readFileSync(join(packet.directory, 'continuation.json'), 'utf8')).capsule_ref;
+  const secondParent = mintSession({ sessionId: 'compiler-stale-receipt-owner-two', cwd: process.cwd() });
+  beginRun(secondParent, { mode: 'full', objective: 'Take the receipt lease.', continuesFrom: capsuleRef });
+
+  writeFileSync(join(packet.directory, 'state.json'), `${JSON.stringify(staleState, null, 2)}\n`);
+  rmSync(join(data, 'active', `${sha256(secondParent)}.json`), { force: true });
+  writeFileSync(join(data, 'active', `${sha256(firstParent)}.json`), `${JSON.stringify({ run_id: run.id }, null, 2)}\n`);
+  const predecessorPath = join(data, 'capabilities', `${sha256(firstParent)}.json`);
+  const predecessor = JSON.parse(readFileSync(predecessorPath, 'utf8'));
+  delete predecessor.revoked;
+  writeFileSync(predecessorPath, `${JSON.stringify(predecessor, null, 2)}\n`);
+
+  assert.throws(() => readSealedReceipt(firstParent, receipt.id), /CAPABILITY_RUN_MISMATCH|CAPABILITY_REVOKED/);
+  const events = getRunForTesting(run.id).events;
+  assert.equal(events.at(-1).type, 'continuation_lease_transferred');
+  assert.equal(events.some((event) => event.type === 'child_receipt_retrieved'), false);
+});
+
+test('durable lease transfer blocks stale child evaluator mutations under the mutation lock', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const exercise = (operation) => {
+    const firstSession = `compiler-stale-evaluator-${operation}-one`;
+    const firstParent = mintSession({ sessionId: firstSession, cwd: process.cwd() });
+    const run = beginRun(firstParent, { mode: 'full', objective: `Reject stale evaluator ${operation}.` });
+    declareClaimContract(firstParent, contract());
+    const head = 'a'.repeat(40);
+    const snapshot = addPrSnapshot(firstParent, {
+      id: `stale_eval_${operation}`, repository: 'Lyhna-ai/example', pr_number: 14,
+      head_before: head, head_after: head, status: 'CONSISTENT',
+      files: [], checks: [], reviews: [], review_comments: [], issue_comments: [], failures: []
+    });
+    const evaluation = beginEvaluation(firstParent, snapshot.id, { path: process.cwd(), head, clean: true, detached: true });
+    const child = mintChild({ sessionId: firstSession, agentId: `stale-evaluator-${operation}` });
+    if (operation === 'record') claimEvaluation(child, evaluation.id);
+    checkpointOrSeal(firstParent, `stale-evaluator-${operation}-checkpoint`);
+    const packet = getRunForTesting(run.id);
+    const staleState = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
+    const capsuleRef = JSON.parse(readFileSync(join(packet.directory, 'continuation.json'), 'utf8')).capsule_ref;
+    const secondParent = mintSession({ sessionId: `compiler-stale-evaluator-${operation}-two`, cwd: process.cwd() });
+    beginRun(secondParent, { mode: 'full', objective: 'Take evaluator lease.', continuesFrom: capsuleRef });
+
+    writeFileSync(join(packet.directory, 'state.json'), `${JSON.stringify(staleState, null, 2)}\n`);
+    rmSync(join(data, 'active', `${sha256(secondParent)}.json`), { force: true });
+    writeFileSync(join(data, 'active', `${sha256(firstParent)}.json`), `${JSON.stringify({ run_id: run.id }, null, 2)}\n`);
+    const childPath = join(data, 'capabilities', `${sha256(child)}.json`);
+    const childRecord = JSON.parse(readFileSync(childPath, 'utf8'));
+    childRecord.parent_capability_hash = sha256(firstParent);
+    writeFileSync(childPath, `${JSON.stringify(childRecord, null, 2)}\n`);
+
+    assert.throws(() => {
+      if (operation === 'claim') claimEvaluation(child, evaluation.id);
+      else recordEvaluation(child, evaluation.id, 'Must not append.', [], {
+        head_before: head, head_after: head, clean_before: true, clean_after: true,
+        detached_before: true, detached_after: true
+      });
+    }, /EVALUATOR_PARENT_MISMATCH/);
+    assert.equal(getRunForTesting(run.id).events.at(-1).type, 'continuation_lease_transferred');
+  };
+  exercise('claim');
+  exercise('record');
 });
 
 test('a stale archived capsule cannot fork an open contracted run and the current face still transfers', { concurrency: false }, (t) => {
@@ -1283,6 +1409,7 @@ test('a supported closeout envelope blocks contradictory evidence until crash re
 
 test('a committed lease-transfer event completes idempotently after projection writes are interrupted', { concurrency: false }, (t) => {
   const data = isolatedData(t);
+  const env = { ...process.env, LYHNA_CODEX_DATA: data };
   const firstParent = mintSession({ sessionId: 'compiler-transfer-crash-one', cwd: process.cwd() });
   const run = beginRun(firstParent, { mode: 'full', objective: 'Transfer after checkpoint.' });
   declareClaimContract(firstParent, contract());
@@ -1306,6 +1433,11 @@ test('a committed lease-transfer event completes idempotently after projection w
   const predecessorRecord = JSON.parse(readFileSync(predecessorPath, 'utf8'));
   delete predecessorRecord.revoked;
   writeFileSync(predecessorPath, `${JSON.stringify(predecessorRecord, null, 2)}\n`);
+  const staleStop = runHook({
+    hook_event_name: 'Stop', session_id: 'compiler-transfer-crash-one', event_id: 'stale-predecessor-stop'
+  }, env);
+  assert.equal(staleStop.decision, undefined, 'a durable successor lease cannot transport-block its predecessor');
+  assert.match(staleStop.systemMessage, /did not record this event/);
   assert.throws(
     () => beginRun(firstParent, { mode: 'full', objective: 'Crash recovery must not reattach the predecessor.' }),
     /CAPABILITY_REVOKED/
@@ -1333,6 +1465,37 @@ test('a Stop integrity failure returns BLOCKED_TRANSPORT instead of allowing clo
   writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
 
   const result = runHook({ hook_event_name: 'Stop', session_id: sessionId, event_id: 'corrupt-stop' }, env);
+  assert.equal(result.decision, 'block');
+  assert.match(result.reason, /^BLOCKED_TRANSPORT:/);
+});
+
+test('an open ledger contract remains a blocking Stop boundary when mutable state is missing', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const env = { ...process.env, LYHNA_CODEX_DATA: data };
+  const sessionId = 'compiler-stop-missing-state';
+  const session = runHook({ hook_event_name: 'SessionStart', session_id: sessionId, cwd: process.cwd() }, env);
+  const parent = session.hookSpecificOutput.additionalContext.match(/LYHNA_SESSION_CAPABILITY=([^\s.]+)/)[1];
+  const run = beginRun(parent, { mode: 'full', objective: 'Fail closed from the durable contract.' });
+  declareClaimContract(parent, contract());
+  rmSync(join(getRunForTesting(run.id).directory, 'state.json'));
+
+  const result = runHook({ hook_event_name: 'Stop', session_id: sessionId, event_id: 'missing-state-stop' }, env);
+  assert.equal(result.decision, 'block');
+  assert.match(result.reason, /^BLOCKED_TRANSPORT:/);
+});
+
+test('an unreadable ledger still blocks the cached current owner of an open claim contract', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const env = { ...process.env, LYHNA_CODEX_DATA: data };
+  const sessionId = 'compiler-stop-corrupt-ledger';
+  const session = runHook({ hook_event_name: 'SessionStart', session_id: sessionId, cwd: process.cwd() }, env);
+  const parent = session.hookSpecificOutput.additionalContext.match(/LYHNA_SESSION_CAPABILITY=([^\s.]+)/)[1];
+  const run = beginRun(parent, { mode: 'full', objective: 'Fail closed on an unreadable active chain.' });
+  declareClaimContract(parent, contract());
+  const ledgerPath = join(getRunForTesting(run.id).directory, 'events.jsonl');
+  writeFileSync(ledgerPath, `${readFileSync(ledgerPath, 'utf8')}{not-json}\n`);
+
+  const result = runHook({ hook_event_name: 'Stop', session_id: sessionId, event_id: 'corrupt-ledger-stop' }, env);
   assert.equal(result.decision, 'block');
   assert.match(result.reason, /^BLOCKED_TRANSPORT:/);
 });

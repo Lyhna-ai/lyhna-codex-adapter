@@ -82,7 +82,15 @@ function buildClaimCompilerProjection(events) {
   const claimContractRef = `sha256:${contractEvent.event_hash}`;
   const producerTerminals = new Map();
   for (const event of events) {
-    if (event.type !== 'producer_terminal' || event.payload?.claim_contract_ref !== claimContractRef) continue;
+    const producer = contractEvent.payload?.profile_structural?.producers?.[event.payload?.producer_id];
+    const namedProducers = contractEvent.payload?.contract?.named_producers || [];
+    if (event.type !== 'producer_terminal'
+      || event.payload?.contract_id !== contractEvent.payload?.contract?.contract_id
+      || event.payload?.claim_contract_ref !== claimContractRef
+      || event.origin !== 'runtime_hook'
+      || !producer
+      || !namedProducers.includes(event.payload?.producer_id)
+      || event.payload?.producer_identity !== producer.expected_identity) continue;
     producerTerminals.set(event.payload?.producer_id, event.payload?.status);
   }
   const diagnostics = new Map();
