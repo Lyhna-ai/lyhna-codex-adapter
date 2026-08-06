@@ -302,8 +302,13 @@ references remain. When the child seals, its terminal event binds those existing
 sealed evaluator receipt ref; no ID is rewritten.
 
 The same backward-compatible `record_evaluation` schema accepts an optional structured `verdict`
-with the issued `verdict_submission_ref`; for a v2 verdict submission the prose `finding` field may
-be omitted. Consumption runs under the evaluation's run lock and atomically appends one
+with the issued `verdict_submission_ref`. Its closed v2 request union has exactly two mutually
+exclusive variants: a finding submission identified by its finding `submission_ref`, or a verdict
+submission identified by its `verdict_submission_ref`. A verdict submission must omit the prose
+`finding` field and every finding-variant field; a call carrying both discriminants or any fields
+from both variants is rejected before consuming a finding slot or verdict ref and appends nothing.
+Legacy calls containing only the shipped finding fields remain unchanged. Verdict consumption runs
+under the evaluation's run lock and atomically appends one
 `evaluation_verdict_submitted` control event, bound to the evaluation request, child capability,
 exact head, review type, and closed verdict enum, while expiring every still-unused finding slot for
 that evaluation. `CLEAN` is accepted only when zero finding slots have been consumed at that atomic
@@ -524,7 +529,8 @@ rejection, write-time prose-independent finding IDs, sealed-receipt binding, leg
 duplicate-text findings, consumed-slot replay deduplication, structured `CLEAN` and `FINDINGS`
 verdict submissions, atomic expiration of all unused finding slots at verdict acceptance, a
 serialized `CLEAN`-versus-finding race with exactly one winner and no post-verdict finding,
-verdict replay, and `VERDICT_MISSING` on silent child Stop,
+rejection without append of a single call carrying both finding and verdict variants, verdict
+replay, and `VERDICT_MISSING` on silent child Stop,
 three cross-process Stop
 attempts with one stable blocker fingerprint, eligible evidence resetting that fingerprint,
 material control changing compiler state without satisfying evidence, evaluator command/argument
@@ -582,6 +588,12 @@ continuation routing, atomic verdict/finding-slot closure, and privacy-independe
 contract validation. After that edit, every exact-head gate reruns. Any remaining or new actionable
 finding ends PR #13 as `CAP_REACHED`; it does not authorize a fourteenth repair.
 
+After exact-head review of that extension, Adam authorized exactly one final repair at predecessor
+head `b5108ee`, limited solely to rejecting a combined finding-plus-verdict submission before any
+slot/ref consumption or append. This ruling supersedes only the exhausted-cycle sentence above for
+that one defect. Any other content change, remaining actionable finding, or new actionable finding
+exhausts the final authorization and leaves PR #13 unmerged.
+
 Implementation slices start with fresh, independent, non-transferable repair budgets: Slice 1 has
 eight completed repair cycles, Slice 2 has six, Slice 3 has six, and Slice 4 has four. Each slice
 starts at zero only on its fixed branch and cannot borrow unused cycles from another slice. Each also
@@ -592,7 +604,7 @@ scope.
 ```text
 verifier: targeted mutation tests; npm test; npm run validate:plugin; clean-install host smoke;
           sealed/successor lineage verification; exact-head independent reviews; Windows CI
-PR #13 exit: VERIFIED_GREEN or its single authorized extension cycle is exhausted
+PR #13 exit: VERIFIED_GREEN or its final combined-payload repair cycle is exhausted
 slice exits: VERIFIED_GREEN or its independent 8 / 6 / 6 / 4 repair cap, six active hours,
              or two consecutive completed cycles with no new evidence
 overall exit: VERIFIED_GREEN or 7 days
