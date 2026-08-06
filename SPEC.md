@@ -4,7 +4,20 @@
 
 Prove one Codex-only customer-zero slice in which `@lyhna` starts a local witnessed run where work already happens, preserves supported action evidence through Codex hooks and an MCP tool surface, and closes with an evidence-scoped receipt. The same plugin must also examine an existing pull request retrospectively while stating that no witnessed build record exists.
 
-The adapter records what was observed. It never approves, blocks, certifies, merges, or declares the work commercially, architecturally, legally, or operationally correct.
+The adapter records what was observed. It never approves, certifies, merges, deploys, or declares
+the work commercially, architecturally, legally, or operationally correct. For an explicitly
+declared claim contract, it may refuse an unsupported Lyhna claim or successful seal; it does not
+block the underlying external action.
+
+## Normative claim-compiler addendum
+
+For v0.1.33 and later, implementations and reviews must also follow
+[`docs/proposals/CLAIM-COMPILER-SPEC-2026-08-05.md`](docs/proposals/CLAIM-COMPILER-SPEC-2026-08-05.md).
+It remains normative until a named successor specification explicitly supersedes it. That ratified
+addendum supplements this specification and controls every claim-compiler-specific technical
+requirement where the two documents conflict, including fold v2, profile compilation, unsupported
+seal refusal, and the five-PR merge authorization. Every base invariant it does not explicitly
+change remains binding.
 
 ## Repository boundary
 
@@ -62,10 +75,19 @@ The adapter records what was observed. It never approves, blocks, certifies, mer
 - Hook capture is broader but weaker than a Lyhna-routed MCP call. `PreToolUse` supports only “attempt observed”; a paired `PostToolUse` supports “tool returned” with its recorded outcome. Permission and lifecycle events never prove execution. `runtime_hook` remains visibly distinct from `mcp_routed` in every receipt.
 - The event ledger is append-only, sequence-numbered, hash-chained, crash-safe, and idempotent for repeated hook delivery. A separately persisted final seal anchor retains the sealed sequence and hash so tail deletion is detected on later reads.
 - Hook and MCP payloads are schema-tolerant: stable shared fields are normalized and unknown fields are ignored or safely summarized.
-- Builder claim text is retained, with secrets scrubbed and length bounded. A claim is the agent's own assertion, to this owner, about this owner's work, on this owner's machine — there is no third party whose privacy is served by hiding it, and a claimed-vs-actual system that will not show the claim has discarded the half of the diff only a human can judge.
-- Withholding is a projection applied when a packet leaves the machine, never a storage decision made on the owner's behalf. `privacy_mode` is `verified_context` (default, claim text retained) or `proof` (claim text projected out of the receipt and continuation, support label and evidence references retained). It is fixed at run start, sealed into `run_begun`, and read from state — never from the environment — so re-rendering a packet always reproduces its anchored bytes.
+- Builder claim text is retained, with secrets scrubbed and length bounded, for legacy v1 writers and
+  `verified_context` v2 runs. For a `proof` run written by fold v2, the normative claim-compiler
+  addendum explicitly changes this storage rule: claim prose and prose-derived hashes are withheld
+  before event hashing. Legacy v1 bytes are never rewritten.
+- `privacy_mode` is `verified_context` (default) or `proof`. Legacy v1 uses outbound projection.
+  Fold-v2 claim-compiler writers use the addendum's at-write proof projection, while
+  `verified_context` retains bounded redacted text. The mode is fixed at run start, sealed into
+  `run_begun`, and read from state — never from the environment — so re-rendering a packet always
+  reproduces its anchored bytes.
 - Raw secrets, environment values, full command output, full tool responses, PR bodies, and comment bodies are not stored. The adapter stores redacted bounded titles/status summaries, structural metadata, and SHA-256 references.
-- The objective is retained alongside its structural summary, secrets scrubbed and length bounded, and projected away in `proof` mode exactly as claim text is. "What was requested" is the first thing a reader needs and the first thing a successor window inherits; storing it as a byte count discards the authored product and keeps only the generated material.
+- The objective is retained alongside its structural summary for legacy v1 and `verified_context`
+  v2 runs. A proof-mode v2 writer follows the addendum's at-write withholding rule and retains only
+  non-prose structural identity supplied independently of objective text plus a withheld marker.
 - The original prompt is captured only for an explicitly invoked or already active Lyhna run. If Codex does not expose the invocation text to the hook, `begin_run.objective` is retained as `agent_reported` rather than promoted to hook-observed truth.
 - Identical normalized receipt input produces byte-identical Markdown and JSON output.
 - “Append-only,” “sealed,” and “cannot rewrite” are logical local-store properties, not adversary-resistant claims against an agent with unrestricted filesystem access. Reads verify the hash chain and surface deletion or mutation as `LOCAL_CHAIN_BROKEN`; v0 does not claim cryptographic custody beyond that detection boundary.
@@ -127,7 +149,14 @@ The adapter records what was observed. It never approves, blocks, certifies, mer
 12. Windows local execution uses ordinary files and loopback/process stdio only; no Unix-domain socket is required.
 13. Ledger mutation, reordering, middle deletion, and sealed-tail deletion surface `LOCAL_CHAIN_BROKEN` rather than a normal receipt.
 14. The complete diff receives an independent Codex review against this specification and all material findings are closed on the final head.
-15. The final GitHub pull request remains unmerged for Adam's decision.
+15. Pull requests remain unmerged for Adam's decision unless Adam gives a narrower explicit merge
+    authorization. On 2026-08-05 Adam authorized Codex to squash-merge claim-compiler PR #13 and
+    four implementation slices in this repository, based on `main`, with exact branches
+    `codex/claim-compiler-contract`, `codex/claim-compiler-join`,
+    `codex/claim-compiler-evidence`, and `codex/claim-compiler-recurrence`, after every declared
+    exact-head gate is terminal and clean. Before each future merge, the recorded gate mapping must
+    match repository, PR, base, slice, branch, reviewed head, and expected version. This is not
+    standing merge, release, deployment, or production-mutation authority.
 
 ## Non-goals for v0
 
