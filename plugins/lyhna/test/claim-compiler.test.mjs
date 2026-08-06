@@ -394,6 +394,34 @@ test('proof mode projects producer-terminal cursors and rejects unbound control 
   assert.equal(bytes.includes(rawStatus), false);
 });
 
+test('evidence cursors are opaque before hashing in both privacy modes', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  for (const privacyMode of ['verified_context', 'proof']) {
+    const marker = `RAW_CURSOR_${privacyMode}_DO_NOT_PERSIST`;
+    const parent = mintSession({ sessionId: `compiler-cursor-${privacyMode}`, cwd: process.cwd() });
+    const run = beginRun(parent, { mode: 'full', objective: 'Keep source cursors structural.', privacyMode });
+    const declared = declareClaimContract(parent, contract());
+    const event = appendEvent(run.id, {
+      type: 'evidence_observed',
+      origin: 'mock_or_test',
+      payload: {
+        contract_id: declared.contract_id,
+        profile_requirements_hash: declared.profile_requirements_hash,
+        requirement_id: 'source_identity',
+        event_kind: 'source_identity_observed',
+        producer_id: 'software_release/local',
+        producer_identity: 'local_verifier',
+        source_cursor: marker,
+        observed_at: '2026-08-05T12:00:00Z',
+        subject_binding: { source_ref: 'sha256:source' }
+      },
+      idempotencyKey: `opaque-cursor-${privacyMode}`
+    });
+    assert.equal(event.payload.source_cursor, `cursor_${sha256(marker)}`);
+  }
+  assert.equal(readTree(data).join('\n').includes('RAW_CURSOR_'), false);
+});
+
 test('only a strictly bound CLEAN producer terminal clears requested work', { concurrency: false }, (t) => {
   isolatedData(t);
   for (const status of ['FINDINGS', 'INVALID', 'STALE', 'CLEAN']) {
@@ -633,6 +661,27 @@ test('only exact registered producer identities support production state and a f
   const result = checkpointOrSeal(parent, 'supported-stop');
   assert.equal(result.status, 'SEALED');
   assert.equal(getRunForTesting(run.id).state.compiled_claim.highest_supported_state, 'LIVE_PROVEN');
+});
+
+test('a supported contract waits behind active child lifecycle obligations', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'compiler-supported-child-join';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Join children before supported closeout.' });
+  const declared = declareClaimContract(parent, contract());
+  seedBuilt(run.id, declared);
+  observe(run.id, declared, 'merge_identity', 'merge_identity_observed', 'github_observed', 'software_release/repository', { source_ref: 'sha256:source', base_ref: 'sha256:main', merge_ref: 'sha256:merge' });
+  observe(run.id, declared, 'deployment_identity', 'deployment_identity_observed', 'registered_probe', 'software_release/deployment', { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' });
+  observe(run.id, declared, 'configuration_present', 'configuration_presence_observed', 'registered_probe', 'software_release/deployment', { artifact_ref: 'sha256:artifact', configuration_ref: 'sha256:config' });
+  observe(run.id, declared, 'registered_canary', 'registered_canary_observed', 'registered_probe', 'software_release/canary', { artifact_ref: 'sha256:artifact', canary_ref: 'sha256:canary' });
+  observe(run.id, declared, 'terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' });
+  mintChild({ sessionId, agentId: 'still-running-child' });
+  requestClose(parent, 'Close only after the child returns.');
+  const blocked = checkpointOrSeal(parent, 'supported-child-stop');
+  assert.equal(blocked.status, 'CLOSE_DEFERRED');
+  assert.equal(blocked.decision, 'block');
+  assert(blocked.blockers.some((item) => /^CHILD_.*_OPEN$/.test(item)));
+  assert.equal(getRunForTesting(run.id).events.some((event) => event.type === 'run_sealed'), false);
 });
 
 test('undeclared producers are rejected while malformed time becomes a sanitized blocker', { concurrency: false }, (t) => {
@@ -1233,9 +1282,9 @@ test('an open v2 contract rotates onto the successor session without a second le
   assert.throws(() => beginRun(firstParent, { mode: 'full', objective: 'Revoked predecessor cannot open another run.' }), /CAPABILITY_REVOKED/);
   assert.equal(getCapability(childCapability).parent_capability_hash, sha256(secondParent));
   assert.notEqual(evaluateClaimGate(secondParent, declared.contract_id, 'closeout').material_control_frontier, preTransferFrontier);
+  assert.equal(checkpointOrSeal(secondParent, 'window-two-stop').closeout_attempt_ordinal, 2, 'attempt frontier survives the window boundary');
   const childReceipt = sealChildByAgent({ sessionId: firstSession, agentId: 'pending-child' });
   assert.equal(childReceipt.status, 'STOP_OBSERVED');
-  assert.equal(checkpointOrSeal(secondParent, 'window-two-stop').closeout_attempt_ordinal, 2, 'attempt frontier survives the window boundary');
   assert.throws(() => declareClaimContract(secondParent, contract()), /CLAIM_CONTRACT_ALREADY_DECLARED/);
   const events = getRunForTesting(run.id).events;
   assert.equal(events.filter((event) => event.type === 'claim_contract_declared').length, 1);
@@ -1621,6 +1670,21 @@ test('a missing active-route cache is recovered from the session index before cl
   assert.match(result.reason, /Lyhna evidence supports/);
   assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'closeout_attempted').length, 1);
   assert.equal(JSON.parse(readFileSync(join(data, 'active', `${sha256(parent)}.json`), 'utf8')).run_id, run.id);
+});
+
+test('begin_run recovers a missing active route instead of creating a second claim run', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const sessionId = 'compiler-begin-missing-active-route';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Keep the durable claim run singular.' });
+  declareClaimContract(parent, contract());
+  rmSync(join(data, 'active', `${sha256(parent)}.json`));
+
+  const reattached = beginRun(parent, { mode: 'full', objective: 'This must not create a second run.' });
+  assert.equal(reattached.id, run.id);
+  assert.equal(JSON.parse(readFileSync(join(data, 'active', `${sha256(parent)}.json`), 'utf8')).run_id, run.id);
+  const index = JSON.parse(readFileSync(join(data, 'session-runs', `${sha256(sessionId)}.json`), 'utf8'));
+  assert.deepEqual(index.run_ids, [run.id]);
 });
 
 test('an unreadable ledger still blocks the cached current owner of an open claim contract', { concurrency: false }, (t) => {

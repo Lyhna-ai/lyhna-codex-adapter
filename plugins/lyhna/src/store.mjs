@@ -24,7 +24,6 @@ import { renderHandoffMarkdown } from './handoff.mjs';
 import { loadOrCreateKeypair, signCapsule } from './signing.mjs';
 import { ADAPTER_VERSION } from './version.mjs';
 import {
-  blockerFingerprint,
   compileClaim,
   getClaimProfile,
   isCanonicalObservedAt,
@@ -1003,7 +1002,7 @@ function validateEventPayloadStructure(state, type, origin, payload) {
     assert(payload.diagnostic_status === (type === 'diagnostic_emitted' ? 'OPEN' : 'RESOLVED'), code);
     if (type === 'diagnostic_emitted') {
       const gateId = state.claim_contract.declared_gate_ids[0];
-      assert(payload.blocker_fingerprint === blockerFingerprint(state.claim_contract, gateId, state.compiled_claim), code);
+      assert(payload.blocker_fingerprint === claimCloseoutBlockerFingerprint(state, gateId, state.compiled_claim), code);
       assert(payload.supported_state === state.compiled_claim.highest_supported_state, code);
       assert(payload.requested_state === state.claim_contract.requested_state, code);
       assert(canonicalJson(payload.missing) === canonicalJson(state.compiled_claim.missing), code);
@@ -1057,16 +1056,26 @@ function normalizeEventPayloadForStorage(type, payload) {
       || normalized.source_cursor.length === 0
       || normalized.source_cursor.length > 512) {
       normalized = { ...normalized, source_cursor: null };
+    } else if (!/^cursor_[a-f0-9]{64}$/.test(normalized.source_cursor)) {
+      normalized = { ...normalized, source_cursor: `cursor_${sha256(normalized.source_cursor)}` };
     }
     if (!isCanonicalObservedAt(normalized.observed_at)) {
       normalized = { ...normalized, observed_at: null };
     }
     return normalized;
   }
-  if (type === 'producer_terminal'
-    && payload.observed_at !== undefined
-    && !isCanonicalObservedAt(payload.observed_at)) {
-    return { ...payload, observed_at: null };
+  if (type === 'producer_terminal') {
+    let normalized = payload;
+    if (typeof normalized.source_cursor === 'string'
+      && normalized.source_cursor.length > 0
+      && normalized.source_cursor.length <= 512
+      && !/^cursor_[a-f0-9]{64}$/.test(normalized.source_cursor)) {
+      normalized = { ...normalized, source_cursor: `cursor_${sha256(normalized.source_cursor)}` };
+    }
+    if (normalized.observed_at !== undefined && !isCanonicalObservedAt(normalized.observed_at)) {
+      normalized = { ...normalized, observed_at: null };
+    }
+    return normalized;
   }
   return payload;
 }
@@ -1286,12 +1295,19 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
     assert(!currentParent.revoked, 'CAPABILITY_REVOKED');
     const pendingPath = join(root(), 'pending', `${parent.session_hash}.json`);
     const pending = readJson(pendingPath, null);
-    const current = activeRunFor(capability, { includeSealed: true });
+    const current = activeRunFor(capability, { includeSealed: true }) || locateOpenClaimRunForParent(capability);
     if (current) {
       const state = withLock(lockPath(current), () => {
         const recovered = loadState(current);
-        recoverClaimControlStateUnlocked(current, recovered);
+        const parsed = recoverClaimControlStateUnlocked(current, recovered);
         adoptTerminalLedgerSeal(current, recovered);
+        const callerHash = sha256(capability);
+        const transfer = [...parsed.events].reverse().find((event) => (
+          event.type === 'continuation_lease_transferred'
+          && event.payload?.successor_parent_ref === callerHash
+          && (!continuesFrom || event.payload?.capsule_ref === continuesFrom)
+        ));
+        if (transfer && continuesFrom) completeContinuationLeaseProjectionUnlocked(recovered, transfer);
         return recovered;
       });
       const callerHash = sha256(capability);
@@ -1308,6 +1324,7 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
       // reattach hands back a run every mutable tool now rejects with RUN_SEALED, wedging the session;
       // adopt under the run lock like the Stop/verify paths, then fall through to finalize and start fresh.
       if (!state.sealed) {
+        atomicWriteJson(activePath(capability), { run_id: current });
         if (pending) rmSync(pendingPath, { force: true });
         return state;
       }
@@ -2002,6 +2019,41 @@ function claimSupportPosition(compiled, contract) {
     : `evidence supports ${supported}, not requested ${contract.requested_state}`;
 }
 
+function claimLifecycleBlockers(state) {
+  const blockers = [];
+  for (const evaluation of Object.values(state.evaluations || {})) {
+    if (!['RECORDED', 'CHECKOUT_INTEGRITY_EXCEPTION'].includes(evaluation.status)) {
+      blockers.push(`EVALUATION_${evaluation.id}_${evaluation.status}`);
+    }
+    if (!evaluation.child_receipt_id) blockers.push(`CHILD_RECEIPT_${evaluation.id}_OPEN`);
+    if (!evaluation.child_receipt_retrieved) blockers.push(`CHILD_RECEIPT_${evaluation.id}_NOT_RETRIEVED`);
+  }
+  for (const child of Object.values(state.children || {})) {
+    if (child.status !== 'STOP_OBSERVED' || !child.receipt_id) blockers.push(`CHILD_${child.id}_OPEN`);
+  }
+  return [...new Set(blockers)].sort();
+}
+
+function claimCloseoutBlockers(state, compiled) {
+  return [...new Set([
+    ...compiled.missing.map((item) => `MISSING_${item}`),
+    ...compiled.pending_producers.map((item) => `PENDING_${item}`),
+    ...compiled.contradictions,
+    ...(compiled.currentness === 'AS_WITNESSED' ? [] : ['CURRENTNESS_UNPROVEN']),
+    ...claimLifecycleBlockers(state)
+  ])].sort();
+}
+
+function claimCloseoutBlockerFingerprint(state, gateId, compiled) {
+  return sha256(canonicalJson({
+    contract_id: state.claim_contract.contract_id,
+    gate_id: gateId,
+    requested_state: state.claim_contract.requested_state,
+    blockers: claimCloseoutBlockers(state, compiled),
+    eligible_evidence_frontier: compiled.eligible_evidence_frontier
+  }));
+}
+
 function resolveClaimDiagnosticUnlocked(runId, state, compiled) {
   const prior = state.claim_diagnostic;
   if (prior?.status !== 'OPEN') return false;
@@ -2074,18 +2126,13 @@ export function claimInlineAdvisory(capability) {
     if (state.sealed || !state.claim_contract) return null;
     const compiled = compileAndRecordUnlocked(runId, state);
     const requestedSupported = compiled.state_results?.[state.claim_contract.requested_state]?.supported === true;
-    const inlineBlockers = [
-      ...compiled.missing.map((item) => `MISSING_${item}`),
-      ...compiled.pending_producers.map((item) => `PENDING_${item}`),
-      ...compiled.contradictions,
-      ...(compiled.currentness === 'AS_WITNESSED' ? [] : ['CURRENTNESS_UNPROVEN'])
-    ].sort();
+    const inlineBlockers = claimCloseoutBlockers(state, compiled);
     if (requestedSupported && inlineBlockers.length === 0) {
       if (resolveClaimDiagnosticUnlocked(runId, state, compiled)) saveState(state);
       return null;
     }
     const gateId = state.claim_contract.declared_gate_ids[0];
-    const fingerprint = blockerFingerprint(state.claim_contract, gateId, compiled);
+    const fingerprint = claimCloseoutBlockerFingerprint(state, gateId, compiled);
     const claimPosition = claimSupportPosition(compiled, state.claim_contract);
     const message = `Lyhna inline claim check: ${claimPosition}. Blockers: ${inlineBlockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${compiled.next_verifier}.`;
     const result = ensureClaimDiagnosticUnlocked(runId, state, compiled, fingerprint, message);
@@ -2486,15 +2533,10 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       const compiled = compileAndRecordUnlocked(runId, current);
       const gateId = current.claim_contract.declared_gate_ids[0];
       const requestedSupported = compiled.state_results?.[current.claim_contract.requested_state]?.supported === true;
-      const blockers = [
-        ...compiled.missing.map((item) => `MISSING_${item}`),
-        ...compiled.pending_producers.map((item) => `PENDING_${item}`),
-        ...compiled.contradictions,
-        ...(compiled.currentness === 'AS_WITNESSED' ? [] : ['CURRENTNESS_UNPROVEN'])
-      ].sort();
+      const blockers = claimCloseoutBlockers(current, compiled);
 
       if (!requestedSupported || blockers.length) {
-        const fingerprint = blockerFingerprint(current.claim_contract, gateId, compiled);
+        const fingerprint = claimCloseoutBlockerFingerprint(current, gateId, compiled);
         const { events: attemptEvents } = parseLedger(runId);
         const attemptSequence = attemptEvents.filter((event) => event.type === 'closeout_attempted').length + 1;
         const latestAttempt = [...attemptEvents].reverse().find((event) => event.type === 'closeout_attempted');
