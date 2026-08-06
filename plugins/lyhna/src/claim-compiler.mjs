@@ -32,6 +32,7 @@ const CONTRACT_KEYS = new Set([
 const CAPS_KEYS = new Set(['max_unsupported_attempts']);
 const OPAQUE_CONTRACT = /^contract_[a-f0-9]{32}$/;
 const OPAQUE_OBJECTIVE = /^objective_[a-f0-9]{64}$/;
+const CANONICAL_UTC_SECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 
 function codepointCompare(a, b) {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -289,12 +290,21 @@ function evidenceMatches(requirement, event, contract, profile) {
   if (payload.profile_requirements_hash !== contract.profile_requirements_hash) return false;
   if (payload.requirement_id !== requirement.requirement_id || payload.event_kind !== requirement.event_kind) return false;
   const expectedIdentity = profile.producers[requirement.producer_id]?.expected_identity;
-  if (!requirement.eligible_origins.includes(event.origin)
+  if (!contract.named_producers.includes(requirement.producer_id)
+    || !requirement.eligible_origins.includes(event.origin)
     || payload.producer_id !== requirement.producer_id
     || payload.producer_identity !== expectedIdentity) return false;
   if (requirement.assurance_class === 'production' && (event.origin !== 'registered_probe' || payload.producer_id !== requirement.producer_id)) return false;
-  if (!payload.source_cursor || !payload.observed_at || !payload.subject_binding || typeof payload.subject_binding !== 'object') return false;
+  if (!payload.source_cursor || !isCanonicalObservedAt(payload.observed_at) || !payload.subject_binding || typeof payload.subject_binding !== 'object') return false;
   return requirement.subject_fields.every((field) => typeof payload.subject_binding[field] === 'string' && payload.subject_binding[field].length > 0);
+}
+
+function isCanonicalObservedAt(value) {
+  if (typeof value !== 'string' || !CANONICAL_UTC_SECONDS.test(value)) return false;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return false;
+  const normalized = value.includes('.') ? value : value.replace(/Z$/, '.000Z');
+  return new Date(parsed).toISOString() === normalized;
 }
 
 function maximalSupported(profile, supported) {
@@ -331,22 +341,23 @@ export function compileClaim({ profile, contract, events }) {
     const right = satisfied.get(edge.right_requirement);
     if (!left || !right) continue;
     if (left.payload.subject_binding[edge.left_field] !== right.payload.subject_binding[edge.right_field]) {
-      const rightRequirement = requirements.get(edge.right_requirement);
-      const matching = [...primary].reverse().find((event) => (
-        evidenceMatches(rightRequirement, event, contract, profile)
-        && event.payload.subject_binding[edge.right_field] === left.payload.subject_binding[edge.left_field]
-      ));
-      satisfied.set(edge.right_requirement, matching || null);
-      if (!matching) contradictions.push(`IDENTITY_MISMATCH_${edge.right_requirement}`);
+      // A later eligible identity is the current witnessed fact. Never search backward for an older
+      // matching envelope: that would erase the contradiction and resurrect stale evidence.
+      satisfied.set(edge.right_requirement, null);
+      contradictions.push(`IDENTITY_MISMATCH_${edge.right_requirement}`);
     }
   }
 
   const supported = new Set();
   const state_results = {};
-  for (const state of profile.surface_projection) {
+  const evaluating = new Set();
+  const evaluateNode = (state) => {
+    if (state_results[state]) return state_results[state].supported;
+    if (evaluating.has(state)) throw Object.assign(new Error('CYCLIC_PROFILE'), { code: 'CYCLIC_PROFILE' });
+    evaluating.add(state);
     const node = profile.nodes[state];
     const missing = (node.requirement_ids || []).filter((id) => !satisfied.get(id));
-    const missingPrerequisites = (node.prerequisite_nodes || []).filter((id) => !supported.has(id));
+    const missingPrerequisites = (node.prerequisite_nodes || []).filter((id) => !evaluateNode(id));
     const nodeSupported = missing.length === 0 && missingPrerequisites.length === 0;
     if (nodeSupported) supported.add(state);
     state_results[state] = {
@@ -354,21 +365,36 @@ export function compileClaim({ profile, contract, events }) {
       missing_requirement_ids: missing,
       missing_prerequisite_nodes: missingPrerequisites
     };
-  }
+    evaluating.delete(state);
+    return nodeSupported;
+  };
+  for (const state of Object.keys(profile.nodes).sort(codepointCompare)) evaluateNode(state);
 
   const highest = [...profile.surface_projection].reverse().find((state) => supported.has(state)) || null;
-  const requestedIndex = profile.surface_projection.indexOf(contract.requested_state);
-  const missing = [];
-  for (const state of profile.surface_projection.slice(0, requestedIndex + 1)) {
-    for (const requirementId of profile.nodes[state].requirement_ids || []) {
-      if (!satisfied.get(requirementId) && !missing.includes(requirementId)) missing.push(requirementId);
-    }
-  }
+  const requestedRequirements = new Set();
+  const collectRequirements = (state) => {
+    for (const prerequisite of profile.nodes[state].prerequisite_nodes || []) collectRequirements(prerequisite);
+    for (const requirementId of profile.nodes[state].requirement_ids || []) requestedRequirements.add(requirementId);
+  };
+  collectRequirements(contract.requested_state);
+  const missing = profile.requirements
+    .map((item) => item.requirement_id)
+    .filter((requirementId) => requestedRequirements.has(requirementId) && !satisfied.get(requirementId));
   const producerRequests = events.filter((event) => event.type === 'producer_requested' && event.payload?.contract_id === contract.contract_id);
   const producerTerminals = new Set(events.filter((event) => event.type === 'producer_terminal' && event.payload?.contract_id === contract.contract_id).map((event) => event.payload?.producer_id));
   const pending_producers = [...new Set(producerRequests.map((event) => event.payload?.producer_id).filter((id) => id && !producerTerminals.has(id)))].sort(codepointCompare);
   const relevantEligible = eligiblePrimary;
-  const currentness = relevantEligible.length > 0 && relevantEligible.every((event) => event.payload?.observed_at && event.payload?.source_cursor)
+  const malformedCurrentnessCandidate = primary.some((event) => {
+    const requirement = requirements.get(event.payload?.requirement_id);
+    if (!requirement || event.payload?.contract_id !== contract.contract_id) return false;
+    const expectedIdentity = profile.producers[requirement.producer_id]?.expected_identity;
+    const boundProducer = contract.named_producers.includes(requirement.producer_id)
+      && requirement.eligible_origins.includes(event.origin)
+      && event.payload?.producer_id === requirement.producer_id
+      && event.payload?.producer_identity === expectedIdentity;
+    return boundProducer && (!event.payload?.source_cursor || !isCanonicalObservedAt(event.payload?.observed_at));
+  });
+  const currentness = relevantEligible.length > 0 && !malformedCurrentnessCandidate
     ? 'AS_WITNESSED'
     : 'CURRENTNESS_UNPROVEN';
   const firstMissing = missing.length ? requirements.get(missing[0]) : null;

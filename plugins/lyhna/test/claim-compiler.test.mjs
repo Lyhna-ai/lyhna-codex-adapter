@@ -26,13 +26,12 @@ import {
 } from '../src/store.mjs';
 import { isolatedData } from './helpers.mjs';
 import { sha256 } from '../src/util.mjs';
-import { SOFTWARE_RELEASE_PROFILE, validateProfile } from '../src/claim-compiler.mjs';
+import { compileClaim, profileRequirementsHash, SOFTWARE_RELEASE_PROFILE, validateProfile } from '../src/claim-compiler.mjs';
 
 const pluginRoot = join(import.meta.dirname, '..');
 
 function contract(overrides = {}) {
   return {
-    contract_id: 'contract_0123456789abcdef0123456789abcdef',
     profile_id: 'software_release/v1',
     requested_state: 'LIVE_PROVEN',
     declared_gate_ids: ['closeout'],
@@ -42,7 +41,6 @@ function contract(overrides = {}) {
       'software_release/deployment',
       'software_release/canary'
     ],
-    objective_ref: 'objective_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
     verifier_id: 'software_release/canary_verifier',
     caps: { max_unsupported_attempts: 3 },
     ...overrides
@@ -153,6 +151,56 @@ test('profiles reject empty nodes and cycles before any contract can use them', 
   assert.throws(() => validateProfile(diamond), /AMBIGUOUS_SURFACE_PROJECTION/);
 });
 
+test('the compiler evaluates registered internal DAG nodes before projecting surface states', () => {
+  const profile = structuredClone(SOFTWARE_RELEASE_PROFILE);
+  profile.nodes.INTERNAL_CANARY = {
+    prerequisite_nodes: ['DEPLOYED'],
+    requirement_ids: ['registered_canary']
+  };
+  profile.nodes.LIVE_PROVEN = {
+    prerequisite_nodes: ['INTERNAL_CANARY'],
+    requirement_ids: ['terminal_canary_state']
+  };
+  validateProfile(profile);
+  const profileHash = profileRequirementsHash(profile);
+  const declared = {
+    ...contract(),
+    contract_id: 'contract_0123456789abcdef0123456789abcdef',
+    objective_ref: null,
+    profile_requirements_hash: profileHash
+  };
+  const subjects = {
+    source_identity: { source_ref: 'sha256:source' },
+    checks_terminal: { source_ref: 'sha256:source', checks_ref: 'sha256:checks' },
+    merge_identity: { source_ref: 'sha256:source', base_ref: 'sha256:main', merge_ref: 'sha256:merge' },
+    deployment_identity: { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' },
+    configuration_present: { artifact_ref: 'sha256:artifact', configuration_ref: 'sha256:config' },
+    registered_canary: { artifact_ref: 'sha256:artifact', canary_ref: 'sha256:canary' },
+    terminal_canary_state: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
+  };
+  const origins = { local: 'runtime_hook', repository: 'github_observed', production: 'registered_probe' };
+  const events = profile.requirements.map((requirement, index) => ({
+    seq: index + 1,
+    type: 'evidence_observed',
+    origin: origins[requirement.assurance_class],
+    event_hash: sha256(`internal-node-${index}`),
+    payload: {
+      contract_id: declared.contract_id,
+      profile_requirements_hash: profileHash,
+      requirement_id: requirement.requirement_id,
+      event_kind: requirement.event_kind,
+      producer_id: requirement.producer_id,
+      producer_identity: profile.producers[requirement.producer_id].expected_identity,
+      source_cursor: `cursor-${index}`,
+      observed_at: '2026-08-05T12:00:00Z',
+      subject_binding: subjects[requirement.requirement_id]
+    }
+  }));
+  const compiled = compileClaim({ profile, contract: declared, events });
+  assert.equal(compiled.state_results.INTERNAL_CANARY.supported, true);
+  assert.equal(compiled.highest_supported_state, 'LIVE_PROVEN');
+});
+
 test('only exact registered producer identities support production state and a fully supported run seals at LIVE_PROVEN', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-live-fixture', cwd: process.cwd() });
@@ -172,6 +220,12 @@ test('only exact registered producer identities support production state and a f
   observe(run.id, declared, 'terminal_canary_state', 'terminal_canary_state_observed', 'registered_probe', 'software_release/canary', { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' });
   const compiled = evaluateClaimGate(parent, declared.contract_id, 'closeout');
   assert.equal(compiled.highest_supported_state, 'LIVE_PROVEN');
+  observe(run.id, declared, 'deployment_identity', 'deployment_identity_observed', 'registered_probe', 'software_release/deployment', { merge_ref: 'sha256:newer-wrong-merge', artifact_ref: 'sha256:artifact' }, 'newer-deployment-mismatch');
+  const contradicted = evaluateClaimGate(parent, declared.contract_id, 'closeout');
+  assert.equal(contradicted.highest_supported_state, 'MERGED', 'newer mismatched identity cannot resurrect an older matching envelope');
+  assert(contradicted.contradictions.includes('IDENTITY_MISMATCH_deployment_identity'));
+  observe(run.id, declared, 'deployment_identity', 'deployment_identity_observed', 'registered_probe', 'software_release/deployment', { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' }, 'deployment-restored');
+  assert.equal(evaluateClaimGate(parent, declared.contract_id, 'closeout').highest_supported_state, 'LIVE_PROVEN');
   observe(run.id, declared, 'source_identity', 'source_identity_observed', 'mock_or_test', 'software_release/local', { source_ref: 'sha256:new-source' }, 'new-source');
   const stale = evaluateClaimGate(parent, declared.contract_id, 'closeout');
   assert.equal(stale.highest_supported_state, null, 'a newer source identity invalidates the older release chain');
@@ -182,6 +236,39 @@ test('only exact registered producer identities support production state and a f
   const result = checkpointOrSeal(parent, 'supported-stop');
   assert.equal(result.status, 'SEALED');
   assert.equal(getRunForTesting(run.id).state.compiled_claim.highest_supported_state, 'LIVE_PROVEN');
+});
+
+test('undeclared producers and malformed observation time never support a claim', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-producer-time-eligibility', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Reject unbound or undated evidence.' });
+  const declared = declareClaimContract(parent, contract({ named_producers: ['software_release/local', 'software_release/canary'] }));
+  seedBuilt(run.id, declared);
+  observe(run.id, declared, 'merge_identity', 'merge_identity_observed', 'github_observed', 'software_release/repository', { source_ref: 'sha256:source', base_ref: 'sha256:main', merge_ref: 'sha256:merge' });
+  observe(run.id, declared, 'deployment_identity', 'deployment_identity_observed', 'registered_probe', 'software_release/deployment', { merge_ref: 'sha256:merge', artifact_ref: 'sha256:artifact' });
+  observe(run.id, declared, 'configuration_present', 'configuration_presence_observed', 'registered_probe', 'software_release/deployment', { artifact_ref: 'sha256:artifact', configuration_ref: 'sha256:config' });
+  observe(run.id, declared, 'registered_canary', 'registered_canary_observed', 'registered_probe', 'software_release/canary', { artifact_ref: 'sha256:artifact', canary_ref: 'sha256:canary' });
+  appendEvent(run.id, {
+    type: 'evidence_observed',
+    origin: 'registered_probe',
+    payload: {
+      contract_id: declared.contract_id,
+      profile_requirements_hash: declared.profile_requirements_hash,
+      requirement_id: 'terminal_canary_state',
+      event_kind: 'terminal_canary_state_observed',
+      producer_id: 'software_release/canary',
+      producer_identity: 'registered_canary_probe',
+      source_cursor: 'cursor-malformed-time',
+      observed_at: 'not-a-timestamp',
+      subject_binding: { canary_ref: 'sha256:canary', terminal_state_ref: 'sha256:terminal' }
+    },
+    idempotencyKey: 'malformed-observation-time'
+  });
+  const compiled = evaluateClaimGate(parent, declared.contract_id, 'closeout');
+  assert.equal(compiled.highest_supported_state, 'BUILT');
+  assert(compiled.missing.includes('merge_identity'), 'evidence from an undeclared producer stays ineligible');
+  assert(compiled.missing.includes('terminal_canary_state'), 'malformed time stays ineligible');
+  assert.equal(compiled.currentness, 'CURRENTNESS_UNPROVEN');
 });
 
 test('unsupported closeout counts a contiguous fingerprint streak, seals honestly, and releases the session', { concurrency: false }, (t) => {
@@ -258,7 +345,7 @@ test('proof-mode v2 withholds objective, claim, diagnostic, and closeout prose b
   const closeReason = 'CLOSE_RAW_DO_NOT_PERSIST_9B14';
   const parent = mintSession({ sessionId: 'compiler-proof-fixture', cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective, privacyMode: 'proof' });
-  declareClaimContract(parent, contract());
+  const declared = declareClaimContract(parent, contract());
   const first = recordClaim(parent, statement, []);
   const second = recordClaim(parent, statement, []);
   assert.notEqual(first.payload.builder_claim_id, second.payload.builder_claim_id);
@@ -278,7 +365,7 @@ test('proof-mode v2 withholds objective, claim, diagnostic, and closeout prose b
   const capsule = JSON.parse(readFileSync(join(packet.directory, 'continuation.json'), 'utf8'));
   assert.equal(capsule.continuation_fold_version, 'v2');
   assert.equal(capsule.status, 'CLOSED_UNSUPPORTED');
-  assert.equal(capsule.claim_compiler.contract.contract_id, 'contract_0123456789abcdef0123456789abcdef');
+  assert.equal(capsule.claim_compiler.contract.contract_id, declared.contract_id);
 });
 
 test('proof mode rejects prose-shaped scope refs and unregistered event shapes before hashing', { concurrency: false }, (t) => {
@@ -286,12 +373,27 @@ test('proof mode rejects prose-shaped scope refs and unregistered event shapes b
   const parent = mintSession({ sessionId: 'compiler-proof-shape', cwd: process.cwd() });
   const run = beginRun(parent, { mode: 'full', objective: 'Private objective.', privacyMode: 'proof' });
   assert.throws(
-    () => declareClaimContract(parent, contract({ objective_ref: 'objective_customer_secret_merger_launch_plan' })),
-    /INVALID_OBJECTIVE_REF/
+    () => declareClaimContract(parent, contract({ objective_ref: `objective_${sha256('customer secret merger launch plan')}` })),
+    /OBJECTIVE_REF_NOT_ISSUED/
   );
+  assert.throws(
+    () => declareClaimContract(parent, contract({ contract_id: `contract_${sha256('caller chosen').slice(0, 32)}` })),
+    /CONTRACT_ID_NOT_ISSUED/
+  );
+  const declared = declareClaimContract(parent, contract({ objective_ref: run.objective_ref }));
+  assert.equal(declared.objective_ref, run.objective_ref);
   assert.throws(
     () => appendEvent(run.id, { type: 'future_text_event', origin: 'runtime_hook', payload: { objective: 'RAW_PROSE' }, idempotencyKey: 'future-text' }),
     /UNREGISTERED_PROOF_EVENT/
+  );
+  assert.throws(
+    () => appendEvent(run.id, {
+      type: 'hook_posttooluse',
+      origin: 'runtime_hook',
+      payload: { event: 'PostToolUse', unknown_text_field: 'RAW_PROSE_MARKER' },
+      idempotencyKey: 'known-event-unknown-field'
+    }),
+    /UNREGISTERED_PROOF_FIELD/
   );
   assert.equal(getRunForTesting(run.id).events.some((event) => JSON.stringify(event).includes('RAW_PROSE')), false);
 });
@@ -335,7 +437,7 @@ test('an open v2 contract rotates onto the successor session without a second le
   const secondParent = mintSession({ sessionId: 'compiler-window-two', cwd: process.cwd() });
   const resumed = beginRun(secondParent, { mode: 'full', objective: 'Resume.', continuesFrom: capsuleRef });
   assert.equal(resumed.id, run.id, 'open continuation rotates the same run rather than forking it');
-  assert.equal(resumed.claim_contract.contract_id, 'contract_0123456789abcdef0123456789abcdef');
+  assert.equal(resumed.claim_contract.contract_id, run.claim_contract_id);
   assert.throws(() => recordClaim(firstParent, 'Old lease must be revoked.', []), /NO_ACTIVE_RUN/);
   assert.equal(getCapability(childCapability).parent_capability_hash, sha256(secondParent));
   const childReceipt = sealChildByAgent({ sessionId: firstSession, agentId: 'pending-child' });
@@ -384,7 +486,7 @@ test('an interrupted contract declaration is reconstructed from the ledger and r
   writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
 
   const resumed = beginRun(parent, { mode: 'full', objective: 'Resume.' });
-  assert.equal(resumed.claim_contract.contract_id, contract().contract_id);
+  assert.equal(resumed.claim_contract.contract_id, run.claim_contract_id);
   assert.throws(() => declareClaimContract(parent, contract({ requested_state: 'BUILT' })), /CLAIM_CONTRACT_ALREADY_DECLARED/);
   assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'claim_contract_declared').length, 1);
 });
@@ -414,6 +516,39 @@ test('an interrupted unsupported seal recovers its honest terminal status instea
   const final = getRunForTesting(run.id);
   assert.equal(final.state.terminal_status, 'CLOSED_UNSUPPORTED');
   assert.equal(JSON.parse(readFileSync(join(packet.directory, 'receipt.json'), 'utf8')).status, 'CLOSED_UNSUPPORTED');
+});
+
+test('a replayed third unsupported Stop finishes sealing after a crash behind the envelope', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-envelope-crash-replay', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Seal the third unsupported attempt.' });
+  declareClaimContract(parent, contract());
+  requestClose(parent, 'Close unsupported after three attempts.');
+  checkpointOrSeal(parent, 'envelope-crash-1');
+  checkpointOrSeal(parent, 'envelope-crash-2');
+  checkpointOrSeal(parent, 'envelope-crash-3');
+
+  const packet = getRunForTesting(run.id);
+  const envelope = packet.events.at(-2);
+  assert.equal(envelope.type, 'closeout_envelope_generated');
+  writeFileSync(join(packet.directory, 'events.jsonl'), `${packet.events.slice(0, -1).map((event) => JSON.stringify(event)).join('\n')}\n`);
+  const state = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
+  state.sealed = false;
+  state.terminal_status = null;
+  state.ledger_count = envelope.seq;
+  state.ledger_tip = envelope.event_hash;
+  writeFileSync(join(packet.directory, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
+  for (const name of ['seal-anchor.json', 'checkpoint-anchor.json', 'receipt.json', 'RECEIPT.md', 'continuation.json', 'HANDOFF.md']) {
+    rmSync(join(packet.directory, name), { force: true });
+  }
+
+  const replayed = checkpointOrSeal(parent, 'envelope-crash-3');
+  assert.equal(replayed.status, 'CLOSED_UNSUPPORTED');
+  const final = getRunForTesting(run.id);
+  assert.equal(final.state.sealed, true);
+  assert.equal(final.events.filter((event) => event.type === 'closeout_attempted').length, 3);
+  assert.equal(final.events.filter((event) => event.type === 'closeout_envelope_generated').length, 1);
+  assert.equal(final.events.at(-1).type, 'run_sealed');
 });
 
 test('a committed lease-transfer event completes idempotently after projection writes are interrupted', { concurrency: false }, (t) => {

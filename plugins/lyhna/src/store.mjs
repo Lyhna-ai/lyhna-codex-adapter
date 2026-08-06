@@ -32,16 +32,51 @@ import {
 
 const ZERO_HASH = '0'.repeat(64);
 const CONFIGURED_HOOKS = ['PermissionRequest', 'PostToolUse', 'PreToolUse', 'SessionStart', 'Stop', 'SubagentStart', 'SubagentStop', 'UserPromptSubmit'];
-const PROOF_EVENT_TYPES = new Set([
-  'builder_claim', 'checkpoint_anchor', 'child_receipt_retrieved', 'child_receipt_sealed',
-  'child_started', 'child_stop_observed', 'claim_compiled', 'claim_contract_declared',
-  'claim_rejected', 'close_deferred', 'close_requested', 'closeout_attempted',
-  'closeout_envelope_generated', 'continuation_lease_transferred', 'diagnostic_emitted',
-  'diagnostic_resolved', 'evaluation_claimed', 'evaluation_finding', 'evaluation_requested',
-  'evidence_observed', 'gate_evaluated', 'hook_permissionrequest', 'hook_posttooluse',
-  'hook_pretooluse', 'hook_subagentstart', 'hook_subagentstop', 'hook_userpromptsubmit',
-  'pr_refreshed', 'pr_snapshot', 'producer_requested', 'producer_terminal', 'run_begun',
-  'run_sealed', 'turn_checkpoint'
+const COMPILED_CLAIM_FIELDS = [
+  'contract_id', 'profile_ref', 'requested_state', 'highest_supported_state',
+  'maximal_supported_nodes', 'state_results', 'missing', 'pending_producers',
+  'contradictions', 'currentness', 'next_verifier', 'eligible_evidence_frontier',
+  'material_control_frontier', 'input_digest', 'claim_contract_ref', 'fold_version'
+];
+const HOOK_PROOF_FIELDS = ['event', 'event_id', 'model', 'tool_name', 'cwd_ref', 'payload_ref', 'support', 'outcome'];
+// Proof mode is an at-write contract. Every event family has a closed top-level schema so a new
+// caller or future field cannot silently smuggle prose into the hash chain before its projection is
+// deliberately specified here.
+const PROOF_EVENT_FIELDS = new Map([
+  ['builder_claim', ['builder_claim_id', 'builder_claim_ordinal', 'evidence_refs', 'statement', 'statement_ref', 'statement_text', 'text_withheld']],
+  ['checkpoint_anchor', ['covers_seq', 'tip_hash', 'state_hash', 'receipt_json_hash', 'receipt_markdown_hash', 'receipt_renderer', 'continuation_fold_version']],
+  ['child_receipt_retrieved', ['receipt_id', 'content_ref']],
+  ['child_receipt_sealed', ['receipt_id', 'role', 'status', 'content_ref']],
+  ['child_started', ['child_id', 'role', 'status']],
+  ['child_stop_observed', ['child_id', 'role', 'status']],
+  ['claim_compiled', COMPILED_CLAIM_FIELDS],
+  ['claim_contract_declared', ['contract', 'profile_structural', 'profile_requirements_hash', 'profile_display', 'contract_display', 'text_withheld']],
+  ['claim_rejected', ['code', 'capability_kind']],
+  ['close_deferred', ['blockers', 'receipt_renderer']],
+  ['close_requested', ['request_id', 'reason', 'reason_ref', 'text_withheld']],
+  ['closeout_attempted', ['claim_contract_ref', 'gate_id', 'blocker_fingerprint', 'ordinal', 'attempt_sequence', 'input_digest', 'eligible_evidence_frontier', 'material_control_frontier', 'blockers']],
+  ['closeout_envelope_generated', ['envelope_id', 'outcome', 'profile_id', 'requested_state', 'supported_state', 'scope_ref', 'eligible_evidence_frontier', 'material_control_frontier', 'input_digest', 'blockers', 'next_verifier', 'narrative', 'text_withheld']],
+  ['continuation_lease_transferred', ['capsule_ref', 'predecessor_parent_ref', 'successor_parent_ref', 'active_child_refs']],
+  ['diagnostic_emitted', ['diagnostic_id', 'diagnostic_status', 'claim_contract_ref', 'input_digest', 'blocker_fingerprint', 'supported_state', 'requested_state', 'missing', 'next_verifier', 'message', 'narrative', 'text_withheld']],
+  ['diagnostic_resolved', ['diagnostic_id', 'diagnostic_status', 'claim_contract_ref', 'input_digest', 'blocker_fingerprint', 'supported_state', 'requested_state', 'missing', 'next_verifier', 'message', 'narrative', 'text_withheld']],
+  ['evaluation_claimed', ['evaluation_request_id', 'child_agent_hash']],
+  ['evaluation_finding', ['finding_id', 'finding_ordinal', 'statement', 'statement_text', 'statement_ref', 'evidence_refs', 'evaluation_request_id', 'expected_head', 'checkout_head_before', 'checkout_head_after', 'checkout_clean_before', 'checkout_clean_after', 'checkout_detached_before', 'checkout_detached_after', 'checkout_integrity', 'text_withheld']],
+  ['evaluation_requested', ['evaluation_request_id', 'snapshot_id', 'expected_head', 'trigger']],
+  ['evidence_observed', ['contract_id', 'profile_requirements_hash', 'requirement_id', 'event_kind', 'producer_id', 'producer_identity', 'source_cursor', 'observed_at', 'subject_binding']],
+  ['gate_evaluated', [...COMPILED_CLAIM_FIELDS, 'gate_id']],
+  ['hook_permissionrequest', HOOK_PROOF_FIELDS],
+  ['hook_posttooluse', HOOK_PROOF_FIELDS],
+  ['hook_pretooluse', HOOK_PROOF_FIELDS],
+  ['hook_subagentstart', HOOK_PROOF_FIELDS],
+  ['hook_subagentstop', HOOK_PROOF_FIELDS],
+  ['hook_userpromptsubmit', HOOK_PROOF_FIELDS],
+  ['pr_refreshed', ['snapshot_id', 'observed_head', 'status']],
+  ['pr_snapshot', ['id', 'repository', 'pr_number', 'head_before', 'head_after', 'status', 'counts', 'failures']],
+  ['producer_requested', ['contract_id', 'claim_contract_ref', 'producer_id', 'expected_identity']],
+  ['producer_terminal', ['contract_id', 'claim_contract_ref', 'producer_id', 'producer_identity', 'status', 'source_cursor', 'observed_at', 'evidence_refs']],
+  ['run_begun', ['mode', 'privacy_mode', 'objective_origin', 'objective_ref', 'claim_contract_id', 'text_withheld', 'invocation', 'open_predecessors', 'inherits']],
+  ['run_sealed', ['status', 'receipt_renderer', 'continuation_fold_version', 'claim_contract_ref', 'supported_state', 'requested_state', 'closeout_envelope_ref']],
+  ['turn_checkpoint', ['status', 'receipt_renderer']]
 ]);
 const EVALUATION_TRIGGERS = new Set(['initial', 'post_fix_reeval', 'gate_audit', 're_examination']);
 // An evaluation is terminal once its outcome is fixed: recorded, checkout-integrity excepted,
@@ -792,13 +827,14 @@ function dropCheckpointAnchor(runId) {
 // Legacy ledgers are never rewritten; this function is reached only for new appends.
 function projectEventPayloadForPrivacy(state, type, payload) {
   if (state.privacy_mode !== 'proof' || !payload || typeof payload !== 'object') return payload;
-  assert(PROOF_EVENT_TYPES.has(type), 'UNREGISTERED_PROOF_EVENT');
-  const only = (allowed) => {
+  const registeredFields = PROOF_EVENT_FIELDS.get(type);
+  assert(registeredFields, 'UNREGISTERED_PROOF_EVENT');
+  const only = (allowed = registeredFields) => {
     const unknown = Object.keys(payload).find((key) => !allowed.includes(key));
     assert(!unknown, 'UNREGISTERED_PROOF_FIELD');
   };
+  only();
   if (type === 'builder_claim') {
-    only(['builder_claim_id', 'builder_claim_ordinal', 'evidence_refs', 'statement', 'statement_ref', 'statement_text', 'text_withheld']);
     return {
       builder_claim_id: payload.builder_claim_id,
       builder_claim_ordinal: payload.builder_claim_ordinal,
@@ -807,28 +843,42 @@ function projectEventPayloadForPrivacy(state, type, payload) {
     };
   }
   if (type === 'evaluation_finding') {
-    only(['finding_id', 'finding_ordinal', 'statement', 'statement_text', 'statement_ref', 'evidence_refs', 'evaluation_request_id', 'expected_head', 'checkout_head_before', 'checkout_head_after', 'checkout_clean_before', 'checkout_clean_after', 'checkout_detached_before', 'checkout_detached_after', 'checkout_integrity', 'text_withheld']);
     const { statement: _statement, statement_text: _text, statement_ref: _ref, ...structural } = payload;
     return { ...structural, text_withheld: true };
   }
   if (type === 'close_requested') {
-    only(['request_id', 'reason', 'reason_ref', 'text_withheld']);
     return { request_id: payload.request_id, text_withheld: true };
   }
   if (type === 'claim_contract_declared') {
-    only(['contract', 'profile_structural', 'profile_requirements_hash', 'profile_display', 'contract_display', 'text_withheld']);
     const { profile_display: _display, contract_display: _contractDisplay, ...structural } = payload;
     return { ...structural, text_withheld: true };
   }
   if (type === 'diagnostic_emitted' || type === 'diagnostic_resolved') {
-    only(['diagnostic_id', 'diagnostic_status', 'claim_contract_ref', 'input_digest', 'blocker_fingerprint', 'supported_state', 'requested_state', 'missing', 'next_verifier', 'message', 'narrative', 'text_withheld']);
     const { message: _message, narrative: _narrative, ...structural } = payload;
     return { ...structural, text_withheld: true };
   }
   if (type === 'closeout_envelope_generated') {
-    only(['envelope_id', 'outcome', 'profile_id', 'requested_state', 'supported_state', 'scope_ref', 'eligible_evidence_frontier', 'material_control_frontier', 'input_digest', 'blockers', 'next_verifier', 'narrative', 'text_withheld']);
     const { narrative: _narrative, ...structural } = payload;
     return { ...structural, text_withheld: true };
+  }
+  if (type === 'pr_snapshot') {
+    const countKeys = ['files', 'checks', 'reviews', 'review_comments', 'issue_comments'];
+    const unknownCount = Object.keys(payload.counts || {}).find((key) => !countKeys.includes(key));
+    assert(!unknownCount, 'UNREGISTERED_PROOF_FIELD');
+    return {
+      ...payload,
+      failures: (payload.failures || []).map((failure) => ({
+        object: String(failure?.object || ''),
+        error_ref: reference(String(failure?.error || '')),
+        text_withheld: true
+      }))
+    };
+  }
+  if (type === 'evidence_observed') {
+    const requirement = state.claim_profile?.requirements?.find((item) => item.requirement_id === payload.requirement_id);
+    assert(requirement, 'UNREGISTERED_PROOF_FIELD');
+    const unknownBinding = Object.keys(payload.subject_binding || {}).find((key) => !requirement.subject_fields.includes(key));
+    assert(!unknownBinding, 'UNREGISTERED_PROOF_FIELD');
   }
   return payload;
 }
@@ -1051,7 +1101,10 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
       // Retained alongside the structural summary, exactly as claim text is: the owner's own request,
       // on the owner's own machine. Proof mode projects it away for a packet that leaves.
       objective_text: privacy === 'proof' ? '' : pending?.text || objectiveText(objective),
-      objective_ref: privacy === 'proof' ? null : pending?.ref || sha256(String(objective || '')),
+      // Supervisor-issued and prose-independent. Callers may reuse this exact opaque reference in a
+      // claim contract, but cannot mint a prompt-derived digest that proof mode would preserve.
+      objective_ref: `objective_${sha256(canonicalJson({ kind: 'run_objective', run_id: runId }))}`,
+      claim_contract_id: `contract_${sha256(canonicalJson({ kind: 'claim_contract', run_id: runId })).slice(0, 32)}`,
       objective_text_withheld: privacy === 'proof',
       objective_origin: pending ? 'runtime_hook' : 'agent_reported',
       configured_hooks: CONFIGURED_HOOKS,
@@ -1079,6 +1132,8 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
       mode,
       privacy_mode: privacy,
       objective_origin: state.objective_origin,
+      objective_ref: state.objective_ref,
+      claim_contract_id: state.claim_contract_id,
       ...(privacy === 'proof' ? { text_withheld: true } : {})
     };
     if (pending) runBegunPayload.invocation = { matched_form: pending.matched_form, mention_offset: pending.mention_offset };
@@ -1510,7 +1565,18 @@ export function declareClaimContract(capability, rawContract) {
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
     assert(!state.claim_contract, 'CLAIM_CONTRACT_ALREADY_DECLARED');
-    const { contract, profile } = validateClaimContract(rawContract, state.privacy_mode);
+    const issuedContractId = state.claim_contract_id || `contract_${sha256(canonicalJson({ kind: 'claim_contract', run_id: runId })).slice(0, 32)}`;
+    assert(rawContract?.contract_id === undefined
+      || rawContract?.contract_id === null
+      || rawContract?.contract_id === issuedContractId, 'CONTRACT_ID_NOT_ISSUED');
+    assert(rawContract?.objective_ref === undefined
+      || rawContract?.objective_ref === null
+      || rawContract?.objective_ref === state.objective_ref, 'OBJECTIVE_REF_NOT_ISSUED');
+    const { contract, profile } = validateClaimContract({
+      ...rawContract,
+      contract_id: issuedContractId,
+      objective_ref: state.objective_ref
+    }, state.privacy_mode);
     const event = appendEventUnlocked(runId, state, {
       type: 'claim_contract_declared',
       origin: 'mcp_routed',
@@ -1887,6 +1953,21 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     const { events: preEvents } = adoptTerminalLedgerSeal(runId, current);
     if (current.sealed) {
       return repairSeal(runId);
+    }
+    // A closeout envelope is itself the durable decision to terminate. If the process died after
+    // appending it but before run_sealed, a delivery replay must finish that same seal rather than
+    // taking the generic checkpoint replay branch and leaving the run open forever.
+    const pendingEnvelope = [...preEvents].reverse().find((event) => event.type === 'closeout_envelope_generated');
+    if (pendingEnvelope) {
+      const outcome = pendingEnvelope.payload?.outcome;
+      assert(outcome === 'CLOSED_UNSUPPORTED' || outcome === 'SUPPORTED', 'INVALID_CLOSEOUT_ENVELOPE');
+      current.closeout_envelope = { ...pendingEnvelope.payload, event_ref: `sha256:${pendingEnvelope.event_hash}` };
+      return finalizeRunSealUnlocked(runId, current, outcome === 'CLOSED_UNSUPPORTED' ? 'CLOSED_UNSUPPORTED' : 'SEALED', {
+        claim_contract_ref: current.claim_contract?.claim_contract_ref || null,
+        supported_state: pendingEnvelope.payload?.supported_state ?? null,
+        requested_state: pendingEnvelope.payload?.requested_state ?? null,
+        closeout_envelope_ref: current.closeout_envelope.event_ref
+      });
     }
     // Every Stop records exactly one delivery-keyed turn_checkpoint — the "a Stop boundary was
     // observed" fact — and repeated-hook idempotency (SPEC) requires a replayed Stop to NOT re-observe
