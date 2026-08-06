@@ -1,8 +1,8 @@
 # AGENTS.md
 
-- Read `SPEC.md` before changing behavior. For claim-compiler work in v0.1.33 through v0.1.36,
+- Read `SPEC.md` before changing behavior. For claim-compiler work in v0.1.33 and later,
   also read the normative ratified addendum at
-  `docs/proposals/CLAIM-COMPILER-SPEC-2026-08-05.md`.
+  `docs/proposals/CLAIM-COMPILER-SPEC-2026-08-05.md` until a named successor spec supersedes it.
 - Keep all product code in this repository. Do not modify `lyhna-witness`, `lyhna-mcp-proxy`, or `lyhna-core` in a sibling pass.
 - Lyhna records coverage-scoped evidence; it never approves, certifies, merges, deploys, or declares
   correctness. At an explicitly declared claim gate it may refuse an unsupported Lyhna claim or

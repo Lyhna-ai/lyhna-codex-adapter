@@ -69,10 +69,13 @@ projection. Multiple incomparable supported internal nodes are returned as
 surface projection. A profile with an ambiguous or missing projection is rejected before use.
 
 A profile snapshot is canonicalized and stored as ledger-owned immutable bytes in
-`claim_contract_declared`; its hash is the profile identity. The v2 capsule carries the canonical
-snapshot, so deleting or editing a project profile after declaration cannot change offline
-continuation or refolding. A locally declared profile states the chosen requirements; it does not
-prove those requirements are sufficient.
+`claim_contract_declared`; its hash is the profile identity. The schema separates machine-required
+structural fields from optional human-authored display metadata. A `verified_context` v2 capsule
+carries the full canonical snapshot. A `proof` capsule carries the complete structural projection,
+the full snapshot hash, and deterministic withheld markers instead of display metadata. Either
+projection contains everything the pure compiler needs, so deleting or editing a project profile
+after declaration cannot change offline continuation or refolding. A locally declared profile
+states the chosen requirements; it does not prove those requirements are sufficient.
 
 An immutable contract contains:
 
@@ -152,11 +155,16 @@ closeout_envelope_generated
 enforcement_required
 ```
 
-Every derived event carries `claim_contract_ref`, `fold_version`, `input_digest`, and the eligible
-evidence frontier it summarized. The frontier is the canonical digest of requirement-eligible
-`evidence_observed` projections only; control/history events do not advance it. A fresh fold
-recomputes only from eligible envelopes. Unchanged input does not append another compile result,
-diagnostic, or resolution.
+Every derived event carries `claim_contract_ref`, `fold_version`, `input_digest`, the eligible
+evidence frontier, and the material-control frontier it summarized. The eligible frontier is the
+canonical digest of requirement-eligible `evidence_observed` projections only and alone can support
+a requirement. The material-control frontier covers the contract, producer requests and terminal
+states, gate samples, and current successor dispositions because they affect pending producers,
+currentness, blockers, or the quiet barrier. `closeout_attempted`, diagnostic, envelope, and other
+derived/history events are excluded from both compiler frontiers. `input_digest` commits to the
+profile/contract plus both frontiers, so a new requested reviewer or gate sample recomputes state
+without laundering that control event into evidence. Unchanged input does not append another
+compile result, diagnostic, or resolution.
 
 The existing origin enum is extended to exactly:
 
@@ -195,6 +203,7 @@ contradictions
 currentness
 next_verifier
 eligible_evidence_frontier
+material_control_frontier
 input_digest
 ```
 
@@ -210,9 +219,11 @@ the next parent `PostToolUse` or `Stop` surfaces the persisted delta.
 A requested reviewer records expected actor, reviewer type, exact head, and terminal verdict
 schema. Its actor and hook-issued child capability must differ from the builder/parent. An eligible
 review envelope must bind to a separately sealed child receipt containing the frozen head, detached
-checkout evidence, clean tracked tree before and after, commands actually run, and terminal
-verdict. A builder-attributed verdict, same-capability review, attached checkout, dirty checkout,
-or head mismatch is `INVALID` and cannot satisfy a gate. Two requirements cannot be satisfied by
+checkout evidence, clean tracked tree before and after, bounded redacted check names/statuses with
+evidence hashes or references, and terminal verdict. Full commands, arguments, output, environment,
+tokens, and private paths are never stored. A builder-attributed verdict, same-capability review,
+attached checkout, dirty checkout, or head mismatch is `INVALID` and cannot satisfy a gate. Two
+requirements cannot be satisfied by
 one actor unless the profile explicitly declares that identity for both. Terminal verdicts are:
 
 ```text
@@ -248,9 +259,9 @@ declaration inherits that value by reference and cannot change it.
 - `proof` follows the existing at-egress projection model: the local ledger retains the same
   bounded redacted source text, while capsule, receipt, handoff, continuation prompt, and exported
   packet project objective-like prose, contract text, diagnostic prose, and closeout narrative
-  away before those artifact hashes are derived. Stable labels, state IDs, canonical profile
-  snapshot, evidence references, producer identities, digests, and deterministic `text_withheld`
-  markers remain.
+  away before those artifact hashes are derived. Stable labels, state IDs, the privacy-safe
+  structural profile projection, evidence references, producer identities, digests, and
+  deterministic `text_withheld` markers remain.
 
 Proof-mode exported artifacts must not contain the withheld text. The local ledger is protected by
 the existing local-data boundary and redaction rules; proof mode is not represented as an at-write
@@ -265,8 +276,8 @@ The implementation must:
 - set `CURRENT_FOLD_VERSION` to `v2` for new anchors;
 - add a v2 reducer to the lineage verifier;
 - keep every existing legacy fixture byte-identical;
-- carry the canonical profile snapshot, contract, compiled state, pending producers, diagnostic
-  state, close-attempt frontier, and gate samples in the v2 capsule;
+- carry the mode-appropriate full or structural profile projection, contract, compiled state,
+  pending producers, diagnostic state, close-attempt frontier, and gate samples in the v2 capsule;
 - inherit an open contract as open across a window boundary;
 - never reopen a sealed contract.
 
@@ -319,7 +330,9 @@ attached-checkout review, actor and head mismatch, pending and late-finding revi
 page-two GitHub data, a diamond profile with ambiguous surface projection, deletion of a declared
 custom profile, cross-process diagnostic deduplication and resolution, three cross-process Stop
 attempts with one stable blocker fingerprint, eligible evidence resetting that fingerprint,
-post-seal append corruption, explicit successor supersession, proof-mode export leakage,
+material control changing compiler state without satisfying evidence, evaluator command/argument
+leakage, post-seal append corruption, explicit successor supersession, proof-mode profile/display
+and other export leakage,
 open-contract continuation, free-form completion narration, full backward-compatible `tools/list`,
 privacy-mode override rejection, and three distinct recurrence incidents.
 
