@@ -82,12 +82,6 @@ const EVENT_PAYLOAD_FIELDS = new Map([
 ]);
 const PRODUCER_TERMINAL_STATUSES = new Set(['CLEAN', 'FINDINGS', 'INVALID', 'STALE']);
 const EVALUATION_TRIGGERS = new Set(['initial', 'post_fix_reeval', 'gate_audit', 're_examination']);
-const CLOSEOUT_STREAK_RESET_TYPES = new Set([
-  'producer_requested', 'producer_terminal',
-  'child_started', 'child_stop_observed', 'child_receipt_sealed', 'child_receipt_retrieved',
-  'evaluation_requested', 'evaluation_claimed', 'evaluation_finding',
-  'gate_sample_observed', 'claim_superseded'
-]);
 // An evaluation is terminal once its outcome is fixed: recorded, checkout-integrity excepted,
 // or superseded by a moved head. Non-terminal (OPEN/CLAIMED) means a retry re-attaches; terminal
 // means a fresh begin_evaluation on the same snapshot is a distinct re-examination.
@@ -145,6 +139,7 @@ function validateCloseoutAttemptBinding(state, origin, payload, eventSeq = null)
   ));
   const prior = priorAttempts.at(-1);
   const expectedOrdinal = closeoutAttemptStreakContinues(
+    state,
     ledgerEvents,
     prior,
     payload.blocker_fingerprint,
@@ -157,16 +152,23 @@ function validateCloseoutAttemptBinding(state, origin, payload, eventSeq = null)
   assert(payload.ordinal === expectedOrdinal, code);
 }
 
-function closeoutAttemptStreakContinues(events, prior, fingerprint, eligibleEvidenceFrontier, beforeSeq = null) {
+function closeoutAttemptStreakContinues(state, events, prior, fingerprint, eligibleEvidenceFrontier, beforeSeq = null) {
   if (!prior || prior.payload?.blocker_fingerprint !== fingerprint) return false;
   // Eligible evidence changes the effective support frontier. Ineligible observations remain
   // history but do not reset the cap, matching the compiler's primary/eligible firewall.
   if (prior.payload?.eligible_evidence_frontier !== eligibleEvidenceFrontier) return false;
-  return !events.some((event) => (
-    event.seq > prior.seq
-    && (beforeSeq === null || event.seq < beforeSeq)
-    && CLOSEOUT_STREAK_RESET_TYPES.has(event.type)
+  const baselineEvents = events.filter((event) => event.seq <= prior.seq);
+  const baselineBlockers = canonicalJson(claimCloseoutBlockersForEvents(state, baselineEvents));
+  const intervening = events.filter((event) => (
+    event.seq > prior.seq && (beforeSeq === null || event.seq < beforeSeq)
   ));
+  // Reconstruct the normalized blocker set at every witnessed frontier. This catches a real
+  // A -> B -> A transition while ignoring events (including repeated findings or PR observations)
+  // that do not change what actually blocks closeout.
+  return !intervening.some((event) => canonicalJson(claimCloseoutBlockersForEvents(
+    state,
+    events.filter((candidate) => candidate.seq <= event.seq)
+  )) !== baselineBlockers);
 }
 
 function validateCloseoutEnvelopeBinding(state, origin, payload) {
@@ -1523,7 +1525,7 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
   assert(mode === 'full' || mode === 'pr_only', 'INVALID_MODE');
   const privacy = resolvePrivacyMode(privacyMode);
   const continuationRef = String(continuesFrom || '').trim();
-  if (privacy === 'proof' && continuationRef) assert(/^[a-f0-9]{64}$/.test(continuationRef), 'INVALID_CAPSULE_REF');
+  if (continuationRef) assert(/^[a-f0-9]{64}$/.test(continuationRef), 'INVALID_CAPSULE_REF');
   continuesFrom = continuationRef;
   return withLock(sessionLockPath(capability), () => withLock(continuationLockPath(), () => {
     const currentParent = getCapability(capability);
@@ -2048,8 +2050,10 @@ export function recordEvaluation(childCapability, evaluationId, finding, evidenc
     const cleanAfter = checkout.clean_after ?? null;
     const observedHeadBefore = checkout.head_before ?? item.checkout_head_before;
     const observedHeadAfter = checkout.head_after ?? null;
-    const headBefore = current.privacy_mode === 'proof' ? proofSafeGitObjectId(observedHeadBefore) : observedHeadBefore;
-    const headAfter = current.privacy_mode === 'proof' ? proofSafeGitObjectId(observedHeadAfter) : observedHeadAfter;
+    // Git identities are opaque structural controls in every privacy mode. Invalid caller strings
+    // become an integrity exception, but never enter the ledger or mutable projection as prose.
+    const headBefore = proofSafeGitObjectId(observedHeadBefore);
+    const headAfter = proofSafeGitObjectId(observedHeadAfter);
     const detachedBefore = checkout.detached_before ?? item.checkout_detached_before;
     const detachedAfter = checkout.detached_after ?? null;
     const integrityOk = observedHeadBefore === item.expected_head && observedHeadAfter === item.expected_head
@@ -2255,11 +2259,11 @@ function claimSupportPosition(compiled, contract) {
     : `evidence supports ${supported}, not requested ${contract.requested_state}`;
 }
 
-function claimLifecycleBlockers(state) {
+function claimLifecycleBlockers(state, ledgerEvents = null) {
   // Lifecycle caches are projections for the UI and mutation paths; they are not closeout
   // authority. Rebuild the join from witnessed events every time so editing state.json cannot
   // turn an active child or evaluator into a completed one.
-  const { events } = parseLedger(state.id);
+  const events = ledgerEvents || parseLedger(state.id).events;
   const children = new Map();
   const evaluations = new Map();
   const sealedReceipts = new Map();
@@ -2337,14 +2341,23 @@ function claimLifecycleBlockers(state) {
   return [...new Set(blockers)].sort();
 }
 
-function claimCloseoutBlockers(state, compiled) {
+function claimCloseoutBlockers(state, compiled, ledgerEvents = null) {
   return [...new Set([
     ...compiled.missing.map((item) => `MISSING_${item}`),
     ...compiled.pending_producers.map((item) => `PENDING_${item}`),
     ...compiled.contradictions,
     ...(compiled.currentness === 'AS_WITNESSED' ? [] : ['CURRENTNESS_UNPROVEN']),
-    ...claimLifecycleBlockers(state)
+    ...claimLifecycleBlockers(state, ledgerEvents)
   ])].sort();
+}
+
+function claimCloseoutBlockersForEvents(state, events) {
+  const compiled = compileClaim({
+    profile: state.claim_profile,
+    contract: state.claim_contract,
+    events
+  });
+  return claimCloseoutBlockers(state, compiled, events);
 }
 
 function claimCloseoutBlockerFingerprint(state, gateId, compiled) {
@@ -2780,6 +2793,14 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         const nextVerifier = current.compiled_claim?.next_verifier || 'not available';
         assert(current.claim_contract && ordinal > 0, 'INVALID_CLOSEOUT_ATTEMPT');
         const reason = `Lyhna ${claimSupportPosition(current.compiled_claim, current.claim_contract)}. Missing or conflicting evidence: ${blockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${nextVerifier}.`;
+        ensureClaimDiagnosticUnlocked(
+          runId,
+          current,
+          current.compiled_claim,
+          interruptedAttempt.payload.blocker_fingerprint,
+          reason
+        );
+        saveState(current);
         if (attemptCompleted) {
           assert(ordinal < current.claim_contract.caps.max_unsupported_attempts, 'CLOSEOUT_ATTEMPT_INCOMPLETE');
           return {
@@ -2898,6 +2919,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         const latestAttempt = [...attemptEvents].reverse().find((event) => event.type === 'closeout_attempted');
         // Ordinals count only the maximal contiguous streak of one fingerprint: A-B-A is A1,B1,A1.
         const ordinal = closeoutAttemptStreakContinues(
+          current,
           attemptEvents,
           latestAttempt,
           fingerprint,

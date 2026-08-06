@@ -708,7 +708,7 @@ test('an inherited legacy checkpoint is classified by its own anchor, not the up
   checkpointOrSeal(parent, 'mixed-stop-2');
 
   const successorSession = mintSession({ sessionId: 'mixed-next' });
-  const successor = beginRun(successorSession, { mode: 'full', objective: 'Successor.', continuesFrom: 'placeholder' });
+  const successor = beginRun(successorSession, { mode: 'full', objective: 'Successor.', continuesFrom: 'f'.repeat(64) });
   checkpointOrSeal(successorSession, 'mixed-next-stop');
   const successorDir = getRunForTesting(successor.id).directory;
 
@@ -785,7 +785,7 @@ test('an inherited archive declaring an unimplemented generation fails safe, not
   checkpointOrSeal(parent, 'unkfold-stop-2');
 
   const successorSession = mintSession({ sessionId: 'unkfold-next' });
-  const successor = beginRun(successorSession, { mode: 'full', objective: 'Successor.', continuesFrom: 'placeholder' });
+  const successor = beginRun(successorSession, { mode: 'full', objective: 'Successor.', continuesFrom: 'e'.repeat(64) });
   checkpointOrSeal(successorSession, 'unkfold-next-stop');
   const successorDir = getRunForTesting(successor.id).directory;
 

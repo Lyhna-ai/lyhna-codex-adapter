@@ -1334,6 +1334,38 @@ test('unrelated PR observations do not reset an unchanged closeout attempt strea
   assert.equal(checkpointOrSeal(parent, 'noop-pr-stop-2').closeout_attempt_ordinal, 2);
 });
 
+test('a repeated terminal evaluation finding does not reset an unchanged blocker streak', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'compiler-noop-evaluation-finding-streak';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Count blocker changes, not finding events.' });
+  declareClaimContract(parent, contract());
+  const head = 'a'.repeat(40);
+  const snapshot = addPrSnapshot(parent, {
+    id: 'noop_evaluation_snapshot', repository: 'Lyhna-ai/example', pr_number: 14,
+    base_sha: 'b'.repeat(40), head_before: head, head_after: head,
+    status: 'CONSISTENT', files: [], checks: [], reviews: [], review_comments: [],
+    issue_comments: [], failures: []
+  });
+  const evaluation = beginEvaluation(parent, snapshot.id, {
+    path: process.cwd(), head, clean: true, detached: true
+  });
+  const child = mintChild({ sessionId, agentId: 'noop-evaluation-reviewer' });
+  claimEvaluation(child, evaluation.id);
+  const checkout = {
+    head_before: head, head_after: head,
+    clean_before: true, clean_after: true,
+    detached_before: true, detached_after: true
+  };
+  recordEvaluation(child, evaluation.id, 'First finding.', [], checkout);
+  requestClose(parent, 'Close only through the declared claim gate.');
+
+  assert.equal(checkpointOrSeal(parent, 'noop-finding-stop-1').closeout_attempt_ordinal, 1);
+  recordEvaluation(child, evaluation.id, 'Second finding with unchanged lifecycle blockers.', [], checkout);
+  assert.equal(checkpointOrSeal(parent, 'noop-finding-stop-2').closeout_attempt_ordinal, 2);
+  assert.equal(getRunForTesting(run.id).state.sealed, false);
+});
+
 test('an unbound closeout envelope cannot be appended or sealed during crash recovery', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-closeout-envelope-firewall', cwd: process.cwd() });
@@ -1473,13 +1505,15 @@ test('proof-mode v2 withholds objective, claim, diagnostic, and closeout prose b
 test('proof mode rejects prose-shaped scope refs and unregistered event shapes before hashing', { concurrency: false }, (t) => {
   const data = isolatedData(t);
   const rawContinuation = 'CONTINUATION_RAW_DO_NOT_PERSIST_5A11';
-  const invalidParent = mintSession({ sessionId: 'compiler-proof-invalid-continuation', cwd: process.cwd() });
-  assert.throws(
-    () => beginRun(invalidParent, {
-      mode: 'full', objective: 'Private continuation.', privacyMode: 'proof', continuesFrom: rawContinuation
-    }),
-    /INVALID_CAPSULE_REF/
-  );
+  for (const privacyMode of ['verified_context', 'proof']) {
+    const invalidParent = mintSession({ sessionId: `compiler-${privacyMode}-invalid-continuation`, cwd: process.cwd() });
+    assert.throws(
+      () => beginRun(invalidParent, {
+        mode: 'full', objective: 'Private continuation.', privacyMode, continuesFrom: rawContinuation
+      }),
+      /INVALID_CAPSULE_REF/
+    );
+  }
   const unresolvedParent = mintSession({ sessionId: 'compiler-proof-unresolved-continuation', cwd: process.cwd() });
   const unresolvedRef = 'f'.repeat(64);
   const unresolvedRun = beginRun(unresolvedParent, {
@@ -1682,6 +1716,36 @@ test('proof-mode evaluator prose is withheld from state and child receipts, not 
   assert.equal(stored.checkout_head_before, null);
   assert.equal(stored.checkout_head_after, null);
   assert.equal(stored.status, 'CHECKOUT_INTEGRITY_EXCEPTION');
+});
+
+test('invalid evaluator checkout identities are projected before storage in every privacy mode', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  for (const privacyMode of ['verified_context', 'proof']) {
+    const sessionId = `compiler-${privacyMode}-invalid-evaluator-head`;
+    const parent = mintSession({ sessionId, cwd: process.cwd() });
+    const run = beginRun(parent, { mode: 'full', objective: 'Validate evaluator identities.', privacyMode });
+    const head = 'a'.repeat(40);
+    const snapshot = addPrSnapshot(parent, {
+      id: `${privacyMode}_invalid_eval_snapshot`, repository: 'Lyhna-ai/example', pr_number: 1,
+      base_sha: 'b'.repeat(40), head_before: head, head_after: head, status: 'CONSISTENT',
+      files: [], checks: [], reviews: [], review_comments: [], issue_comments: [], failures: []
+    });
+    const evaluation = beginEvaluation(parent, snapshot.id, { path: process.cwd(), head, clean: true, detached: true });
+    const agentId = `${privacyMode}-invalid-head-reviewer`;
+    const child = mintChild({ sessionId, agentId });
+    claimEvaluation(child, evaluation.id);
+    const rawHead = `CHECKOUT_HEAD_RAW_${privacyMode}_DO_NOT_PERSIST`;
+    recordEvaluation(child, evaluation.id, 'Invalid checkout identity.', [], {
+      head_before: rawHead, head_after: rawHead, clean_before: true, clean_after: true,
+      detached_before: true, detached_after: true
+    });
+    const stored = getRunForTesting(run.id).state.evaluations[evaluation.id];
+    assert.equal(stored.checkout_head_before, null);
+    assert.equal(stored.checkout_head_after, null);
+    assert.equal(stored.status, 'CHECKOUT_INTEGRITY_EXCEPTION');
+    assert.equal(readTree(getRunForTesting(run.id).directory).join('\n').includes(rawHead), false);
+  }
+  assert.equal(readTree(data).join('\n').includes('CHECKOUT_HEAD_RAW_'), false);
 });
 
 test('proof mode projects snapshot, refresh, and checkout Git identifiers at first write', { concurrency: false }, (t) => {
@@ -2050,6 +2114,10 @@ test('a replayed Stop resumes a durable closeout attempt without escaping or inc
     state.sealed = false;
     state.terminal_status = null;
     state.closeout_envelope = null;
+    if (!packet.events.slice(0, attempt.seq).some((event) => (
+      event.type === 'diagnostic_emitted'
+      && event.payload?.diagnostic_id === state.claim_diagnostic?.diagnostic_id
+    ))) state.claim_diagnostic = null;
     state.ledger_count = attempt.seq;
     state.ledger_tip = attempt.event_hash;
     writeFileSync(join(packet.directory, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
@@ -2058,6 +2126,13 @@ test('a replayed Stop resumes a durable closeout attempt without escaping or inc
     }
     return { parent, run, deliveryKey: `attempt-crash-${suffix}-${attemptCount}` };
   };
+
+  const first = exercise('first', 1);
+  assert.equal(getRunForTesting(first.run.id).events.some((event) => event.type === 'diagnostic_emitted'), false);
+  const firstBlocked = checkpointOrSeal(first.parent, first.deliveryKey);
+  assert.equal(firstBlocked.decision, 'block');
+  assert.equal(firstBlocked.closeout_attempt_ordinal, 1);
+  assert.equal(getRunForTesting(first.run.id).events.filter((event) => event.type === 'diagnostic_emitted').length, 1);
 
   const second = exercise('second', 2);
   const blocked = checkpointOrSeal(second.parent, second.deliveryKey);
