@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "lyhna": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/src/mcp-server.mjs"],
+      "env": {
+        "LYHNA_CODEX_DATA": "${PLUGIN_DATA}"
+      },
+      "cwd": "${PLUGIN_ROOT}"
+    }
+  }
+}

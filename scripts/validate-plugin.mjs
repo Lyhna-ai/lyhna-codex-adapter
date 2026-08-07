@@ -5,10 +5,13 @@ import { pathToFileURL } from 'node:url';
 
 const plugin = resolve('plugins', 'lyhna');
 const json = (path) => JSON.parse(readFileSync(join(plugin, path), 'utf8'));
+const portableManifest = json('plugin.json');
+const portableMcp = json('mcp.json');
 const manifest = json(join('.codex-plugin', 'plugin.json'));
 const mcp = json('.mcp.json');
 const packageJson = json('package.json');
 const hooks = json(join('hooks', 'hooks.json'));
+const extensionHooks = json(join('ai.lyhna.codex', 'hooks', 'hooks.json'));
 const marketplace = JSON.parse(readFileSync(resolve('.agents', 'plugins', 'marketplace.json'), 'utf8'));
 const skill = readFileSync(join(plugin, 'skills', 'lyhna', 'SKILL.md'), 'utf8');
 
@@ -18,6 +21,25 @@ for (const relative of [manifest.skills, manifest.mcpServers]) {
   assert(relative?.startsWith('./'));
   assert(existsSync(join(plugin, relative)));
 }
+assert.deepEqual(extensionHooks, hooks);
+
+assert.deepEqual(
+  Object.keys(portableManifest).sort(),
+  ['$schema', 'author', 'description', 'homepage', 'keywords', 'name', 'repository', 'version'].sort()
+);
+assert.equal(portableManifest.$schema, 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json');
+assert.equal(portableManifest.name, manifest.name);
+assert.equal(portableManifest.version, manifest.version);
+assert.equal(portableMcp.$schema, 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json');
+assert.deepEqual(Object.keys(portableMcp), ['$schema', 'mcpServers']);
+assert.deepEqual(Object.keys(portableMcp.mcpServers), ['lyhna']);
+assert.deepEqual(portableMcp.mcpServers.lyhna, {
+  type: 'stdio',
+  command: 'node',
+  args: ['${PLUGIN_ROOT}/src/mcp-server.mjs'],
+  env: { LYHNA_CODEX_DATA: '${PLUGIN_DATA}' },
+  cwd: '${PLUGIN_ROOT}'
+});
 
 assert.equal(mcp.mcpServers, undefined, 'the manifest spelling is invalid inside .mcp.json');
 assert.equal(mcp.mcp_servers, undefined, 'Codex 0.144.1 misparses the documented wrapper; use a direct server map');
@@ -30,6 +52,7 @@ assert.equal(server?.cwd, '.');
 assert.equal(server?.default_tools_approval_mode, 'approve');
 const { ADAPTER_VERSION } = await import(pathToFileURL(join(plugin, 'src', 'version.mjs')).href);
 assert.equal(packageJson.version, manifest.version);
+assert.equal(packageJson.version, portableManifest.version);
 assert.equal(ADAPTER_VERSION, manifest.version);
 
 for (const event of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop']) {
@@ -37,7 +60,9 @@ for (const event of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Permissi
   for (const group of hooks.hooks[event]) {
     for (const hook of group.hooks || []) {
       assert(existsSync(join(plugin, 'hooks', 'capture.mjs')));
+      assert(existsSync(join(plugin, 'ai.lyhna.codex', 'hooks', 'capture.mjs')));
       assert.match(hook.commandWindows || '', /PLUGIN_ROOT/);
+      assert.match(hook.commandWindows || '', /hooks/);
     }
   }
 }
