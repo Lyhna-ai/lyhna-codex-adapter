@@ -531,6 +531,41 @@ test('pure compiler and fold v2 ignore CLEAN terminals with untrusted origin or 
   }
 });
 
+test('every closeout lifecycle transition advances the material control frontier', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-lifecycle-frontier', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Bind closeout lifecycle transitions.' });
+  const declared = declareClaimContract(parent, contract());
+  const packet = getRunForTesting(run.id);
+  const baseline = compileClaim({ profile: SOFTWARE_RELEASE_PROFILE, contract: declared, events: packet.events });
+
+  for (const [index, type] of [
+    'child_started',
+    'child_stop_observed',
+    'child_receipt_sealed',
+    'child_receipt_retrieved',
+    'evaluation_requested',
+    'evaluation_claimed',
+    'evaluation_finding',
+    'pr_refreshed'
+  ].entries()) {
+    const event = {
+      seq: packet.events.length + 1,
+      type,
+      origin: 'runtime_hook',
+      event_hash: sha256(`lifecycle-frontier-${index}-${type}`),
+      payload: { lifecycle_ref: `lifecycle_${index}` }
+    };
+    const compiled = compileClaim({
+      profile: SOFTWARE_RELEASE_PROFILE,
+      contract: declared,
+      events: [...packet.events, event]
+    });
+    assert.notEqual(compiled.material_control_frontier, baseline.material_control_frontier, type);
+    assert.notEqual(compiled.input_digest, baseline.input_digest, type);
+  }
+});
+
 function runHook(input, env) {
   const result = spawnSync(process.execPath, [join(pluginRoot, 'hooks', 'capture.mjs')], {
     input: JSON.stringify(input),
@@ -714,6 +749,17 @@ test('a supported contract waits behind active child lifecycle obligations', { c
   assert.equal(blocked.decision, 'block');
   assert(blocked.blockers.some((item) => /^CHILD_.*_OPEN$/.test(item)));
   assert.equal(getRunForTesting(run.id).events.some((event) => event.type === 'run_sealed'), false);
+  const blockedFrontier = getRunForTesting(run.id).state.compiled_claim.material_control_frontier;
+
+  const receipt = sealChildByAgent({ sessionId, agentId: 'still-running-child' });
+  readSealedReceipt(parent, receipt.id);
+  const ready = evaluateClaimGate(parent, declared.contract_id, 'closeout');
+  assert.notEqual(ready.material_control_frontier, blockedFrontier);
+  const sealed = checkpointOrSeal(parent, 'supported-child-stop-after-join');
+  assert.equal(sealed.status, 'SEALED');
+  const envelope = getRunForTesting(run.id).events.find((event) => event.type === 'closeout_envelope_generated');
+  assert.equal(envelope.payload.material_control_frontier, ready.material_control_frontier);
+  assert.equal(envelope.payload.input_digest, ready.input_digest);
 });
 
 test('supported envelopes require an explicit close request and stale evaluations do not block', { concurrency: false }, (t) => {

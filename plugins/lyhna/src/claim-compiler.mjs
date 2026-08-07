@@ -15,6 +15,14 @@ const CONTROL_TYPES = new Set([
   'producer_requested',
   'producer_terminal',
   'continuation_lease_transferred',
+  'child_started',
+  'child_stop_observed',
+  'child_receipt_sealed',
+  'child_receipt_retrieved',
+  'evaluation_requested',
+  'evaluation_claimed',
+  'evaluation_finding',
+  'pr_refreshed',
   'gate_sample_observed',
   'claim_superseded'
 ]);
