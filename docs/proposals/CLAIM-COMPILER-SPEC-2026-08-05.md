@@ -350,6 +350,11 @@ continuation. The selected fail-direction is therefore explicit: that ambiguous 
 redelivery spends one additional bounded attempt and still returns `decision: "block"` until the
 third unchanged attempt seals only `CLOSED_UNSUPPORTED`. This is the sole exception to completed
 hook-delivery idempotency; it cannot produce a successful seal or alter the blocker fingerprint.
+Each new closeout attempt binds a structural `delivery_slot_ref` to the host delivery key and slot,
+so an interleaved checkpoint from another key cannot steal or strand an incomplete delivery. If
+evidence changes the fingerprint or would support success after a completed same-key attempt, that
+redelivery fails closed at transport; only a fresh host delivery identity may evaluate the changed
+frontier for a successful seal.
 
 ## Privacy projection
 
@@ -386,7 +391,10 @@ passes an unknown field through. This table governs existing event names as well
 Every identity-shaped field on an event family that can receive model-authored prose is also listed
 in one closed provenance registry. The registry distinguishes supervisor-, host-, and
 witness-structural identities from prose-derived fields, and proof mode rejects both an undeclared
-identity field and any field marked prose-derived before event hashing.
+identity field and any field marked prose-derived before event hashing. A provenance label is not
+itself authority: the generic adapter writer cannot emit supervisor-owned or host-hook families in
+proof mode. Those retained identities enter only through capability-bound product paths that derive
+them from ledger, compiler, or host structure.
 
 Proof-mode events and exported artifacts must not contain the withheld text. This v2 at-write rule
 does not rewrite or change the bytes of any legacy v1 event, ledger, fixture, or receipt. The v2

@@ -2259,6 +2259,80 @@ test('a completed blocked Stop redelivery spends the next bounded slot and still
   assert.equal(final.events.filter((event) => event.type === 'run_sealed').length, 1);
 });
 
+test('a completed same-key Stop cannot turn newly supporting evidence into a successful seal', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-completed-redelivery-success-firewall', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Require a fresh delivery identity for success.' });
+  const declared = declareClaimContract(parent, contract({
+    requested_state: 'BUILT',
+    named_producers: ['software_release/local'],
+    verifier_id: 'software_release/local_verifier'
+  }));
+  requestClose(parent, 'Close only through the declared claim gate.');
+
+  const first = checkpointOrSeal(parent, 'completed-redelivery-success-key');
+  assert.equal(first.decision, 'block');
+  assert.equal(first.closeout_attempt_ordinal, 1);
+  seedBuilt(run.id, declared);
+
+  assert.throws(
+    () => checkpointOrSeal(parent, 'completed-redelivery-success-key'),
+    /STOP_DELIVERY_FRONTIER_CHANGED/
+  );
+  assert.equal(getRunForTesting(run.id).events.some((event) => event.type === 'run_sealed'), false);
+  assert.equal(checkpointOrSeal(parent, 'fresh-success-key').status, 'SEALED');
+});
+
+test('an interleaved Stop cannot strand a torn delivery behind another checkpoint', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-interleaved-torn-delivery', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Recover a keyed torn Stop after an interleaved delivery.' });
+  declareClaimContract(parent, contract());
+  requestClose(parent, 'Close only through the declared claim gate.');
+
+  appendEvent(run.id, {
+    type: 'turn_checkpoint',
+    origin: 'runtime_hook',
+    payload: { status: 'OPEN', receipt_renderer: '0.1.33' },
+    idempotencyKey: 'checkpoint:delivery-A#0'
+  });
+  const interleaved = checkpointOrSeal(parent, 'delivery-B');
+  assert.equal(interleaved.decision, 'block');
+  assert.equal(interleaved.closeout_attempt_ordinal, 1);
+
+  const recovered = checkpointOrSeal(parent, 'delivery-A');
+  assert.equal(recovered.decision, 'block');
+  assert.equal(recovered.closeout_attempt_ordinal, 2);
+  const packet = getRunForTesting(run.id);
+  assert.deepEqual(
+    packet.events.filter((event) => event.type === 'closeout_attempted').map((event) => event.payload.ordinal),
+    [1, 2]
+  );
+  assert.equal(packet.state.sealed, false);
+});
+
+test('the generic proof writer cannot claim supervisor provenance for retained identities', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-proof-supervisor-provenance', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Reject caller-labeled supervisor identities.', privacyMode: 'proof' });
+  const marker = 'MODEL_PROSE_SMUGGLED_AS_SUPERVISOR_ID_7E21';
+  assert.throws(
+    () => appendEvent(run.id, {
+      type: 'builder_claim',
+      origin: 'agent_reported',
+      payload: {
+        builder_claim_id: marker,
+        builder_claim_ordinal: 1,
+        evidence_refs: [],
+        statement: 'Caller-authored identity marker.'
+      },
+      idempotencyKey: 'caller-supervisor:builder_claim'
+    }),
+    /PROOF_EVENT_PROVENANCE_REQUIRED/
+  );
+  assert.equal(readTree(getRunForTesting(run.id).directory).join('\n').includes(marker), false);
+});
+
 test('a contracted Stop without a host delivery identity fails closed before recording an attempt', { concurrency: false }, (t) => {
   const data = isolatedData(t);
   const sessionId = 'compiler-unidentified-verified-stop';

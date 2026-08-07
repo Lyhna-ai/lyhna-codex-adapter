@@ -56,7 +56,7 @@ const EVENT_PAYLOAD_FIELDS = new Map([
   ['claim_rejected', ['code', 'capability_kind']],
   ['close_deferred', ['blockers', 'receipt_renderer']],
   ['close_requested', ['request_id', 'reason', 'reason_ref', 'text_withheld']],
-  ['closeout_attempted', ['claim_contract_ref', 'gate_id', 'blocker_fingerprint', 'ordinal', 'attempt_sequence', 'input_digest', 'eligible_evidence_frontier', 'material_control_frontier', 'blockers']],
+  ['closeout_attempted', ['claim_contract_ref', 'gate_id', 'blocker_fingerprint', 'ordinal', 'attempt_sequence', 'delivery_slot_ref', 'input_digest', 'eligible_evidence_frontier', 'material_control_frontier', 'blockers']],
   ['closeout_envelope_generated', ['envelope_id', 'outcome', 'profile_id', 'requested_state', 'supported_state', 'scope_ref', 'eligible_evidence_frontier', 'material_control_frontier', 'input_digest', 'claim_contract_ref', 'fold_version', 'blockers', 'next_verifier', 'narrative', 'text_withheld']],
   ['continuation_lease_transferred', ['capsule_ref', 'predecessor_parent_ref', 'successor_parent_ref', 'active_child_refs']],
   ['diagnostic_emitted', ['diagnostic_id', 'diagnostic_status', 'claim_contract_ref', 'fold_version', 'input_digest', 'eligible_evidence_frontier', 'material_control_frontier', 'blocker_fingerprint', 'supported_state', 'requested_state', 'missing', 'next_verifier', 'message', 'narrative', 'text_withheld']],
@@ -94,6 +94,33 @@ export const PROOF_IDENTITY_PROVENANCE = Object.freeze({
   'evaluation_finding.statement_ref': 'prose_derived_forbidden',
   'close_requested.request_id': 'supervisor_structural',
   'close_requested.reason_ref': 'prose_derived_forbidden',
+  'claim_contract_declared.profile_requirements_hash': 'supervisor_structural',
+  'diagnostic_emitted.diagnostic_id': 'supervisor_structural',
+  'diagnostic_emitted.claim_contract_ref': 'supervisor_structural',
+  'diagnostic_emitted.input_digest': 'compiler_structural',
+  'diagnostic_emitted.eligible_evidence_frontier': 'compiler_structural',
+  'diagnostic_emitted.material_control_frontier': 'compiler_structural',
+  'diagnostic_emitted.blocker_fingerprint': 'compiler_structural',
+  'diagnostic_resolved.diagnostic_id': 'supervisor_structural',
+  'diagnostic_resolved.claim_contract_ref': 'supervisor_structural',
+  'diagnostic_resolved.input_digest': 'compiler_structural',
+  'diagnostic_resolved.eligible_evidence_frontier': 'compiler_structural',
+  'diagnostic_resolved.material_control_frontier': 'compiler_structural',
+  'diagnostic_resolved.blocker_fingerprint': 'compiler_structural',
+  'closeout_attempted.claim_contract_ref': 'supervisor_structural',
+  'closeout_attempted.gate_id': 'supervisor_structural',
+  'closeout_attempted.delivery_slot_ref': 'host_ledger_structural',
+  'closeout_attempted.input_digest': 'compiler_structural',
+  'closeout_attempted.eligible_evidence_frontier': 'compiler_structural',
+  'closeout_attempted.material_control_frontier': 'compiler_structural',
+  'closeout_attempted.blocker_fingerprint': 'compiler_structural',
+  'closeout_envelope_generated.envelope_id': 'supervisor_structural',
+  'closeout_envelope_generated.profile_id': 'supervisor_structural',
+  'closeout_envelope_generated.scope_ref': 'supervisor_structural',
+  'closeout_envelope_generated.claim_contract_ref': 'supervisor_structural',
+  'closeout_envelope_generated.input_digest': 'compiler_structural',
+  'closeout_envelope_generated.eligible_evidence_frontier': 'compiler_structural',
+  'closeout_envelope_generated.material_control_frontier': 'compiler_structural',
   'run_begun.objective_ref': 'supervisor_structural',
   'run_begun.claim_contract_id': 'supervisor_structural',
   'hook_*.event_id': 'host_structural',
@@ -101,7 +128,22 @@ export const PROOF_IDENTITY_PROVENANCE = Object.freeze({
   'hook_*.payload_ref': 'prose_derived_forbidden'
 });
 const PROOF_IDENTITY_FIELD = /(?:^|_)(?:id|ref|refs|digest|fingerprint|hash)$/;
-const PROOF_IDENTITY_EVENT = new Set(['builder_claim', 'evaluation_finding', 'close_requested', 'run_begun']);
+const PROOF_IDENTITY_EVENT = new Set([
+  'builder_claim', 'claim_contract_declared', 'close_requested', 'closeout_attempted',
+  'closeout_envelope_generated', 'diagnostic_emitted', 'diagnostic_resolved',
+  'evaluation_finding', 'run_begun'
+]);
+const PROOF_SUPERVISOR_OWNED_EVENTS = new Set([
+  'builder_claim',
+  'claim_contract_declared',
+  'close_requested',
+  'closeout_attempted',
+  'closeout_envelope_generated',
+  'diagnostic_emitted',
+  'diagnostic_resolved',
+  'evaluation_finding',
+  'run_begun'
+]);
 
 function proofIdentityPolicy(type, field) {
   return PROOF_IDENTITY_PROVENANCE[`${type}.${field}`]
@@ -172,6 +214,10 @@ function validateCloseoutAttemptBinding(state, origin, payload, eventSeq = null)
   assert(payload.input_digest === state.compiled_claim.input_digest, code);
   assert(payload.eligible_evidence_frontier === state.compiled_claim.eligible_evidence_frontier, code);
   assert(payload.material_control_frontier === state.compiled_claim.material_control_frontier, code);
+  assert(
+    payload.delivery_slot_ref === undefined || /^stop_slot_[a-f0-9]{64}$/.test(payload.delivery_slot_ref),
+    code
+  );
   assert(state.claim_contract.declared_gate_ids.includes(payload.gate_id), code);
   const blockers = claimCloseoutBlockers(state, state.compiled_claim);
   assert(blockers.length > 0, code);
@@ -1564,6 +1610,22 @@ export function appendEvent(runId, input) {
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
     recoverClaimControlStateUnlocked(runId, state);
+    // Supervisor-owned proof families may carry retained structural identities next to withheld
+    // prose. Their provenance is the capability-bound product path that derives those identities,
+    // not a caller label or string shape. The generic adapter writer therefore cannot emit them.
+    if (state.privacy_mode === 'proof') {
+      const supervisorOwned = PROOF_SUPERVISOR_OWNED_EVENTS.has(input?.type)
+        || String(input?.type || '').startsWith('hook_');
+      if (supervisorOwned) {
+        // Keep the closed-schema error boundary ahead of provenance so unknown fields are still
+        // rejected as unknown fields; a structurally valid impersonation reaches this hard stop.
+        const normalized = normalizeEventPayloadForStorage(input.type, input.payload);
+        validateEventPayloadStructure(state, input.type, input.origin, normalized);
+        const projected = projectEventPayloadForPrivacy(state, input.type, normalized);
+        validateProofIdentityProvenance(state, input.type, projected);
+        assert(false, 'PROOF_EVENT_PROVENANCE_REQUIRED');
+      }
+    }
     // This exported writer exists for deterministic adapters/tests. In proof mode its caller key is
     // untrusted text, so derive idempotency only from the already-projected event structure. Internal
     // product paths call appendEventUnlocked with supervisor-issued structural keys.
@@ -2822,6 +2884,10 @@ function storedStopCheckpointKey(privacyMode, checkpointKey) {
     : checkpointKey;
 }
 
+function stopDeliverySlotRef(deliveryKey, slot) {
+  return `stop_slot_${sha256(canonicalJson({ delivery_key: deliveryKey, slot }))}`;
+}
+
 function stopCheckpointForSlot(events, privacyMode, deliveryKey, slot) {
   const rawKeys = [`checkpoint:${deliveryKey}#${slot}`];
   // v0.1.33 wrote the first delivery checkpoint without an explicit slot. Recognize that shape as
@@ -2835,20 +2901,38 @@ function stopCheckpointForSlot(events, privacyMode, deliveryKey, slot) {
   return matches[0] || null;
 }
 
+function stopAttemptForSlot(events, privacyMode, deliveryKey, slot, checkpoint = null) {
+  const slotRef = stopDeliverySlotRef(deliveryKey, slot);
+  const matches = events.filter((event) => (
+    event.type === 'closeout_attempted' && event.payload?.delivery_slot_ref === slotRef
+  ));
+  assert(matches.length <= 1, 'STOP_ATTEMPT_SLOT_CONFLICT');
+  if (matches.length === 1) return matches[0];
+  // Pre-slot packets did not carry a delivery_slot_ref. Only slot zero can have that shape, and its
+  // attempt is the first closeout attempt before another Stop checkpoint.
+  if (slot !== 0) return null;
+  const slotCheckpoint = checkpoint || stopCheckpointForSlot(events, privacyMode, deliveryKey, slot);
+  if (!slotCheckpoint) return null;
+  const nextCheckpoint = events.find((event) => (
+    event.seq > slotCheckpoint.seq && event.type === 'turn_checkpoint'
+  ));
+  return events.find((event) => (
+    event.seq > slotCheckpoint.seq
+    && (!nextCheckpoint || event.seq < nextCheckpoint.seq)
+    && event.type === 'closeout_attempted'
+    && !event.payload?.delivery_slot_ref
+  )) || null;
+}
+
 function completedAttemptsUnderDeliveryKey(events, privacyMode, deliveryKey) {
   let slot = 0;
   while (slot <= events.length) {
     const checkpoint = stopCheckpointForSlot(events, privacyMode, deliveryKey, slot);
     if (!checkpoint) return slot;
-    const nextCheckpoint = events.find((event) => (
-      event.seq > checkpoint.seq && event.type === 'turn_checkpoint'
-    ));
-    const deliveryTail = events.filter((event) => (
-      event.seq > checkpoint.seq && (!nextCheckpoint || event.seq < nextCheckpoint.seq)
-    ));
-    const attempt = deliveryTail.find((event) => event.type === 'closeout_attempted');
-    const completed = deliveryTail.some((event) => (
-      event.type === 'checkpoint_anchor' || event.type === 'closeout_envelope_generated'
+    const attempt = stopAttemptForSlot(events, privacyMode, deliveryKey, slot, checkpoint);
+    const completed = attempt && events.some((event) => (
+      event.seq > attempt.seq
+      && (event.type === 'checkpoint_anchor' || event.type === 'closeout_envelope_generated')
     ));
     // An incomplete slot is replayed in place so torn checkpoint, attempt, and envelope writes keep
     // their existing recovery semantics. Only a fully published blocked attempt spends the slot.
@@ -2942,13 +3026,18 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       : preEvents.find((event) => event.idempotency_key === storedCheckpointKey);
     let resumeCloseoutAfterCheckpoint = false;
     if (priorCheckpoint) {
-      const nextCheckpoint = preEvents.find((event) => event.seq > priorCheckpoint.seq && event.type === 'turn_checkpoint');
-      const deliveryTail = preEvents.filter((event) => (
-        event.seq > priorCheckpoint.seq && (!nextCheckpoint || event.seq < nextCheckpoint.seq)
-      ));
-      const interruptedAttempt = deliveryTail.find((event) => event.type === 'closeout_attempted');
-      const attemptCompleted = deliveryTail.some((event) => (
-        event.type === 'checkpoint_anchor' || event.type === 'closeout_envelope_generated'
+      const interruptedAttempt = contractedCloseoutDelivery
+        ? stopAttemptForSlot(
+          preEvents,
+          current.privacy_mode,
+          deliveryKey,
+          completedDeliveryAttempts,
+          priorCheckpoint
+        )
+        : null;
+      const attemptCompleted = interruptedAttempt && preEvents.some((event) => (
+        event.seq > interruptedAttempt.seq
+        && (event.type === 'checkpoint_anchor' || event.type === 'closeout_envelope_generated')
       ));
       if (interruptedAttempt) {
         validateCloseoutAttemptBinding(
@@ -3034,7 +3123,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       // has not finished the gate. Resume below without appending a second checkpoint; returning a
       // bare CLOSE_DEFERRED here would omit decision:block and let the parent stop through the gate.
       resumeCloseoutAfterCheckpoint = Boolean(
-        current.close_requested && current.claim_contract && !nextCheckpoint && !attemptCompleted
+        current.close_requested && current.claim_contract && !attemptCompleted
       );
       if (!resumeCloseoutAfterCheckpoint) {
         // The Stop was observed. If the original delivery crashed after appending the turn_checkpoint
@@ -3077,13 +3166,42 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       return { status: 'CHECKPOINTED', run_id: runId };
     }
     if (current.claim_contract) {
-      const compiled = compileAndRecordUnlocked(runId, current);
       const gateId = current.claim_contract.declared_gate_ids[0];
+      const priorSameDeliveryAttempt = contractedCloseoutDelivery && completedDeliveryAttempts > 0
+        ? stopAttemptForSlot(
+          preEvents,
+          current.privacy_mode,
+          deliveryKey,
+          completedDeliveryAttempts - 1
+        )
+        : null;
+
+      // Once a completed Stop identity enters the bounded fail direction, the host ambiguity may
+      // spend another slot only against the same unsupported fingerprint. Evidence that changes the
+      // fingerprint (including evidence that would support success) requires a fresh host delivery
+      // identity. This exception can therefore never turn a completed redelivery into a success seal.
+      if (completedDeliveryAttempts > 0) {
+        assert(priorSameDeliveryAttempt, 'STOP_DELIVERY_ATTEMPT_MISSING');
+        const preview = compileClaim({
+          profile: current.claim_profile,
+          contract: current.claim_contract,
+          events: parseLedger(runId).events
+        });
+        const previewRequestedSupported = preview.state_results?.[current.claim_contract.requested_state]?.supported === true;
+        const previewBlockers = claimCloseoutBlockers(current, preview);
+        const previewFingerprint = claimCloseoutBlockerFingerprint(current, gateId, preview);
+        assert(!previewRequestedSupported && previewBlockers.length > 0, 'STOP_DELIVERY_FRONTIER_CHANGED');
+        assert(
+          priorSameDeliveryAttempt.payload?.blocker_fingerprint === previewFingerprint,
+          'STOP_DELIVERY_FRONTIER_CHANGED'
+        );
+      }
+      const compiled = compileAndRecordUnlocked(runId, current);
       const requestedSupported = compiled.state_results?.[current.claim_contract.requested_state]?.supported === true;
       const blockers = claimCloseoutBlockers(current, compiled);
+      const fingerprint = claimCloseoutBlockerFingerprint(current, gateId, compiled);
 
       if (!requestedSupported || blockers.length) {
-        const fingerprint = claimCloseoutBlockerFingerprint(current, gateId, compiled);
         const { events: attemptEvents } = parseLedger(runId);
         const attemptSequence = attemptEvents.filter((event) => event.type === 'closeout_attempted').length + 1;
         const latestAttempt = [...attemptEvents].reverse().find((event) => event.type === 'closeout_attempted');
@@ -3106,6 +3224,9 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
             blocker_fingerprint: fingerprint,
             ordinal,
             attempt_sequence: attemptSequence,
+            delivery_slot_ref: contractedCloseoutDelivery
+              ? stopDeliverySlotRef(deliveryKey, completedDeliveryAttempts)
+              : undefined,
             input_digest: compiled.input_digest,
             eligible_evidence_frontier: compiled.eligible_evidence_frontier,
             material_control_frontier: compiled.material_control_frontier,
