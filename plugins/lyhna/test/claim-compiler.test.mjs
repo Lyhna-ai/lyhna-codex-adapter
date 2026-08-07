@@ -1976,6 +1976,8 @@ test('an indexed open-contract predecessor that disappears fails continuation cl
   checkpointOrSeal(firstParent, 'missing-indexed-predecessor-stop');
   const packet = getRunForTesting(run.id);
   const capsuleRef = JSON.parse(readFileSync(join(packet.directory, 'continuation.json'), 'utf8')).capsule_ref;
+  const indexPath = join(packet.directory, '..', '..', 'capsule-index', `${sha256(capsuleRef)}.json`);
+  assert.equal(JSON.parse(readFileSync(indexPath, 'utf8')).open_claim_contract, true);
   rmSync(packet.directory, { recursive: true, force: true });
 
   const successor = mintSession({ sessionId: 'compiler-missing-indexed-predecessor-two', cwd: process.cwd() });
@@ -1983,6 +1985,28 @@ test('an indexed open-contract predecessor that disappears fails continuation cl
     () => beginRun(successor, { mode: 'full', objective: 'Fail closed.', continuesFrom: capsuleRef }),
     /CONTINUATION_PREDECESSOR_UNAVAILABLE/
   );
+});
+
+test('the pre-publication archive and index prefix preserves one open contracted run', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const firstParent = mintSession({ sessionId: 'compiler-prefix-crash-one', cwd: process.cwd() });
+  const run = beginRun(firstParent, { mode: 'full', objective: 'Publish a resolvable open handoff.' });
+  declareClaimContract(firstParent, contract());
+  checkpointOrSeal(firstParent, 'prefix-crash-stop');
+  const packet = getRunForTesting(run.id);
+  const continuationPath = join(packet.directory, 'continuation.json');
+  const capsuleRef = JSON.parse(readFileSync(continuationPath, 'utf8')).capsule_ref;
+  rmSync(continuationPath);
+  rmSync(join(packet.directory, 'HANDOFF.md'));
+
+  const successorParent = mintSession({ sessionId: 'compiler-prefix-crash-two', cwd: process.cwd() });
+  const successor = beginRun(successorParent, {
+    mode: 'full',
+    objective: 'Resume through the durable archive/index prefix.',
+    continuesFrom: capsuleRef
+  });
+  assert.equal(successor.id, run.id);
+  assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'continuation_lease_transferred').length, 1);
 });
 
 test('every falsy JSON value in an existing capsule index fails continuation closed', { concurrency: false }, (t) => {

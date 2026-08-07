@@ -518,7 +518,7 @@ test('a replayed Stop restores an archive lost after the visible handoff landed'
   assert.equal(getRunForTesting(successor.id).state.inherits.resolution, 'RESOLVED_LOCAL_ARCHIVE');
 });
 
-test('an indexed archived fold that no longer hashes to its own name fails continuation closed', (t) => {
+test('an unavailable contract-free archived fold remains honestly unresolved', (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'archive-integrity' });
   const run = beginRun(parent, { mode: 'full', objective: 'Produce two folds.' });
@@ -535,15 +535,12 @@ test('an indexed archived fold that no longer hashes to its own name fails conti
   writeFileSync(archivePath, canonicalJson(tampered, true));
 
   const next = mintSession({ sessionId: 'archive-integrity-next' });
-  assert.throws(
-    () => beginRun(next, {
-      mode: 'full',
-      objective: 'Must not inherit a forged archive.',
-      continuesFrom: first.capsule_ref
-    }),
-    /CONTINUATION_PREDECESSOR_UNAVAILABLE/,
-    'a known local predecessor whose archived bytes no longer match must not open a second writable run'
-  );
+  const successor = beginRun(next, {
+    mode: 'full',
+    objective: 'Must not inherit a forged archive.',
+    continuesFrom: first.capsule_ref
+  });
+  assert.equal(getRunForTesting(successor.id).state.inherits.resolution, 'UNRESOLVED_LOCALLY');
 });
 
 test('lineage validates the signature on the archived fold actually inherited', (t) => {
@@ -576,7 +573,7 @@ test('lineage validates the signature on the archived fold actually inherited', 
   assert.equal(report.ok, false, 'an invalid signature on the inherited archive must prevent LINKED');
 });
 
-test('an indexed current continuation that no longer hashes to its own ref fails continuation closed', (t) => {
+test('an unavailable contract-free current continuation remains honestly unresolved', (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'current-integrity' });
   const run = beginRun(parent, { mode: 'full', objective: 'Produce one fold.' });
@@ -590,15 +587,12 @@ test('an indexed current continuation that no longer hashes to its own ref fails
   rmSync(join(directory, 'capsules', `${committedRef}.json`));
 
   const next = mintSession({ sessionId: 'current-integrity-next' });
-  assert.throws(
-    () => beginRun(next, {
-      mode: 'full',
-      objective: 'Must not inherit an edited current face.',
-      continuesFrom: committedRef
-    }),
-    /CONTINUATION_PREDECESSOR_UNAVAILABLE/,
-    'a known local predecessor whose current bytes were edited must not open a second writable run'
-  );
+  const successor = beginRun(next, {
+    mode: 'full',
+    objective: 'Must not inherit an edited current face.',
+    continuesFrom: committedRef
+  });
+  assert.equal(getRunForTesting(successor.id).state.inherits.resolution, 'UNRESOLVED_LOCALLY');
 });
 
 test('a sealed packet that lost its handoff tail is repaired by seal verification', (t) => {
@@ -1330,6 +1324,31 @@ test('a predecessor this store cannot see is recorded as unresolved, not invente
   assert.equal(run.inherits.resolution, 'UNRESOLVED_LOCALLY');
   assert.equal(run.inherits.capsule_ref, 'f'.repeat(64));
   assert.equal(run.inherits.state_hash, null);
+});
+
+test('an unavailable sealed or legacy-indexed predecessor remains honestly unresolved', (t) => {
+  const root = isolatedData(t);
+  const first = runWindow({ sessionId: 'unavailable-sealed', objective: 'Seal before packet cleanup.' });
+  const capsuleRef = first.sealed.capsule_ref;
+  const indexPath = join(root, 'capsule-index', `${sha256(capsuleRef)}.json`);
+  const sealedIndex = JSON.parse(readFileSync(indexPath, 'utf8'));
+  assert.equal(sealedIndex.open_claim_contract, false);
+  rmSync(first.directory, { recursive: true, force: true });
+
+  for (const [label, index] of [
+    ['sealed', sealedIndex],
+    ['legacy', { run_id: sealedIndex.run_id, capsule_ref: capsuleRef }]
+  ]) {
+    writeFileSync(indexPath, canonicalJson(index, true));
+    const parent = mintSession({ sessionId: `unavailable-${label}-successor` });
+    const successor = beginRun(parent, {
+      mode: 'full',
+      objective: 'Carry the unavailable reference without inventing its state.',
+      continuesFrom: capsuleRef
+    });
+    assert.equal(successor.inherits.resolution, 'UNRESOLVED_LOCALLY');
+    assert.equal(successor.inherits.state_hash, null);
+  }
 });
 
 test('the lineage checker re-walks the chain itself rather than trusting the store reader', (t) => {
