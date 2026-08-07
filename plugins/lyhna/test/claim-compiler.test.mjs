@@ -1747,6 +1747,17 @@ test('invalid evaluator checkout identities are projected before storage in ever
       }),
       /EVALUATOR_CHECKOUT_REQUIRED/
     );
+    const refreshSnapshot = addPrSnapshot(parent, {
+      id: `${privacyMode}_invalid_refresh_snapshot`, repository: 'Lyhna-ai/example', pr_number: 1,
+      base_sha: 'b'.repeat(40), head_before: head, head_after: head,
+      status: 'CONSISTENT', files: [], checks: [], reviews: [], review_comments: [],
+      issue_comments: [], failures: []
+    });
+    const rawRefreshHead = `REFRESH_HEAD_RAW_${privacyMode}_DO_NOT_PERSIST`;
+    const refreshed = markSnapshotRefreshed(parent, refreshSnapshot.id, rawRefreshHead);
+    assert.equal(refreshed.current_head, null);
+    assert.equal(refreshed.stale, true);
+    assert.equal(getRunForTesting(run.id).state.pr_snapshots[refreshSnapshot.id].current_head, null);
     const snapshot = addPrSnapshot(parent, {
       id: `${privacyMode}_invalid_eval_snapshot`, repository: 'Lyhna-ai/example', pr_number: 1,
       base_sha: 'b'.repeat(40), head_before: head, head_after: head, status: 'CONSISTENT',
@@ -1767,10 +1778,12 @@ test('invalid evaluator checkout identities are projected before storage in ever
     assert.equal(stored.status, 'CHECKOUT_INTEGRITY_EXCEPTION');
     assert.equal(readTree(getRunForTesting(run.id).directory).join('\n').includes(rawHead), false);
     assert.equal(readTree(getRunForTesting(run.id).directory).join('\n').includes(rawSnapshotHead), false);
+    assert.equal(readTree(getRunForTesting(run.id).directory).join('\n').includes(rawRefreshHead), false);
   }
   const allBytes = readTree(data).join('\n');
   assert.equal(allBytes.includes('CHECKOUT_HEAD_RAW_'), false);
   assert.equal(allBytes.includes('SNAPSHOT_HEAD_RAW_'), false);
+  assert.equal(allBytes.includes('REFRESH_HEAD_RAW_'), false);
 });
 
 test('proof mode projects snapshot, refresh, and checkout Git identifiers at first write', { concurrency: false }, (t) => {

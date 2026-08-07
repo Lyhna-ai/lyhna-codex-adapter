@@ -2172,7 +2172,7 @@ export function markSnapshotRefreshed(capability, snapshotId, currentHead) {
     assertParentLeaseUnlocked(runId, current, capability);
     const snapshot = current.pr_snapshots[snapshotId];
     assert(snapshot, 'SNAPSHOT_NOT_FOUND');
-    const storedCurrentHead = current.privacy_mode === 'proof' ? proofSafeGitObjectId(currentHead) : currentHead;
+    const storedCurrentHead = proofSafeGitObjectId(currentHead);
     const stale = storedCurrentHead === null || storedCurrentHead !== snapshot.head_after;
     // A refresh after new evaluation activity is a distinct observation — the CURRENT label
     // depends on a pr_refreshed event later in the ledger than the final evaluation event
