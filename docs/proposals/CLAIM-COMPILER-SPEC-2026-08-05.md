@@ -520,9 +520,10 @@ Failure of the first two transports terminates the build as `BLOCKED_TRANSPORT`.
 The four versioned slices are:
 
 1. `0.1.33` — contract, compiler, fold v2, privacy projection, and sealed unsupported closeout.
-2. `0.1.34` — inline diagnostics, named joins, quiet barrier, and successor supersession.
-3. `0.1.35` — terminally paginated GitHub evidence and registered-probe identity envelopes.
-4. `0.1.36` — recurrence reducer and one enforcement obligation.
+   `0.1.34` is the backward-readable Stop-liveness and Agent Plugins packaging follow-up.
+2. `0.1.35` — inline diagnostics, named joins, quiet barrier, and successor supersession.
+3. `0.1.36` — terminally paginated GitHub evidence and registered-probe identity envelopes.
+4. `0.1.37` — recurrence reducer and one enforcement obligation.
 
 The Slice 1 kill fixture uses only `software_release/v1` vocabulary: source identity and checks are
 present; deployment identity, configuration presence, registered canary, terminal effect, and
@@ -589,9 +590,9 @@ their declared gates are terminal and clean. The future targets are fixed as rep
 
 ```text
 codex/claim-compiler-contract   -> Slice 1 / 0.1.33
-codex/claim-compiler-join       -> Slice 2 / 0.1.34
-codex/claim-compiler-evidence   -> Slice 3 / 0.1.35
-codex/claim-compiler-recurrence -> Slice 4 / 0.1.36
+codex/claim-compiler-join       -> Slice 2 / 0.1.35
+codex/claim-compiler-evidence   -> Slice 3 / 0.1.36
+codex/claim-compiler-recurrence -> Slice 4 / 0.1.37
 ```
 
 Before each merge, the coordinator records a gate mapping containing repository, PR number, base,
