@@ -116,6 +116,56 @@ test('close-ready legacy runs drop persisted child receipt paths before sealing'
   assert.equal(verifySealedRun(run.id).status, 'ALREADY_SEALED');
 });
 
+test('legacy closeout refuses to seal around altered child receipt bytes', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'legacy-corrupt-child-receipt';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Refuse a corrupt child receipt.' });
+  addPrSnapshot(parent, stableSnapshot);
+  const evaluation = beginEvaluation(parent, stableSnapshot.id, {
+    head: stableSnapshot.head_after, clean: true, detached: true, path: 'fixture'
+  });
+  const child = mintChild({ sessionId, agentId: 'legacy-corrupt-evaluator' });
+  claimEvaluation(child, evaluation.id);
+  recordEvaluation(child, evaluation.id, 'No material mismatch.', [], {
+    head_before: stableSnapshot.head_after,
+    head_after: stableSnapshot.head_after,
+    clean_before: true,
+    clean_after: true,
+    detached_before: true,
+    detached_after: true
+  });
+  const receipt = sealChildByAgent({ sessionId, agentId: 'legacy-corrupt-evaluator' });
+  readSealedReceipt(parent, receipt.id);
+  requestClose(parent, 'Attempt close with altered receipt bytes.');
+  writeFileSync(receipt.path, 'CORRUPTED_BYTES');
+
+  assert.throws(() => checkpointOrSeal(parent), /LOCAL_CHAIN_BROKEN/);
+  const packet = getRunForTesting(run.id);
+  assert.equal(packet.state.sealed, false);
+  assert.equal(packet.events.some((event) => event.type === 'run_sealed'), false);
+});
+
+test('legacy Stop without a host ID replays against the unchanged durable frontier', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'legacy-unidentified-stop-replay', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Keep an unidentified legacy Stop idempotent.' });
+
+  const first = checkpointOrSeal(parent);
+  assert.equal(first.status, 'CHECKPOINTED');
+  const beforeReplay = getRunForTesting(run.id).events;
+  const replayed = checkpointOrSeal(parent);
+  assert.equal(replayed.status, 'CHECKPOINTED');
+  assert.equal(replayed.replayed_delivery, true);
+  const afterReplay = getRunForTesting(run.id).events;
+  assert.equal(afterReplay.length, beforeReplay.length);
+  assert.equal(afterReplay.filter((event) => event.type === 'turn_checkpoint').length, 1);
+
+  recordClaim(parent, 'Intervening work creates a new legacy Stop boundary.', []);
+  assert.equal(checkpointOrSeal(parent).status, 'CHECKPOINTED');
+  assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'turn_checkpoint').length, 2);
+});
+
 test('full run distinguishes hook evidence and seals only after evaluator receipt retrieval', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'parent-session', cwd: process.cwd() });
@@ -301,7 +351,7 @@ test('stale lock ownership is recovered; credentials never persist though the re
   const proofRun = beginRun(proofParent, { mode: 'full', objective: 'build the private customer feature', privacyMode: 'proof' });
   const proofReceipt = renderReceiptJson(getRunForTesting(proofRun.id).state, getRunForTesting(proofRun.id).events);
   assert(!proofReceipt.includes('build the private customer feature'), 'proof mode withholds the request');
-  assert(proofReceipt.includes('Invocation objective retained by hash'), 'proof mode keeps the structural summary');
+  assert(proofReceipt.includes('Objective withheld.'), 'proof mode keeps only the explicit withheld marker');
 });
 
 test('invocation capture recognizes a boundary Lyhna mention anywhere in the prompt', { concurrency: false }, (t) => {

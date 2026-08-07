@@ -61,7 +61,10 @@ function runWindow({ sessionId, objective, continuesFrom, privacyMode, claims = 
   for (const claim of claims) recordClaim(parent, claim.statement, claim.evidence_refs || []);
   evaluateAndRetrieve(sessionId, parent, stableSnapshot, `${sessionId}-evaluator`);
   requestClose(parent, 'Window complete.');
-  const sealed = checkpointOrSeal(parent, `${sessionId}-stop`);
+  const deliveryKey = privacyMode === 'proof'
+    ? `id_${sha256(`${sessionId}-stop`)}`
+    : `${sessionId}-stop`;
+  const sealed = checkpointOrSeal(parent, deliveryKey);
   assert.equal(sealed.status, 'SEALED');
   return { parent, run, sealed, directory: getRunForTesting(run.id).directory };
 }
@@ -287,7 +290,7 @@ test('a resolving reference is never reported as supporting the claim', (t) => {
   assert.notEqual(claim.support, 'SUPPORTED', 'the current fold must never issue SUPPORTED');
 
   const capsule = buildContinuation(state, events);
-  assert.equal(capsule.continuation_fold_version, 'v1');
+  assert.equal(capsule.continuation_fold_version, 'v2');
   assert.deepEqual(capsule.settled, [], 'no builder claim is ever promoted into settled');
 });
 
@@ -515,7 +518,7 @@ test('a replayed Stop restores an archive lost after the visible handoff landed'
   assert.equal(getRunForTesting(successor.id).state.inherits.resolution, 'RESOLVED_LOCAL_ARCHIVE');
 });
 
-test('an archived fold must hash to its own name before a successor may inherit it', (t) => {
+test('an indexed archived fold that no longer hashes to its own name fails continuation closed', (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'archive-integrity' });
   const run = beginRun(parent, { mode: 'full', objective: 'Produce two folds.' });
@@ -532,15 +535,13 @@ test('an archived fold must hash to its own name before a successor may inherit 
   writeFileSync(archivePath, canonicalJson(tampered, true));
 
   const next = mintSession({ sessionId: 'archive-integrity-next' });
-  const successor = beginRun(next, {
-    mode: 'full',
-    objective: 'Must not inherit a forged archive.',
-    continuesFrom: first.capsule_ref
-  });
-  assert.equal(
-    getRunForTesting(successor.id).state.inherits.resolution,
-    'UNRESOLVED_LOCALLY',
-    'matching the capsule_ref field is insufficient; the archived bytes must recompute to that ref'
+  assert.throws(
+    () => beginRun(next, {
+      mode: 'full',
+      objective: 'Must not inherit a forged archive.',
+      continuesFrom: first.capsule_ref
+    }),
+    /CONTINUATION_PREDECESSOR_UNAVAILABLE/
   );
 });
 
@@ -574,7 +575,7 @@ test('lineage validates the signature on the archived fold actually inherited', 
   assert.equal(report.ok, false, 'an invalid signature on the inherited archive must prevent LINKED');
 });
 
-test('the current continuation must hash to its own ref before a successor may inherit it', (t) => {
+test('an indexed current continuation that no longer hashes to its own ref fails continuation closed', (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'current-integrity' });
   const run = beginRun(parent, { mode: 'full', objective: 'Produce one fold.' });
@@ -588,15 +589,13 @@ test('the current continuation must hash to its own ref before a successor may i
   rmSync(join(directory, 'capsules', `${committedRef}.json`));
 
   const next = mintSession({ sessionId: 'current-integrity-next' });
-  const successor = beginRun(next, {
-    mode: 'full',
-    objective: 'Must not inherit an edited current face.',
-    continuesFrom: committedRef
-  });
-  assert.equal(
-    getRunForTesting(successor.id).state.inherits.resolution,
-    'UNRESOLVED_LOCALLY',
-    'a matching capsule_ref field cannot make edited current bytes resolvable'
+  assert.throws(
+    () => beginRun(next, {
+      mode: 'full',
+      objective: 'Must not inherit an edited current face.',
+      continuesFrom: committedRef
+    }),
+    /CONTINUATION_PREDECESSOR_UNAVAILABLE/
   );
 });
 
@@ -705,7 +704,7 @@ test('an inherited legacy checkpoint is classified by its own anchor, not the up
   checkpointOrSeal(parent, 'mixed-stop-2');
 
   const successorSession = mintSession({ sessionId: 'mixed-next' });
-  const successor = beginRun(successorSession, { mode: 'full', objective: 'Successor.', continuesFrom: 'placeholder' });
+  const successor = beginRun(successorSession, { mode: 'full', objective: 'Successor.', continuesFrom: 'f'.repeat(64) });
   checkpointOrSeal(successorSession, 'mixed-next-stop');
   const successorDir = getRunForTesting(successor.id).directory;
 
@@ -782,13 +781,13 @@ test('an inherited archive declaring an unimplemented generation fails safe, not
   checkpointOrSeal(parent, 'unkfold-stop-2');
 
   const successorSession = mintSession({ sessionId: 'unkfold-next' });
-  const successor = beginRun(successorSession, { mode: 'full', objective: 'Successor.', continuesFrom: 'placeholder' });
+  const successor = beginRun(successorSession, { mode: 'full', objective: 'Successor.', continuesFrom: 'e'.repeat(64) });
   checkpointOrSeal(successorSession, 'unkfold-next-stop');
   const successorDir = getRunForTesting(successor.id).directory;
 
   const priorEvents = rechainLedger(directory, (event) => {
     if (event.type === 'checkpoint_anchor' && event.payload?.covers_seq === stopOneCount - 1) {
-      event.payload.continuation_fold_version = 'v2';
+      event.payload.continuation_fold_version = 'v999';
     }
   });
   const statePath = join(directory, 'state.json');
@@ -1378,7 +1377,8 @@ test('proof mode projects the words away but keeps the verdict auditable', (t) =
   assert.equal(capsule.privacy_mode, 'proof');
   assert.equal(capsule.claims[0].statement_text, undefined);
   assert.equal(capsule.claims[0].support, 'UNSUPPORTED');
-  assert.ok(capsule.claims[0].statement_ref, 'the claim stays addressable by hash');
+  assert.ok(capsule.claims[0].builder_claim_id, 'the claim stays addressable by a non-prose supervisor identity');
+  assert.equal(capsule.claims[0].statement_ref, null, 'proof mode stores no prose-derived statement hash');
 
   const handoff = readFileSync(join(directory, 'HANDOFF.md'), 'utf8');
   assert.doesNotMatch(handoff, /I deployed the migration/);
@@ -1446,7 +1446,7 @@ test('proof mode withholds the request from a packet that leaves the machine', (
 
   const capsule = JSON.parse(readFileSync(join(directory, 'continuation.json'), 'utf8'));
   assert.equal(capsule.objective_text, undefined);
-  assert.match(capsule.objective, /retained by hash/);
+  assert.equal(capsule.objective, 'Objective withheld.');
 
   const handoff = readFileSync(join(directory, 'HANDOFF.md'), 'utf8');
   assert.doesNotMatch(handoff, /Port the judgment ledger/);

@@ -51,15 +51,17 @@ function countBy(items, key) {
  * claim, so a claim citing another claim — or citing an unrelated `run_begun` — rendered SUPPORTED
  * and was promoted into `settled`. Preserved verbatim and never used for new packets, each old
  * packet still re-folds to its own published bytes and stays historically verifiable.
- *   v1  0.1.32 onward. A cited reference is only ever reported as RESOLVING, never as supporting,
+ *   v1  0.1.32. A cited reference is only ever reported as RESOLVING, never as supporting,
  *       and builder claims are never promoted into `settled`.
+ *   v2  0.1.33 onward. Adds the frozen claim contract and compiler/control carry-forward while
+ *       preserving every v1 field and its claim semantics.
  *
  * Dispatch reads the adapter version from the hash-chained `run_sealed` / `checkpoint_anchor`
  * event, never from the capsule: the capsule is unanchored, so a `continuation_fold_version` field
  * read from it would let a forged packet choose the reducer that makes it verify.
  */
-export const CURRENT_FOLD_VERSION = 'v1';
-export const KNOWN_FOLD_VERSIONS = ['v0_1_28', 'v0_1_29_30', 'v0', 'v1'];
+export const CURRENT_FOLD_VERSION = 'v2';
+export const KNOWN_FOLD_VERSIONS = ['v0_1_28', 'v0_1_29_30', 'v0', 'v1', 'v2'];
 
 const PRE_DECLARATION_FOLDS = new Set(['v0_1_28', 'v0_1_29_30', 'v0']);
 const LEGACY_CLAIM_FOLDS = PRE_DECLARATION_FOLDS;
@@ -69,7 +71,88 @@ function includesPrivacyMode(foldVersion) {
 }
 
 function includesObjectiveText(foldVersion) {
-  return foldVersion === 'v0' || foldVersion === 'v1';
+  return foldVersion === 'v0' || foldVersion === 'v1' || foldVersion === 'v2';
+}
+
+function buildClaimCompilerProjection(events) {
+  const contractEvent = events.find((event) => event.type === 'claim_contract_declared');
+  if (!contractEvent) return null;
+  const claimContractRef = `sha256:${contractEvent.event_hash}`;
+  const producerRequests = events.filter((event) => {
+    if (event.type !== 'producer_requested'
+      || event.origin !== 'mcp_routed'
+      || event.payload?.contract_id !== contractEvent.payload?.contract?.contract_id
+      || event.payload?.claim_contract_ref !== claimContractRef) return false;
+    const producer = contractEvent.payload?.profile_structural?.producers?.[event.payload?.producer_id];
+    const namedProducers = contractEvent.payload?.contract?.named_producers || [];
+    return Boolean(
+      producer
+      && namedProducers.includes(event.payload.producer_id)
+      && event.payload.expected_identity === producer.expected_identity
+    );
+  });
+  const compiledBindings = events.filter((event) => (
+    event.type === 'claim_compiled'
+    && event.origin === 'runtime_hook'
+    && event.payload?.claim_contract_ref === claimContractRef
+    && event.payload?.fold_version === 'v2'
+  ));
+  const compiledEvent = compiledBindings.at(-1);
+  const producerTerminals = new Map();
+  for (const event of events) {
+    const producer = contractEvent.payload?.profile_structural?.producers?.[event.payload?.producer_id];
+    const namedProducers = contractEvent.payload?.contract?.named_producers || [];
+    if (event.type !== 'producer_terminal'
+      || event.payload?.contract_id !== contractEvent.payload?.contract?.contract_id
+      || event.payload?.claim_contract_ref !== claimContractRef
+      || event.origin !== 'runtime_hook'
+      || !producer
+      || !namedProducers.includes(event.payload?.producer_id)
+      || event.payload?.producer_identity !== producer.expected_identity) continue;
+    producerTerminals.set(event.payload?.producer_id, event.payload?.status);
+  }
+  const diagnostics = new Map();
+  const diagnosticIsBound = (event) => {
+    if (event.origin !== 'runtime_hook'
+      || event.payload?.claim_contract_ref !== claimContractRef
+      || event.payload?.fold_version !== 'v2'
+      || typeof event.payload?.diagnostic_id !== 'string'
+      || typeof event.payload?.blocker_fingerprint !== 'string') return false;
+    const expectedStatus = event.type === 'diagnostic_emitted' ? 'OPEN' : 'RESOLVED';
+    if (event.payload?.diagnostic_status !== expectedStatus) return false;
+    return compiledBindings.some((compiled) => (
+      compiled.seq < event.seq
+      && compiled.payload?.input_digest === event.payload?.input_digest
+      && compiled.payload?.eligible_evidence_frontier === event.payload?.eligible_evidence_frontier
+      && compiled.payload?.material_control_frontier === event.payload?.material_control_frontier
+    ));
+  };
+  for (const event of events) {
+    if (event.type === 'diagnostic_emitted' && diagnosticIsBound(event)) diagnostics.set(event.payload?.diagnostic_id, { ...event.payload, event_ref: `sha256:${event.event_hash}` });
+    if (event.type === 'diagnostic_resolved' && diagnosticIsBound(event) && diagnostics.has(event.payload?.diagnostic_id)) {
+      diagnostics.set(event.payload.diagnostic_id, { ...diagnostics.get(event.payload.diagnostic_id), status: 'RESOLVED', resolved_ref: `sha256:${event.event_hash}` });
+    }
+  }
+  const latestAttempt = [...events].reverse().find((event) => (
+    event.type === 'closeout_attempted'
+    && event.origin === 'runtime_hook'
+    && event.payload?.claim_contract_ref === claimContractRef
+  ));
+  return {
+    claim_contract_ref: claimContractRef,
+    contract: contractEvent.payload?.contract ?? null,
+    profile_structural: contractEvent.payload?.profile_structural ?? null,
+    profile_requirements_hash: contractEvent.payload?.profile_requirements_hash ?? null,
+    compiled_state: compiledEvent?.payload ?? null,
+    pending_producers: producerRequests
+      .map((event) => event.payload?.producer_id)
+      .filter((id) => id && producerTerminals.get(id) !== 'CLEAN')
+      .filter((id, index, all) => all.indexOf(id) === index)
+      .sort(codepointCompare),
+    diagnostics: [...diagnostics.values()].sort((a, b) => codepointCompare(a.diagnostic_id, b.diagnostic_id)),
+    attempt_frontier: latestAttempt?.payload ?? null,
+    gate_samples: events.filter((event) => event.type === 'gate_sample_observed').map((event) => event.payload)
+  };
 }
 
 /**
@@ -177,6 +260,8 @@ function finishClaim(event, refs, unresolved, support, privacyMode) {
   const claim = {
     seq: event.seq,
     ref: `sha256:${event.event_hash}`,
+    ...(event.payload?.builder_claim_id ? { builder_claim_id: event.payload.builder_claim_id } : {}),
+    ...(event.payload?.builder_claim_ordinal ? { builder_claim_ordinal: event.payload.builder_claim_ordinal } : {}),
     statement: event.payload?.statement ?? '',
     statement_ref: event.payload?.statement_ref ?? null,
     evidence_refs: [...refs].sort(codepointCompare),
@@ -356,7 +441,8 @@ export function buildCarryForward(capsule, foldVersion = CURRENT_FOLD_VERSION) {
     event_count: capsule.witnessed.event_count,
     settled: capsule.settled,
     open: capsule.open,
-    next: capsule.next
+    next: capsule.next,
+    ...(foldVersion === 'v2' ? { claim_compiler: capsule.claim_compiler ?? null } : {})
   };
 }
 
@@ -389,7 +475,7 @@ export function buildContinuation(state, events, foldVersion = CURRENT_FOLD_VERS
     run_id: state.id,
     mode: state.mode,
     ...(includesPrivacyMode(foldVersion) ? { privacy_mode: privacyMode } : {}),
-    status: state.sealed ? 'SEALED' : state.close_requested ? 'CLOSE_REQUESTED_NOT_SEALED' : 'OPEN',
+    status: state.sealed ? (state.terminal_status || events.find((event) => event.type === 'run_sealed')?.payload?.status || 'SEALED') : state.close_requested ? 'CLOSE_REQUESTED_NOT_SEALED' : 'OPEN',
     objective: state.objective,
     ...(includesObjectiveText(foldVersion) && privacyMode !== 'proof' && state.objective_text
       ? { objective_text: state.objective_text }
@@ -400,6 +486,7 @@ export function buildContinuation(state, events, foldVersion = CURRENT_FOLD_VERS
     inherits: state.inherits || null,
     witnessed: buildWitnessed(state, events),
     claims,
+    ...(foldVersion === 'v2' ? { claim_compiler: buildClaimCompilerProjection(events) } : {}),
     settled: buildSettled(state, events, claims, foldVersion),
     open,
     next: buildNext(open),
@@ -407,7 +494,9 @@ export function buildContinuation(state, events, foldVersion = CURRENT_FOLD_VERS
       'This capsule was folded from the run ledger by the supervisor hook path; the agent did not author it.',
       'Settled, open, and next are derived from structural observations, not from agent narration.',
       'Absence inside configured coverage means not observed; it does not prove an action did not occur.',
-      'Nothing here approves, blocks, certifies, or judges correctness.'
+      ...(foldVersion === 'v2'
+        ? ['Nothing here approves, certifies, or judges correctness; a declared Lyhna claim gate may refuse only an unsupported Lyhna seal.']
+        : ['Nothing here approves, blocks, certifies, or judges correctness.'])
     ]
   };
   capsule.state_hash = deriveStateHash(capsule, foldVersion);
