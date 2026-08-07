@@ -354,7 +354,7 @@ function writeContinuationArtifacts(runId, state, events, foldVersion = CURRENT_
   // visible handoff but before its index used to let a successor fork an open contract as an
   // unrelated UNRESOLVED_LOCALLY run. An early index is safe: until the archive exists resolution
   // fails closed, while no caller can observe a new ref before continuation.json is replaced.
-  atomicWriteJson(capsuleIndexPath(published.capsule_ref), capsuleIndexRecord(runId, published.capsule_ref, state));
+  atomicWriteJson(capsuleIndexPath(published.capsule_ref), { run_id: runId, capsule_ref: published.capsule_ref });
   atomicWriteText(join(runDir(runId), 'continuation.json'), canonicalJson(published, true));
   atomicWriteText(join(runDir(runId), 'HANDOFF.md'), renderHandoffMarkdown(published));
   return published;
@@ -403,7 +403,7 @@ function ensureStopArtifacts(runId, state) {
         const staleArchive = capsuleArchivePath(runId, published.capsule_ref);
         if (!existsSync(staleArchive)) atomicWriteText(staleArchive, canonicalJson(published, true));
         if (!readJson(capsuleIndexPath(published.capsule_ref), null)) {
-          atomicWriteJson(capsuleIndexPath(published.capsule_ref), capsuleIndexRecord(runId, published.capsule_ref, state));
+          atomicWriteJson(capsuleIndexPath(published.capsule_ref), { run_id: runId, capsule_ref: published.capsule_ref });
         }
       }
     }
@@ -452,7 +452,7 @@ function ensureStopArtifacts(runId, state) {
   const archivePath = capsuleArchivePath(runId, ref);
   if (!existsSync(archivePath)) atomicWriteText(archivePath, canonicalJson(published, true));
   if (!readJson(capsuleIndexPath(ref), null)) {
-    atomicWriteJson(capsuleIndexPath(ref), capsuleIndexRecord(runId, ref, state));
+    atomicWriteJson(capsuleIndexPath(ref), { run_id: runId, capsule_ref: ref });
   }
   if (!existsSync(handoffPath)) atomicWriteText(handoffPath, renderHandoffMarkdown(published));
 }
@@ -461,14 +461,6 @@ function ensureStopArtifacts(runId, state) {
 // session_id) can resolve the predecessor it names. Mirrors the receipt index.
 function capsuleIndexPath(capsuleRef) {
   return join(root(), 'capsule-index', `${sha256(capsuleRef)}.json`);
-}
-
-function capsuleIndexRecord(runId, capsuleRef, state) {
-  return {
-    run_id: runId,
-    capsule_ref: capsuleRef,
-    open_claim_contract: Boolean(state?.claim_contract && !state?.sealed)
-  };
 }
 
 /** The immutable per-fold archive inside the run packet, keyed by content-addressed ref. */
@@ -484,10 +476,10 @@ function capsuleArchivePath(runId, capsuleRef) {
  * predecessor's carry-forward state was — the commitment sealed into this run's chain either
  * matches the prior packet or the lineage check fails.
  *
- * A never-seen ref is recorded as UNRESOLVED: the packet may live on another machine. A valid
- * legacy/sealed index whose packet disappeared retains that portable result. A corrupt index or
- * one that positively records an open contract fails closed because it may identify the sole
- * writable history.
+ * A never-seen ref is recorded as UNRESOLVED: the packet may live on another machine. Once this
+ * store indexed a ref, losing the packet or archive fails closed. The index is only a locator, not
+ * trusted proof of whether the missing run was sealed; accepting mutable status metadata here
+ * would let a corrupted open-contract index fork a second writable history.
  */
 function resolveContinuesFrom(capsuleRef) {
   const ref = String(capsuleRef || '').trim();
@@ -518,14 +510,7 @@ function resolveContinuesFrom(capsuleRef) {
       resolution: 'RESOLVED_LOCAL_ARCHIVE'
     };
   }
-  const corruptIndex = indexExists && (
-    !indexed
-    || typeof indexed !== 'object'
-    || Array.isArray(indexed)
-    || typeof indexed.run_id !== 'string'
-    || indexed.capsule_ref !== ref
-  );
-  if (corruptIndex || indexed?.open_claim_contract === true) {
+  if (indexExists) {
     return { capsule_ref: ref, run_id: priorRunId, state_hash: null, resolution: 'LOCAL_PREDECESSOR_UNAVAILABLE' };
   }
   return { capsule_ref: ref, run_id: null, state_hash: null, resolution: 'UNRESOLVED_LOCALLY' };
@@ -2762,7 +2747,7 @@ function finalizeRunSealUnlocked(runId, current, terminalStatus = 'SEALED', seal
   atomicWriteText(join(runDir(runId), 'receipt.json'), receiptJson);
   atomicWriteText(join(runDir(runId), 'RECEIPT.md'), receiptMarkdown);
   const capsule = writeContinuationArtifacts(runId, current, events);
-  atomicWriteJson(capsuleIndexPath(capsule.capsule_ref), capsuleIndexRecord(runId, capsule.capsule_ref, current));
+  atomicWriteJson(capsuleIndexPath(capsule.capsule_ref), { run_id: runId, capsule_ref: capsule.capsule_ref });
   atomicWriteJson(anchorPath(runId), {
     run_id: runId,
     final_seq: current.ledger_count,
@@ -3180,7 +3165,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     atomicWriteText(join(runDir(runId), 'receipt.json'), receiptJson);
     atomicWriteText(join(runDir(runId), 'RECEIPT.md'), receiptMarkdown);
     const capsule = writeContinuationArtifacts(runId, current, events);
-    atomicWriteJson(capsuleIndexPath(capsule.capsule_ref), capsuleIndexRecord(runId, capsule.capsule_ref, current));
+    atomicWriteJson(capsuleIndexPath(capsule.capsule_ref), { run_id: runId, capsule_ref: capsule.capsule_ref });
     atomicWriteJson(anchorPath(runId), {
       run_id: runId,
       final_seq: current.ledger_count,

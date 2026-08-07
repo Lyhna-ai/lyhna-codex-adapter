@@ -1976,8 +1976,6 @@ test('an indexed open-contract predecessor that disappears fails continuation cl
   checkpointOrSeal(firstParent, 'missing-indexed-predecessor-stop');
   const packet = getRunForTesting(run.id);
   const capsuleRef = JSON.parse(readFileSync(join(packet.directory, 'continuation.json'), 'utf8')).capsule_ref;
-  const indexPath = join(packet.directory, '..', '..', 'capsule-index', `${sha256(capsuleRef)}.json`);
-  assert.equal(JSON.parse(readFileSync(indexPath, 'utf8')).open_claim_contract, true);
   rmSync(packet.directory, { recursive: true, force: true });
 
   const successor = mintSession({ sessionId: 'compiler-missing-indexed-predecessor-two', cwd: process.cwd() });
