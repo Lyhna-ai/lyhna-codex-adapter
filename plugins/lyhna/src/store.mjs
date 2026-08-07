@@ -488,7 +488,9 @@ function capsuleArchivePath(runId, capsuleRef) {
 function resolveContinuesFrom(capsuleRef) {
   const ref = String(capsuleRef || '').trim();
   if (!ref) return null;
-  const indexed = readJson(capsuleIndexPath(ref), null);
+  const indexPath = capsuleIndexPath(ref);
+  const indexExists = existsSync(indexPath);
+  const indexed = readJson(indexPath, null);
   const priorRunId = indexed?.run_id;
   const published = priorRunId ? readJson(join(runDir(priorRunId), 'continuation.json'), null) : null;
   if (published && published.capsule_ref === ref && deriveCapsuleRef(published) === ref) {
@@ -512,7 +514,7 @@ function resolveContinuesFrom(capsuleRef) {
       resolution: 'RESOLVED_LOCAL_ARCHIVE'
     };
   }
-  if (indexed) {
+  if (indexExists) {
     return { capsule_ref: ref, run_id: priorRunId, state_hash: null, resolution: 'LOCAL_PREDECESSOR_UNAVAILABLE' };
   }
   return { capsule_ref: ref, run_id: null, state_hash: null, resolution: 'UNRESOLVED_LOCALLY' };

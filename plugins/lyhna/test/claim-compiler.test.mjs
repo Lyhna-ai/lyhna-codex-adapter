@@ -1985,6 +1985,29 @@ test('an indexed open-contract predecessor that disappears fails continuation cl
   );
 });
 
+test('every falsy JSON value in an existing capsule index fails continuation closed', { concurrency: false }, (t) => {
+  const root = isolatedData(t);
+  const firstParent = mintSession({ sessionId: 'compiler-falsy-index-one', cwd: process.cwd() });
+  const run = beginRun(firstParent, { mode: 'full', objective: 'Keep one writable claim history.' });
+  declareClaimContract(firstParent, contract());
+  checkpointOrSeal(firstParent, 'falsy-index-stop');
+  const packet = getRunForTesting(run.id);
+  const capsuleRef = JSON.parse(readFileSync(join(packet.directory, 'continuation.json'), 'utf8')).capsule_ref;
+  const indexPath = join(root, 'capsule-index', `${sha256(capsuleRef)}.json`);
+  const validIndex = readFileSync(indexPath, 'utf8');
+
+  for (const [label, value] of [['null', null], ['false', false], ['zero', 0], ['empty-string', '']]) {
+    writeFileSync(indexPath, canonicalJson(value, true));
+    const successor = mintSession({ sessionId: `compiler-falsy-index-${label}`, cwd: process.cwd() });
+    assert.throws(
+      () => beginRun(successor, { mode: 'full', objective: 'Fail closed.', continuesFrom: capsuleRef }),
+      /CONTINUATION_PREDECESSOR_UNAVAILABLE/,
+      `${label} must not turn an existing corrupt index into a never-seen portable reference`
+    );
+    writeFileSync(indexPath, validIndex);
+  }
+});
+
 test('an open v2 lease transfer fails closed when the mutable state cache was altered after its checkpoint', { concurrency: false }, (t) => {
   isolatedData(t);
   const firstParent = mintSession({ sessionId: 'compiler-tampered-window-one', cwd: process.cwd() });
