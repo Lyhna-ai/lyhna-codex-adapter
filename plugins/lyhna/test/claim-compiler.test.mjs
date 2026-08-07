@@ -18,6 +18,7 @@ import {
   markSnapshotRefreshed,
   mintChild,
   mintSession,
+  PROOF_IDENTITY_PROVENANCE,
   readSealedReceipt,
   recordClaim,
   recordEvaluation,
@@ -137,6 +138,27 @@ const REGISTERED_EVENT_TYPES = [
   'run_sealed',
   'turn_checkpoint'
 ];
+
+function assertNoProseDerivedProofIdentities(events) {
+  const forbidden = Object.entries(PROOF_IDENTITY_PROVENANCE)
+    .filter(([, policy]) => policy === 'prose_derived_forbidden');
+  assert.deepEqual(forbidden.map(([selector]) => selector).sort(), [
+    'builder_claim.statement_ref',
+    'close_requested.reason_ref',
+    'evaluation_finding.statement_ref',
+    'hook_*.payload_ref'
+  ]);
+  for (const event of events) {
+    for (const [selector] of forbidden) {
+      const split = selector.lastIndexOf('.');
+      const eventPattern = selector.slice(0, split);
+      const field = selector.slice(split + 1);
+      if (eventPattern === event.type || (eventPattern === 'hook_*' && event.type.startsWith('hook_'))) {
+        assert.equal(Object.hasOwn(event.payload, field), false, `${selector} entered a proof ledger`);
+      }
+    }
+  }
+}
 
 const REQUIREMENT_SUBJECTS = {
   source_identity: { source_ref: 'sha256:source' },
@@ -1538,6 +1560,7 @@ test('proof-mode v2 withholds objective, claim, diagnostic, and closeout prose b
   checkpointOrSeal(parent, `id_${sha256('proof-stop-3')}`);
 
   const packet = getRunForTesting(run.id);
+  assertNoProseDerivedProofIdentities(packet.events);
   const files = readTree(packet.directory).join('\n');
   for (const raw of [objective, statement, closeReason, snapshotFailure]) assert.equal(files.includes(raw), false, `withheld prose leaked: ${raw}`);
   assert.equal(packet.events.some((event) => JSON.stringify(event).includes(statement)), false);
@@ -1760,6 +1783,7 @@ test('proof-mode evaluator prose is withheld from state and child receipts, not 
     detached_before: true, detached_after: true
   });
   sealChildByAgent({ sessionId, agentId: 'proof-evaluator-child' });
+  assertNoProseDerivedProofIdentities(getRunForTesting(run.id).events);
   const bytes = readTree(getRunForTesting(run.id).directory).join('\n');
   assert.equal(bytes.includes(secret), false);
   assert.equal(bytes.includes(checkoutSecret), false);
@@ -2205,27 +2229,34 @@ test('a replayed closeout Stop resumes when the checkpoint landed before the att
   assert.equal(final.state.sealed, false);
 });
 
-test('a completed blocked Stop replay reproduces decision:block without incrementing the cap', { concurrency: false }, (t) => {
+test('a completed blocked Stop redelivery spends the next bounded slot and still fails toward unsupported close', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-completed-block-replay', cwd: process.cwd() });
-  const run = beginRun(parent, { mode: 'full', objective: 'Keep a completed blocked response idempotent.' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Fail an ambiguous completed redelivery toward bounded unsupported close.' });
   declareClaimContract(parent, contract());
   requestClose(parent, 'Close only through the declared claim gate.');
 
-  const first = checkpointOrSeal(parent, 'id_'.concat(sha256('completed-block-stop')));
+  const deliveryKey = 'id_'.concat(sha256('completed-block-stop'));
+  const first = checkpointOrSeal(parent, deliveryKey);
   assert.equal(first.status, 'CLOSE_DEFERRED');
   assert.equal(first.decision, 'block');
   assert.equal(first.closeout_attempt_ordinal, 1);
-  const beforeReplay = getRunForTesting(run.id).events;
 
-  const replayed = checkpointOrSeal(parent, 'id_'.concat(sha256('completed-block-stop')));
-  assert.equal(replayed.status, 'CLOSE_DEFERRED');
-  assert.equal(replayed.decision, 'block');
-  assert.equal(replayed.closeout_attempt_ordinal, 1);
-  assert.equal(replayed.replayed_delivery, true);
-  const afterReplay = getRunForTesting(run.id).events;
-  assert.equal(afterReplay.length, beforeReplay.length);
-  assert.equal(afterReplay.filter((event) => event.type === 'closeout_attempted').length, 1);
+  const redelivered = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(redelivered.status, 'CLOSE_DEFERRED');
+  assert.equal(redelivered.decision, 'block');
+  assert.equal(redelivered.closeout_attempt_ordinal, 2);
+  assert.equal(redelivered.replayed_delivery, undefined);
+
+  const third = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(third.status, 'CLOSED_UNSUPPORTED');
+  const final = getRunForTesting(run.id);
+  assert.deepEqual(
+    final.events.filter((event) => event.type === 'closeout_attempted').map((event) => event.payload.ordinal),
+    [1, 2, 3]
+  );
+  assert.equal(final.events.filter((event) => event.type === 'turn_checkpoint').length, 3);
+  assert.equal(final.events.filter((event) => event.type === 'run_sealed').length, 1);
 });
 
 test('a contracted Stop without a host delivery identity fails closed before recording an attempt', { concurrency: false }, (t) => {

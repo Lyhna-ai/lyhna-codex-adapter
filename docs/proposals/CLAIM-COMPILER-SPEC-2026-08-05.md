@@ -340,6 +340,17 @@ occurrence. Attempts one and two return `decision: "block"`; attempt three appen
 non-success envelope and terminal seal. A changed eligible evidence frontier also recomputes the
 blocker set and resulting fingerprint.
 
+For a contracted closeout, the durable checkpoint identity is the host delivery key plus the count
+of fully published closeout attempts already recorded under that key. An incomplete slot is replayed
+in place so checkpoint-, attempt-, and envelope-interruption recovery stays idempotent. Once a
+blocked attempt and its checkpoint anchor are both durable, the next Stop observation under the same
+host delivery key uses the next bounded slot. Codex may redeliver a completed Stop response with the
+same host key, and the adapter cannot distinguish that redelivery from a genuine same-turn
+continuation. The selected fail-direction is therefore explicit: that ambiguous completed
+redelivery spends one additional bounded attempt and still returns `decision: "block"` until the
+third unchanged attempt seals only `CLOSED_UNSUPPORTED`. This is the sole exception to completed
+hook-delivery idempotency; it cannot produce a successful seal or alter the blocker fingerprint.
+
 ## Privacy projection
 
 The canonical privacy enum remains the shipped `verified_context | proof`.
@@ -372,6 +383,10 @@ The v2 proof projection registry is closed, versioned, and exhaustive for text-b
 
 A v2 writer rejects any unregistered event type or text-bearing field before append; it never
 passes an unknown field through. This table governs existing event names as well as new families.
+Every identity-shaped field on an event family that can receive model-authored prose is also listed
+in one closed provenance registry. The registry distinguishes supervisor-, host-, and
+witness-structural identities from prose-derived fields, and proof mode rejects both an undeclared
+identity field and any field marked prose-derived before event hashing.
 
 Proof-mode events and exported artifacts must not contain the withheld text. This v2 at-write rule
 does not rewrite or change the bytes of any legacy v1 event, ledger, fixture, or receipt. The v2

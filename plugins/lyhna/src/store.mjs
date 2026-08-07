@@ -80,6 +80,53 @@ const EVENT_PAYLOAD_FIELDS = new Map([
   ['run_sealed', ['status', 'receipt_renderer', 'continuation_fold_version', 'claim_contract_ref', 'supported_state', 'requested_state', 'closeout_envelope_ref']],
   ['turn_checkpoint', ['status', 'receipt_renderer']]
 ]);
+// Identity-like fields on event families that can receive model-authored prose must declare their
+// provenance here. Proof projection rejects an undeclared identity field and rejects every field
+// marked prose-derived before hashing. This turns the privacy rule into a closed registry instead
+// of relying on reviewers to notice each new `*_ref` or `*_id` point fix.
+export const PROOF_IDENTITY_PROVENANCE = Object.freeze({
+  'builder_claim.builder_claim_id': 'supervisor_structural',
+  'builder_claim.evidence_refs': 'witnessed_structural_refs',
+  'builder_claim.statement_ref': 'prose_derived_forbidden',
+  'evaluation_finding.finding_id': 'supervisor_structural',
+  'evaluation_finding.evaluation_request_id': 'supervisor_structural',
+  'evaluation_finding.evidence_refs': 'witnessed_structural_refs',
+  'evaluation_finding.statement_ref': 'prose_derived_forbidden',
+  'close_requested.request_id': 'supervisor_structural',
+  'close_requested.reason_ref': 'prose_derived_forbidden',
+  'run_begun.objective_ref': 'supervisor_structural',
+  'run_begun.claim_contract_id': 'supervisor_structural',
+  'hook_*.event_id': 'host_structural',
+  'hook_*.cwd_ref': 'host_context_digest',
+  'hook_*.payload_ref': 'prose_derived_forbidden'
+});
+const PROOF_IDENTITY_FIELD = /(?:^|_)(?:id|ref|refs|digest|fingerprint|hash)$/;
+const PROOF_IDENTITY_EVENT = new Set(['builder_claim', 'evaluation_finding', 'close_requested', 'run_begun']);
+
+function proofIdentityPolicy(type, field) {
+  return PROOF_IDENTITY_PROVENANCE[`${type}.${field}`]
+    || (type.startsWith('hook_') ? PROOF_IDENTITY_PROVENANCE[`hook_*.${field}`] : null);
+}
+
+function validateProofIdentityProvenance(state, type, payload) {
+  if (state.privacy_mode !== 'proof') return;
+  const governed = PROOF_IDENTITY_EVENT.has(type) || type.startsWith('hook_');
+  if (!governed) return;
+  for (const field of Object.keys(payload)) {
+    if (!PROOF_IDENTITY_FIELD.test(field)) continue;
+    const policy = proofIdentityPolicy(type, field);
+    assert(policy && policy !== 'prose_derived_forbidden', 'UNREGISTERED_PROOF_IDENTITY_FIELD');
+  }
+  for (const [selector, policy] of Object.entries(PROOF_IDENTITY_PROVENANCE)) {
+    if (policy !== 'prose_derived_forbidden') continue;
+    const split = selector.lastIndexOf('.');
+    const eventPattern = selector.slice(0, split);
+    const field = selector.slice(split + 1);
+    if (eventPattern === type || (eventPattern === 'hook_*' && type.startsWith('hook_'))) {
+      assert(!Object.hasOwn(payload, field), 'PROSE_DERIVED_PROOF_IDENTITY');
+    }
+  }
+}
 const PRODUCER_TERMINAL_STATUSES = new Set(['CLEAN', 'FINDINGS', 'INVALID', 'STALE']);
 const EVALUATION_TRIGGERS = new Set(['initial', 'post_fix_reeval', 'gate_audit', 're_examination']);
 const LIFECYCLE_TRANSITION_TYPES = new Set([
@@ -1458,6 +1505,7 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
   const normalizedPayload = normalizeEventPayloadForStorage(type, payload);
   validateEventPayloadStructure(state, type, origin, normalizedPayload);
   const projectedPayload = projectEventPayloadForPrivacy(state, type, normalizedPayload);
+  validateProofIdentityProvenance(state, type, projectedPayload);
   const { events, tip } = parseLedger(runId);
   const latestEnvelope = [...events].reverse().find((event) => event.type === 'closeout_envelope_generated');
   if (latestEnvelope && latestEnvelope.seq !== events.at(-1)?.seq) {
@@ -2768,6 +2816,48 @@ function finalizeRunSealUnlocked(runId, current, terminalStatus = 'SEALED', seal
   };
 }
 
+function storedStopCheckpointKey(privacyMode, checkpointKey) {
+  return privacyMode === 'proof'
+    ? `idempotency_${sha256(checkpointKey)}`
+    : checkpointKey;
+}
+
+function stopCheckpointForSlot(events, privacyMode, deliveryKey, slot) {
+  const rawKeys = [`checkpoint:${deliveryKey}#${slot}`];
+  // v0.1.33 wrote the first delivery checkpoint without an explicit slot. Recognize that shape as
+  // slot zero so an already-open installed packet advances instead of starting a second slot zero.
+  if (slot === 0) rawKeys.push(`checkpoint:${deliveryKey}`);
+  const storedKeys = new Set(rawKeys.map((key) => storedStopCheckpointKey(privacyMode, key)));
+  const matches = events.filter((event) => (
+    event.type === 'turn_checkpoint' && storedKeys.has(event.idempotency_key)
+  ));
+  assert(matches.length <= 1, 'STOP_CHECKPOINT_SLOT_CONFLICT');
+  return matches[0] || null;
+}
+
+function completedAttemptsUnderDeliveryKey(events, privacyMode, deliveryKey) {
+  let slot = 0;
+  while (slot <= events.length) {
+    const checkpoint = stopCheckpointForSlot(events, privacyMode, deliveryKey, slot);
+    if (!checkpoint) return slot;
+    const nextCheckpoint = events.find((event) => (
+      event.seq > checkpoint.seq && event.type === 'turn_checkpoint'
+    ));
+    const deliveryTail = events.filter((event) => (
+      event.seq > checkpoint.seq && (!nextCheckpoint || event.seq < nextCheckpoint.seq)
+    ));
+    const attempt = deliveryTail.find((event) => event.type === 'closeout_attempted');
+    const completed = deliveryTail.some((event) => (
+      event.type === 'checkpoint_anchor' || event.type === 'closeout_envelope_generated'
+    ));
+    // An incomplete slot is replayed in place so torn checkpoint, attempt, and envelope writes keep
+    // their existing recovery semantics. Only a fully published blocked attempt spends the slot.
+    if (!attempt || !completed) return slot;
+    slot += 1;
+  }
+  throw Object.assign(new Error('STOP_CHECKPOINT_SLOT_RANGE'), { code: 'STOP_CHECKPOINT_SLOT_RANGE' });
+}
+
 export function checkpointOrSeal(capability, deliveryKey = null) {
   const runId = locateOpenClaimRunForParent(capability);
   if (!runId) return { status: 'NO_ACTIVE_RUN' };
@@ -2839,11 +2929,17 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     const legacyStopFrontier = [...preEvents].reverse().find((event) => (
       !['turn_checkpoint', 'checkpoint_anchor', 'close_deferred'].includes(event.type)
     ))?.event_hash || ZERO_HASH;
-    const checkpointKey = `checkpoint:${deliveryKey || `auto_${legacyStopFrontier}`}`;
-    const storedCheckpointKey = current.privacy_mode === 'proof'
-      ? `idempotency_${sha256(checkpointKey)}`
-      : checkpointKey;
-    const priorCheckpoint = preEvents.find((event) => event.idempotency_key === storedCheckpointKey);
+    const contractedCloseoutDelivery = Boolean(current.close_requested && current.claim_contract && deliveryKey);
+    const completedDeliveryAttempts = contractedCloseoutDelivery
+      ? completedAttemptsUnderDeliveryKey(preEvents, current.privacy_mode, deliveryKey)
+      : null;
+    const checkpointKey = contractedCloseoutDelivery
+      ? `checkpoint:${deliveryKey}#${completedDeliveryAttempts}`
+      : `checkpoint:${deliveryKey || `auto_${legacyStopFrontier}`}`;
+    const storedCheckpointKey = storedStopCheckpointKey(current.privacy_mode, checkpointKey);
+    const priorCheckpoint = contractedCloseoutDelivery
+      ? stopCheckpointForSlot(preEvents, current.privacy_mode, deliveryKey, completedDeliveryAttempts)
+      : preEvents.find((event) => event.idempotency_key === storedCheckpointKey);
     let resumeCloseoutAfterCheckpoint = false;
     if (priorCheckpoint) {
       const nextCheckpoint = preEvents.find((event) => event.seq > priorCheckpoint.seq && event.type === 'turn_checkpoint');

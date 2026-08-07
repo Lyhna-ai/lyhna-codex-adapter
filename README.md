@@ -6,7 +6,7 @@ Lyhna records what was observed. It does not approve, block, certify, merge, or 
 
 ## Plugin package format
 
-The plugin now carries an Agent Plugins 1.0.0 portable core and a current Codex compatibility layer:
+The plugin carries a schema-valid Agent Plugins 1.0.0 Working Draft core and a current Codex compatibility layer:
 
 - `plugins/lyhna/plugin.json` is the portable root manifest.
 - `plugins/lyhna/skills/` contains the Agent Skill.
@@ -14,7 +14,7 @@ The plugin now carries an Agent Plugins 1.0.0 portable core and a current Codex 
 - `plugins/lyhna/ai.lyhna.codex/` contains Codex-specific lifecycle hooks under a reverse-domain extension namespace.
 - `plugins/lyhna/.codex-plugin/plugin.json`, `.mcp.json`, and the default `hooks/` bridge remain the compatibility entrypoints required by the current Codex loader.
 
-Portable clients can discover the Agent Skill and MCP server while ignoring the Codex compatibility files and extension. The complete witnessed-run flow remains Codex-specific because it depends on Codex lifecycle hooks and hook-issued capabilities. Current Codex loads the compatibility manifest, which points at the same skill, server implementation, and namespaced hook entrypoint.
+The portable files are forward-looking interoperability packaging, not a claim that a shipped non-Codex client has loaded or accepted Lyhna. The complete witnessed-run flow remains Codex-specific because it depends on Codex lifecycle hooks and hook-issued capabilities. Current Codex loads the compatibility manifest, which points at the same skill, server implementation, and namespaced hook entrypoint; the install instructions below describe only that live-tested path.
 
 ## Handing off between context windows
 
