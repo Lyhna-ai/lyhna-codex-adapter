@@ -31,6 +31,19 @@ function deliveryIdentity(input, payload, { includeTurn = false } = {}) {
   const childIdentity = payload.event === 'SubagentStart' || payload.event === 'SubagentStop'
     ? input.agent_id
     : null;
+  if (payload.event === 'Stop' && includeTurn) {
+    const hostBoundary = payload.event_id || input.turn_id;
+    if (!hostBoundary) return null;
+    // Codex intentionally reuses turn_id after a blocking Stop continuation. The latest assistant
+    // message is the remaining host-observed boundary: an exact redelivery has identical bytes,
+    // while a genuine continuation produces a new completion. Hash it immediately so no message
+    // text enters the checkpoint key or ledger. A missing message fails toward replay/idempotency.
+    const messageBoundary = typeof input.last_assistant_message === 'string'
+      ? sha256(input.last_assistant_message)
+      : 'message_unavailable';
+    const continuationState = input.stop_hook_active === true ? 'continued' : 'initial';
+    return `id_${sha256(`${hostBoundary}:${continuationState}:${messageBoundary}`)}`;
+  }
   const explicit = payload.event_id || childIdentity || (includeTurn ? input.turn_id : null);
   return explicit ? `id_${sha256(String(explicit))}` : null;
 }
