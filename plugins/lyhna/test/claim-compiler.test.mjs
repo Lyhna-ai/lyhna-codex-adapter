@@ -1968,6 +1968,23 @@ test('a stale archived capsule cannot fork an open contracted run and the curren
   assert.equal(getRunForTesting(run.id).events.filter((event) => event.type === 'continuation_lease_transferred').length, 1);
 });
 
+test('an indexed open-contract predecessor that disappears fails continuation closed', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const firstParent = mintSession({ sessionId: 'compiler-missing-indexed-predecessor-one', cwd: process.cwd() });
+  const run = beginRun(firstParent, { mode: 'full', objective: 'Do not fork this open contract.' });
+  declareClaimContract(firstParent, contract());
+  checkpointOrSeal(firstParent, 'missing-indexed-predecessor-stop');
+  const packet = getRunForTesting(run.id);
+  const capsuleRef = JSON.parse(readFileSync(join(packet.directory, 'continuation.json'), 'utf8')).capsule_ref;
+  rmSync(packet.directory, { recursive: true, force: true });
+
+  const successor = mintSession({ sessionId: 'compiler-missing-indexed-predecessor-two', cwd: process.cwd() });
+  assert.throws(
+    () => beginRun(successor, { mode: 'full', objective: 'Fail closed.', continuesFrom: capsuleRef }),
+    /CONTINUATION_PREDECESSOR_UNAVAILABLE/
+  );
+});
+
 test('an open v2 lease transfer fails closed when the mutable state cache was altered after its checkpoint', { concurrency: false }, (t) => {
   isolatedData(t);
   const firstParent = mintSession({ sessionId: 'compiler-tampered-window-one', cwd: process.cwd() });

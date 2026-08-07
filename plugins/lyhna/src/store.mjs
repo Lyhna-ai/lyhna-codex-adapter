@@ -481,8 +481,9 @@ function capsuleArchivePath(runId, capsuleRef) {
  * predecessor's carry-forward state was — the commitment sealed into this run's chain either
  * matches the prior packet or the lineage check fails.
  *
- * A ref this store cannot see is recorded as UNRESOLVED rather than rejected: the packet may be
- * genuine and simply live on another machine. Silence would be the overclaim.
+ * A never-seen ref is recorded as UNRESOLVED: the packet may live on another machine. An indexed
+ * local predecessor whose packet and archive disappeared is different evidence; continuation must
+ * fail closed because it may be the sole open-contract history.
  */
 function resolveContinuesFrom(capsuleRef) {
   const ref = String(capsuleRef || '').trim();
@@ -510,6 +511,9 @@ function resolveContinuesFrom(capsuleRef) {
       state_hash: archived.state_hash,
       resolution: 'RESOLVED_LOCAL_ARCHIVE'
     };
+  }
+  if (indexed) {
+    return { capsule_ref: ref, run_id: priorRunId, state_hash: null, resolution: 'LOCAL_PREDECESSOR_UNAVAILABLE' };
   }
   return { capsule_ref: ref, run_id: null, state_hash: null, resolution: 'UNRESOLVED_LOCALLY' };
 }
@@ -1640,6 +1644,7 @@ export function beginRun(capability, { mode, objective = '', continuesFrom = '',
     if (!current && continuesFrom) {
       const transferred = (() => {
         const resolved = resolveContinuesFrom(continuesFrom);
+        assert(resolved?.resolution !== 'LOCAL_PREDECESSOR_UNAVAILABLE', 'CONTINUATION_PREDECESSOR_UNAVAILABLE');
         if (resolved?.resolution === 'RESOLVED_LOCAL_ARCHIVE' && resolved.run_id) {
           return withLock(lockPath(resolved.run_id), () => {
             const prior = loadState(resolved.run_id);

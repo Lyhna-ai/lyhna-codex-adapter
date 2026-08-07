@@ -518,7 +518,7 @@ test('a replayed Stop restores an archive lost after the visible handoff landed'
   assert.equal(getRunForTesting(successor.id).state.inherits.resolution, 'RESOLVED_LOCAL_ARCHIVE');
 });
 
-test('an archived fold must hash to its own name before a successor may inherit it', (t) => {
+test('an indexed archived fold that no longer hashes to its own name fails continuation closed', (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'archive-integrity' });
   const run = beginRun(parent, { mode: 'full', objective: 'Produce two folds.' });
@@ -535,15 +535,14 @@ test('an archived fold must hash to its own name before a successor may inherit 
   writeFileSync(archivePath, canonicalJson(tampered, true));
 
   const next = mintSession({ sessionId: 'archive-integrity-next' });
-  const successor = beginRun(next, {
-    mode: 'full',
-    objective: 'Must not inherit a forged archive.',
-    continuesFrom: first.capsule_ref
-  });
-  assert.equal(
-    getRunForTesting(successor.id).state.inherits.resolution,
-    'UNRESOLVED_LOCALLY',
-    'matching the capsule_ref field is insufficient; the archived bytes must recompute to that ref'
+  assert.throws(
+    () => beginRun(next, {
+      mode: 'full',
+      objective: 'Must not inherit a forged archive.',
+      continuesFrom: first.capsule_ref
+    }),
+    /CONTINUATION_PREDECESSOR_UNAVAILABLE/,
+    'a known local predecessor whose archived bytes no longer match must not open a second writable run'
   );
 });
 
@@ -577,7 +576,7 @@ test('lineage validates the signature on the archived fold actually inherited', 
   assert.equal(report.ok, false, 'an invalid signature on the inherited archive must prevent LINKED');
 });
 
-test('the current continuation must hash to its own ref before a successor may inherit it', (t) => {
+test('an indexed current continuation that no longer hashes to its own ref fails continuation closed', (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'current-integrity' });
   const run = beginRun(parent, { mode: 'full', objective: 'Produce one fold.' });
@@ -591,15 +590,14 @@ test('the current continuation must hash to its own ref before a successor may i
   rmSync(join(directory, 'capsules', `${committedRef}.json`));
 
   const next = mintSession({ sessionId: 'current-integrity-next' });
-  const successor = beginRun(next, {
-    mode: 'full',
-    objective: 'Must not inherit an edited current face.',
-    continuesFrom: committedRef
-  });
-  assert.equal(
-    getRunForTesting(successor.id).state.inherits.resolution,
-    'UNRESOLVED_LOCALLY',
-    'a matching capsule_ref field cannot make edited current bytes resolvable'
+  assert.throws(
+    () => beginRun(next, {
+      mode: 'full',
+      objective: 'Must not inherit an edited current face.',
+      continuesFrom: committedRef
+    }),
+    /CONTINUATION_PREDECESSOR_UNAVAILABLE/,
+    'a known local predecessor whose current bytes were edited must not open a second writable run'
   );
 });
 
