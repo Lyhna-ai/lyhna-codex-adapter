@@ -26,6 +26,7 @@ import {
   requestClaimProducer,
   requestClose,
   sealChildByAgent,
+  verifyRun,
   verifySealedRun
 } from '../src/store.mjs';
 import { isolatedData } from './helpers.mjs';
@@ -2279,7 +2280,19 @@ test('a completed same-key Stop cannot turn newly supporting evidence into a suc
     () => checkpointOrSeal(parent, 'completed-redelivery-success-key'),
     /STOP_DELIVERY_FRONTIER_CHANGED/
   );
-  assert.equal(getRunForTesting(run.id).events.some((event) => event.type === 'run_sealed'), false);
+  const failedPacket = getRunForTesting(run.id);
+  assert.equal(failedPacket.events.some((event) => event.type === 'run_sealed'), false);
+  assert.equal(failedPacket.events.filter((event) => event.type === 'turn_checkpoint').length, 1);
+  assert.equal(failedPacket.events.at(-1).type, 'checkpoint_anchor');
+  const failedVerification = verifyRun(run.id);
+  assert.equal(failedVerification.status, 'CHECKPOINT_VERIFIED');
+  assert.equal(failedVerification.ledger_advanced, false);
+  const failedEventCount = failedPacket.events.length;
+  assert.throws(
+    () => checkpointOrSeal(parent, 'completed-redelivery-success-key'),
+    /STOP_DELIVERY_FRONTIER_CHANGED/
+  );
+  assert.equal(getRunForTesting(run.id).events.length, failedEventCount);
   assert.equal(checkpointOrSeal(parent, 'fresh-success-key').status, 'SEALED');
 });
 

@@ -3024,6 +3024,34 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     const priorCheckpoint = contractedCloseoutDelivery
       ? stopCheckpointForSlot(preEvents, current.privacy_mode, deliveryKey, completedDeliveryAttempts)
       : preEvents.find((event) => event.idempotency_key === storedCheckpointKey);
+    if (contractedCloseoutDelivery && completedDeliveryAttempts > 0) {
+      const priorSameDeliveryAttempt = stopAttemptForSlot(
+        preEvents,
+        current.privacy_mode,
+        deliveryKey,
+        completedDeliveryAttempts - 1
+      );
+      assert(priorSameDeliveryAttempt, 'STOP_DELIVERY_ATTEMPT_MISSING');
+      const gateId = current.claim_contract.declared_gate_ids[0];
+      const preview = compileClaim({
+        profile: current.claim_profile,
+        contract: current.claim_contract,
+        events: preEvents
+      });
+      const previewRequestedSupported = preview.state_results?.[current.claim_contract.requested_state]?.supported === true;
+      const previewBlockers = claimCloseoutBlockers(current, preview, preEvents);
+      const previewFingerprint = claimCloseoutBlockerFingerprint(current, gateId, preview);
+      const frontierChanged = previewRequestedSupported
+        || previewBlockers.length === 0
+        || priorSameDeliveryAttempt.payload?.blocker_fingerprint !== previewFingerprint;
+      if (frontierChanged) {
+        // Do not append a new Stop checkpoint for the rejected slot. Publish the already-durable
+        // evidence/torn observation once so the visible packet is current, then keep repeat failures
+        // byte-stable while a fresh delivery identity is required.
+        if (preEvents.at(-1)?.type !== 'checkpoint_anchor') writeCheckpointArtifacts(runId, current);
+        assert(false, 'STOP_DELIVERY_FRONTIER_CHANGED');
+      }
+    }
     let resumeCloseoutAfterCheckpoint = false;
     if (priorCheckpoint) {
       const interruptedAttempt = contractedCloseoutDelivery
@@ -3167,35 +3195,6 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     }
     if (current.claim_contract) {
       const gateId = current.claim_contract.declared_gate_ids[0];
-      const priorSameDeliveryAttempt = contractedCloseoutDelivery && completedDeliveryAttempts > 0
-        ? stopAttemptForSlot(
-          preEvents,
-          current.privacy_mode,
-          deliveryKey,
-          completedDeliveryAttempts - 1
-        )
-        : null;
-
-      // Once a completed Stop identity enters the bounded fail direction, the host ambiguity may
-      // spend another slot only against the same unsupported fingerprint. Evidence that changes the
-      // fingerprint (including evidence that would support success) requires a fresh host delivery
-      // identity. This exception can therefore never turn a completed redelivery into a success seal.
-      if (completedDeliveryAttempts > 0) {
-        assert(priorSameDeliveryAttempt, 'STOP_DELIVERY_ATTEMPT_MISSING');
-        const preview = compileClaim({
-          profile: current.claim_profile,
-          contract: current.claim_contract,
-          events: parseLedger(runId).events
-        });
-        const previewRequestedSupported = preview.state_results?.[current.claim_contract.requested_state]?.supported === true;
-        const previewBlockers = claimCloseoutBlockers(current, preview);
-        const previewFingerprint = claimCloseoutBlockerFingerprint(current, gateId, preview);
-        assert(!previewRequestedSupported && previewBlockers.length > 0, 'STOP_DELIVERY_FRONTIER_CHANGED');
-        assert(
-          priorSameDeliveryAttempt.payload?.blocker_fingerprint === previewFingerprint,
-          'STOP_DELIVERY_FRONTIER_CHANGED'
-        );
-      }
       const compiled = compileAndRecordUnlocked(runId, current);
       const requestedSupported = compiled.state_results?.[current.claim_contract.requested_state]?.supported === true;
       const blockers = claimCloseoutBlockers(current, compiled);
