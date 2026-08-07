@@ -94,9 +94,12 @@ try {
 } catch (error) {
   const code = error.code || 'HOOK_ERROR';
   if ((hookInput.hook_event_name || hookInput.event_name) === 'Stop' && error.lyhnaClaimBoundary === true) {
+    const reason = code === 'STOP_DELIVERY_FRONTIER_CHANGED'
+      ? 'STOP_DELIVERY_FRONTIER_CHANGED: Evidence changed after this Stop delivery identity already completed a blocked attempt. The run remains open; continue with a fresh Stop delivery identity so Lyhna can evaluate the new evidence frontier.'
+      : `BLOCKED_TRANSPORT: Lyhna could not persist or verify the closeout boundary (${code}). The run remains unsupported; repair transport or ledger integrity before closing.`;
     process.stdout.write(`${JSON.stringify({
       decision: 'block',
-      reason: `BLOCKED_TRANSPORT: Lyhna could not persist or verify the closeout boundary (${code}). The run remains unsupported; repair transport or ledger integrity before closing.`
+      reason
     })}\n`);
   } else {
     process.stdout.write(`${JSON.stringify({ systemMessage: `Lyhna hook did not record this event (${code}). No execution claim was created.` })}\n`);

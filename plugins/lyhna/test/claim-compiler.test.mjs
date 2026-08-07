@@ -2296,6 +2296,32 @@ test('a completed same-key Stop cannot turn newly supporting evidence into a suc
   assert.equal(checkpointOrSeal(parent, 'fresh-success-key').status, 'SEALED');
 });
 
+test('a changed completed Stop frontier returns its own hook reason instead of BLOCKED_TRANSPORT', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const env = { ...process.env, LYHNA_CODEX_DATA: data };
+  const sessionId = 'compiler-changed-frontier-hook-reason';
+  const session = runHook({ hook_event_name: 'SessionStart', session_id: sessionId, cwd: process.cwd() }, env);
+  const parent = session.hookSpecificOutput.additionalContext.match(/LYHNA_SESSION_CAPABILITY=([^\s.]+)/)[1];
+  const run = beginRun(parent, { mode: 'full', objective: 'Return a distinct changed-frontier reason.' });
+  const declared = declareClaimContract(parent, contract({
+    requested_state: 'BUILT',
+    named_producers: ['software_release/local'],
+    verifier_id: 'software_release/local_verifier'
+  }));
+  requestClose(parent, 'Close only through the declared claim gate.');
+  const stop = { hook_event_name: 'Stop', session_id: sessionId, event_id: 'shared-stop', turn_id: 'shared-turn' };
+
+  const first = runHook(stop, env);
+  assert.equal(first.decision, 'block');
+  seedBuilt(run.id, declared);
+  const changed = runHook(stop, env);
+  assert.equal(changed.decision, 'block');
+  assert.match(changed.reason, /^STOP_DELIVERY_FRONTIER_CHANGED:/);
+  assert.doesNotMatch(changed.reason, /BLOCKED_TRANSPORT/);
+  assert.match(changed.reason, /fresh Stop delivery identity/);
+  assert.equal(getRunForTesting(run.id).state.sealed, false);
+});
+
 test('an interleaved Stop cannot strand a torn delivery behind another checkpoint', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-interleaved-torn-delivery', cwd: process.cwd() });
