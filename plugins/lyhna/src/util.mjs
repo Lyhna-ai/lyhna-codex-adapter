@@ -16,7 +16,10 @@ export const ORIGINS = new Set([
 ]);
 
 export function dataRoot() {
-  return process.env.LYHNA_CODEX_DATA || join(homedir(), '.lyhna', 'codex-adapter');
+  // Loader adapters normalize their own persistent directory into LYHNA_CODEX_DATA: OpenAI forwards
+  // that variable through `.mcp.json`, while the Agent Plugins hook extension and root `mcp.json`
+  // map PLUGIN_DATA to it. Keep one resolver and one ledger after that loader-specific bootstrap.
+  return process.env.LYHNA_CODEX_DATA || process.env.PLUGIN_DATA || join(homedir(), '.lyhna', 'codex-adapter');
 }
 
 export function sha256(value) {

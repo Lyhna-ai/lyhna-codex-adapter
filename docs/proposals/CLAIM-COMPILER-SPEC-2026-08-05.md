@@ -340,6 +340,33 @@ occurrence. Attempts one and two return `decision: "block"`; attempt three appen
 non-success envelope and terminal seal. A changed eligible evidence frontier also recomputes the
 blocker set and resulting fingerprint.
 
+For a contracted closeout, the durable checkpoint identity is the host delivery key plus the count
+of fully published closeout attempts already recorded under that key. An incomplete slot is replayed
+in place so checkpoint-, attempt-, and envelope-interruption recovery stays idempotent. Once a
+blocked attempt and its checkpoint anchor are both durable, the next Stop observation under the same
+host delivery key uses the next bounded slot. Codex may redeliver a completed Stop response with the
+same host key, and the adapter cannot distinguish that redelivery from a genuine same-turn
+continuation. The selected fail-direction is therefore explicit: that ambiguous completed
+redelivery spends one additional bounded attempt and still returns `decision: "block"` until the
+third unchanged attempt seals only `CLOSED_UNSUPPORTED`. This is the sole exception to completed
+hook-delivery idempotency; it cannot produce a successful seal or alter the blocker fingerprint.
+Each new closeout attempt binds a structural `delivery_slot_ref` to the host delivery key and slot,
+and the checkpoint anchor that completes that blocked attempt carries the same ref, so an
+interleaved checkpoint from another key cannot steal or strand an incomplete delivery. A legacy
+anchor without that ref completes an attempt only when no later Stop checkpoint intervenes. An
+incomplete attempt is validated and finished from its durable attempt-time ledger prefix; later
+compiler or lifecycle projections cannot complete it, invalidate it, or convert its replay into a
+transport failure. Once a durable attempt reaches the declared unsupported cap, it is a pending
+terminal barrier: no new MCP or lifecycle mutation, child capability, or evidence event may enter
+the run before its diagnostic, unsupported envelope, and seal recovery finish. A spent delivery
+slot follows one rule: if the fresh compile still has any unsupported-state or
+lifecycle blocker, it follows the normal bounded blocked-attempt path; if every successful-seal
+condition is now satisfied, the reused identity returns a distinct block computed from that fresh
+compile without appending a checkpoint, compile, attempt, or derived artifact. Only a fresh host
+delivery identity may publish and seal that newly successful frontier. The same-key ambiguity can
+therefore only block or seal `CLOSED_UNSUPPORTED`; it cannot create a successful seal or publish a
+stale compiler projection.
+
 ## Privacy projection
 
 The canonical privacy enum remains the shipped `verified_context | proof`.
@@ -372,6 +399,13 @@ The v2 proof projection registry is closed, versioned, and exhaustive for text-b
 
 A v2 writer rejects any unregistered event type or text-bearing field before append; it never
 passes an unknown field through. This table governs existing event names as well as new families.
+Every identity-shaped field on an event family that can receive model-authored prose is also listed
+in one closed provenance registry. The registry distinguishes supervisor-, host-, and
+witness-structural identities from prose-derived fields, and proof mode rejects both an undeclared
+identity field and any field marked prose-derived before event hashing. A provenance label is not
+itself authority: the generic adapter writer cannot emit supervisor-owned or host-hook families in
+proof mode. Those retained identities enter only through capability-bound product paths that derive
+them from ledger, compiler, or host structure.
 
 Proof-mode events and exported artifacts must not contain the withheld text. This v2 at-write rule
 does not rewrite or change the bytes of any legacy v1 event, ledger, fixture, or receipt. The v2
@@ -497,9 +531,10 @@ Failure of the first two transports terminates the build as `BLOCKED_TRANSPORT`.
 The four versioned slices are:
 
 1. `0.1.33` — contract, compiler, fold v2, privacy projection, and sealed unsupported closeout.
-2. `0.1.34` — inline diagnostics, named joins, quiet barrier, and successor supersession.
-3. `0.1.35` — terminally paginated GitHub evidence and registered-probe identity envelopes.
-4. `0.1.36` — recurrence reducer and one enforcement obligation.
+   `0.1.34` is the backward-readable Stop-liveness and Agent Plugins packaging follow-up.
+2. `0.1.35` — inline diagnostics, named joins, quiet barrier, and successor supersession.
+3. `0.1.36` — terminally paginated GitHub evidence and registered-probe identity envelopes.
+4. `0.1.37` — recurrence reducer and one enforcement obligation.
 
 The Slice 1 kill fixture uses only `software_release/v1` vocabulary: source identity and checks are
 present; deployment identity, configuration presence, registered canary, terminal effect, and
@@ -560,15 +595,17 @@ free-form completion narration,
 full backward-compatible `tools/list`,
 privacy-mode override rejection, and three distinct recurrence incidents.
 
-Adam authorizes Codex to squash-merge this ratification PR #13 and four future slices only when
-their declared gates are terminal and clean. The future targets are fixed as repository
-`Lyhna-ai/lyhna-codex-adapter`, base `main`, and branches:
+Adam authorizes Codex to squash-merge this ratification PR #13, the four versioned slices, and the
+backward-readable Slice 1 follow-up only when their declared gates are terminal and clean. The
+implementation targets are fixed as repository `Lyhna-ai/lyhna-codex-adapter`, base `main`, and
+branches:
 
 ```text
 codex/claim-compiler-contract   -> Slice 1 / 0.1.33
-codex/claim-compiler-join       -> Slice 2 / 0.1.34
-codex/claim-compiler-evidence   -> Slice 3 / 0.1.35
-codex/claim-compiler-recurrence -> Slice 4 / 0.1.36
+codex/agent-plugins-v1          -> Slice 1 follow-up / 0.1.34
+codex/claim-compiler-join       -> Slice 2 / 0.1.35
+codex/claim-compiler-evidence   -> Slice 3 / 0.1.36
+codex/claim-compiler-recurrence -> Slice 4 / 0.1.37
 ```
 
 Before each merge, the coordinator records a gate mapping containing repository, PR number, base,
@@ -578,7 +615,8 @@ acceptance check that previously required the final PR to remain unmerged. It is
 authorization for unrelated merges, releases, package publication, deployment, credentials, or
 production mutation.
 
-PR #13 is spec-only and does not change the package version. Version bumps begin with Slice 1.
+PR #13 is spec-only and does not change the package version. Version bumps begin with Slice 1; the
+follow-up is its own normative `0.1.34` target rather than part of the `0.1.33` mapping.
 
 ## Loop contract
 

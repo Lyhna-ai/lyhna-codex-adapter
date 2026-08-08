@@ -47,7 +47,7 @@ function runNodeEval(source, env) {
 test('real hook processes mint distinct capabilities and repeated delivery is idempotent', { concurrency: false }, (t) => {
   const data = isolatedData(t);
   const env = { ...process.env, LYHNA_CODEX_DATA: data };
-  const hook = join(pluginRoot, 'hooks', 'capture.mjs');
+  const hook = join(pluginRoot, 'ai.lyhna.codex', 'hooks', 'capture.mjs');
   const session = runNode(hook, JSON.stringify({ hook_event_name: 'SessionStart', session_id: 'live-session', cwd: process.cwd(), model: 'codex' }), env)[0];
   const context = session.hookSpecificOutput.additionalContext;
   const parent = context.match(/LYHNA_SESSION_CAPABILITY=([^\s.]+)/)[1];
@@ -136,7 +136,7 @@ test('concurrent child start and parent close never seal an accepted child outsi
 test('MCP stdio process initializes, lists tools, accepts a valid call, and rejects malformed input', { concurrency: false }, (t) => {
   const data = isolatedData(t);
   const env = { ...process.env, LYHNA_CODEX_DATA: data };
-  const hook = join(pluginRoot, 'hooks', 'capture.mjs');
+  const hook = join(pluginRoot, 'ai.lyhna.codex', 'hooks', 'capture.mjs');
   const session = runNode(hook, JSON.stringify({ hook_event_name: 'SessionStart', session_id: 'mcp-session', cwd: process.cwd() }), env)[0];
   const parent = session.hookSpecificOutput.additionalContext.match(/LYHNA_SESSION_CAPABILITY=([^\s.]+)/)[1];
   const requests = [

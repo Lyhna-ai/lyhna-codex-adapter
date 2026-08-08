@@ -151,8 +151,9 @@ change remains binding.
 14. The complete diff receives an independent Codex review against this specification and all material findings are closed on the final head.
 15. Pull requests remain unmerged for Adam's decision unless Adam gives a narrower explicit merge
     authorization. On 2026-08-05 Adam authorized Codex to squash-merge claim-compiler PR #13 and
-    four implementation slices in this repository, based on `main`, with exact branches
-    `codex/claim-compiler-contract`, `codex/claim-compiler-join`,
+    four implementation slices in this repository, and on 2026-08-07 authorized the backward-readable
+    Slice 1 follow-up at `0.1.34`, based on `main`, with exact branches
+    `codex/claim-compiler-contract`, `codex/agent-plugins-v1`, `codex/claim-compiler-join`,
     `codex/claim-compiler-evidence`, and `codex/claim-compiler-recurrence`, after every declared
     exact-head gate is terminal and clean. Before each future merge, the recorded gate mapping must
     match repository, PR, base, slice, branch, reviewed head, and expected version. This is not

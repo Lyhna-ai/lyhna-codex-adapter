@@ -46,7 +46,7 @@ const HOOK_PROOF_FIELDS = ['event', 'event_id', 'model', 'tool_name', 'cwd_ref',
 // structural.
 const EVENT_PAYLOAD_FIELDS = new Map([
   ['builder_claim', ['builder_claim_id', 'builder_claim_ordinal', 'evidence_refs', 'statement', 'statement_ref', 'statement_text', 'text_withheld']],
-  ['checkpoint_anchor', ['covers_seq', 'tip_hash', 'state_hash', 'receipt_json_hash', 'receipt_markdown_hash', 'receipt_renderer', 'continuation_fold_version']],
+  ['checkpoint_anchor', ['covers_seq', 'tip_hash', 'state_hash', 'receipt_json_hash', 'receipt_markdown_hash', 'receipt_renderer', 'continuation_fold_version', 'delivery_slot_ref']],
   ['child_receipt_retrieved', ['receipt_id', 'content_ref']],
   ['child_receipt_sealed', ['receipt_id', 'role', 'status', 'content_ref']],
   ['child_started', ['child_id', 'role', 'status']],
@@ -56,7 +56,7 @@ const EVENT_PAYLOAD_FIELDS = new Map([
   ['claim_rejected', ['code', 'capability_kind']],
   ['close_deferred', ['blockers', 'receipt_renderer']],
   ['close_requested', ['request_id', 'reason', 'reason_ref', 'text_withheld']],
-  ['closeout_attempted', ['claim_contract_ref', 'gate_id', 'blocker_fingerprint', 'ordinal', 'attempt_sequence', 'input_digest', 'eligible_evidence_frontier', 'material_control_frontier', 'blockers']],
+  ['closeout_attempted', ['claim_contract_ref', 'gate_id', 'blocker_fingerprint', 'ordinal', 'attempt_sequence', 'delivery_slot_ref', 'input_digest', 'eligible_evidence_frontier', 'material_control_frontier', 'blockers']],
   ['closeout_envelope_generated', ['envelope_id', 'outcome', 'profile_id', 'requested_state', 'supported_state', 'scope_ref', 'eligible_evidence_frontier', 'material_control_frontier', 'input_digest', 'claim_contract_ref', 'fold_version', 'blockers', 'next_verifier', 'narrative', 'text_withheld']],
   ['continuation_lease_transferred', ['capsule_ref', 'predecessor_parent_ref', 'successor_parent_ref', 'active_child_refs']],
   ['diagnostic_emitted', ['diagnostic_id', 'diagnostic_status', 'claim_contract_ref', 'fold_version', 'input_digest', 'eligible_evidence_frontier', 'material_control_frontier', 'blocker_fingerprint', 'supported_state', 'requested_state', 'missing', 'next_verifier', 'message', 'narrative', 'text_withheld']],
@@ -80,6 +80,96 @@ const EVENT_PAYLOAD_FIELDS = new Map([
   ['run_sealed', ['status', 'receipt_renderer', 'continuation_fold_version', 'claim_contract_ref', 'supported_state', 'requested_state', 'closeout_envelope_ref']],
   ['turn_checkpoint', ['status', 'receipt_renderer']]
 ]);
+// Identity-like fields on event families that can receive model-authored prose must declare their
+// provenance here. Proof projection rejects an undeclared identity field and rejects every field
+// marked prose-derived before hashing. This turns the privacy rule into a closed registry instead
+// of relying on reviewers to notice each new `*_ref` or `*_id` point fix.
+export const PROOF_IDENTITY_PROVENANCE = Object.freeze({
+  'builder_claim.builder_claim_id': 'supervisor_structural',
+  'builder_claim.evidence_refs': 'witnessed_structural_refs',
+  'builder_claim.statement_ref': 'prose_derived_forbidden',
+  'evaluation_finding.finding_id': 'supervisor_structural',
+  'evaluation_finding.evaluation_request_id': 'supervisor_structural',
+  'evaluation_finding.evidence_refs': 'witnessed_structural_refs',
+  'evaluation_finding.statement_ref': 'prose_derived_forbidden',
+  'close_requested.request_id': 'supervisor_structural',
+  'close_requested.reason_ref': 'prose_derived_forbidden',
+  'claim_contract_declared.profile_requirements_hash': 'supervisor_structural',
+  'diagnostic_emitted.diagnostic_id': 'supervisor_structural',
+  'diagnostic_emitted.claim_contract_ref': 'supervisor_structural',
+  'diagnostic_emitted.input_digest': 'compiler_structural',
+  'diagnostic_emitted.eligible_evidence_frontier': 'compiler_structural',
+  'diagnostic_emitted.material_control_frontier': 'compiler_structural',
+  'diagnostic_emitted.blocker_fingerprint': 'compiler_structural',
+  'diagnostic_resolved.diagnostic_id': 'supervisor_structural',
+  'diagnostic_resolved.claim_contract_ref': 'supervisor_structural',
+  'diagnostic_resolved.input_digest': 'compiler_structural',
+  'diagnostic_resolved.eligible_evidence_frontier': 'compiler_structural',
+  'diagnostic_resolved.material_control_frontier': 'compiler_structural',
+  'diagnostic_resolved.blocker_fingerprint': 'compiler_structural',
+  'closeout_attempted.claim_contract_ref': 'supervisor_structural',
+  'closeout_attempted.gate_id': 'supervisor_structural',
+  'closeout_attempted.delivery_slot_ref': 'host_ledger_structural',
+  'closeout_attempted.input_digest': 'compiler_structural',
+  'closeout_attempted.eligible_evidence_frontier': 'compiler_structural',
+  'closeout_attempted.material_control_frontier': 'compiler_structural',
+  'closeout_attempted.blocker_fingerprint': 'compiler_structural',
+  'checkpoint_anchor.delivery_slot_ref': 'host_ledger_structural',
+  'closeout_envelope_generated.envelope_id': 'supervisor_structural',
+  'closeout_envelope_generated.profile_id': 'supervisor_structural',
+  'closeout_envelope_generated.scope_ref': 'supervisor_structural',
+  'closeout_envelope_generated.claim_contract_ref': 'supervisor_structural',
+  'closeout_envelope_generated.input_digest': 'compiler_structural',
+  'closeout_envelope_generated.eligible_evidence_frontier': 'compiler_structural',
+  'closeout_envelope_generated.material_control_frontier': 'compiler_structural',
+  'run_begun.objective_ref': 'supervisor_structural',
+  'run_begun.claim_contract_id': 'supervisor_structural',
+  'hook_*.event_id': 'host_structural',
+  'hook_*.cwd_ref': 'host_context_digest',
+  'hook_*.payload_ref': 'prose_derived_forbidden'
+});
+const PROOF_IDENTITY_FIELD = /(?:^|_)(?:id|ref|refs|digest|fingerprint|hash)$/;
+const PROOF_IDENTITY_EVENT = new Set([
+  'builder_claim', 'claim_contract_declared', 'close_requested', 'closeout_attempted',
+  'closeout_envelope_generated', 'diagnostic_emitted', 'diagnostic_resolved',
+  'evaluation_finding', 'run_begun'
+]);
+const PROOF_SUPERVISOR_OWNED_EVENTS = new Set([
+  'builder_claim',
+  'claim_contract_declared',
+  'close_requested',
+  'closeout_attempted',
+  'closeout_envelope_generated',
+  'diagnostic_emitted',
+  'diagnostic_resolved',
+  'evaluation_finding',
+  'run_begun'
+]);
+
+function proofIdentityPolicy(type, field) {
+  return PROOF_IDENTITY_PROVENANCE[`${type}.${field}`]
+    || (type.startsWith('hook_') ? PROOF_IDENTITY_PROVENANCE[`hook_*.${field}`] : null);
+}
+
+function validateProofIdentityProvenance(state, type, payload) {
+  if (state.privacy_mode !== 'proof') return;
+  const governed = PROOF_IDENTITY_EVENT.has(type) || type.startsWith('hook_');
+  if (!governed) return;
+  for (const field of Object.keys(payload)) {
+    if (!PROOF_IDENTITY_FIELD.test(field)) continue;
+    const policy = proofIdentityPolicy(type, field);
+    assert(policy && policy !== 'prose_derived_forbidden', 'UNREGISTERED_PROOF_IDENTITY_FIELD');
+  }
+  for (const [selector, policy] of Object.entries(PROOF_IDENTITY_PROVENANCE)) {
+    if (policy !== 'prose_derived_forbidden') continue;
+    const split = selector.lastIndexOf('.');
+    const eventPattern = selector.slice(0, split);
+    const field = selector.slice(split + 1);
+    if (eventPattern === type || (eventPattern === 'hook_*' && type.startsWith('hook_'))) {
+      assert(!Object.hasOwn(payload, field), 'PROSE_DERIVED_PROOF_IDENTITY');
+    }
+  }
+}
 const PRODUCER_TERMINAL_STATUSES = new Set(['CLEAN', 'FINDINGS', 'INVALID', 'STALE']);
 const EVALUATION_TRIGGERS = new Set(['initial', 'post_fix_reeval', 'gate_audit', 're_examination']);
 const LIFECYCLE_TRANSITION_TYPES = new Set([
@@ -119,31 +209,37 @@ function assertCurrentCompiledBinding(state, payload, code) {
 
 function validateCloseoutAttemptBinding(state, origin, payload, eventSeq = null) {
   const code = 'INVALID_CLOSEOUT_ATTEMPT';
-  assert(origin === 'runtime_hook' && state.close_requested, code);
-  assert(state.claim_contract && state.compiled_claim, code);
-  assert(payload.claim_contract_ref === state.claim_contract.claim_contract_ref, code);
-  assert(payload.input_digest === state.compiled_claim.input_digest, code);
-  assert(payload.eligible_evidence_frontier === state.compiled_claim.eligible_evidence_frontier, code);
-  assert(payload.material_control_frontier === state.compiled_claim.material_control_frontier, code);
-  assert(state.claim_contract.declared_gate_ids.includes(payload.gate_id), code);
-  const blockers = claimCloseoutBlockers(state, state.compiled_claim);
+  const ledgerEvents = parseLedger(state.id).events;
+  const { bindingEvents, bindingState } = closeoutAttemptBindingState(state, eventSeq, ledgerEvents);
+  assert(origin === 'runtime_hook' && bindingState.close_requested, code);
+  assert(bindingState.claim_contract && bindingState.compiled_claim, code);
+  assert(payload.claim_contract_ref === bindingState.claim_contract.claim_contract_ref, code);
+  assert(payload.input_digest === bindingState.compiled_claim.input_digest, code);
+  assert(payload.eligible_evidence_frontier === bindingState.compiled_claim.eligible_evidence_frontier, code);
+  assert(payload.material_control_frontier === bindingState.compiled_claim.material_control_frontier, code);
+  assert(
+    payload.delivery_slot_ref === undefined || /^stop_slot_[a-f0-9]{64}$/.test(payload.delivery_slot_ref),
+    code
+  );
+  assert(bindingState.claim_contract.declared_gate_ids.includes(payload.gate_id), code);
+  const blockers = claimCloseoutBlockers(bindingState, bindingState.compiled_claim, bindingEvents);
   assert(blockers.length > 0, code);
   assert(canonicalJson(payload.blockers) === canonicalJson(blockers), code);
   assert(payload.blocker_fingerprint === claimCloseoutBlockerFingerprint(
-    state,
+    bindingState,
     payload.gate_id,
-    state.compiled_claim
+    bindingState.compiled_claim,
+    bindingEvents
   ), code);
-  const ledgerEvents = parseLedger(state.id).events;
   const priorAttempts = ledgerEvents.filter((event) => (
     event.type === 'closeout_attempted'
     && event.origin === 'runtime_hook'
-    && event.payload?.claim_contract_ref === state.claim_contract.claim_contract_ref
+    && event.payload?.claim_contract_ref === bindingState.claim_contract.claim_contract_ref
     && (eventSeq === null || event.seq < eventSeq)
   ));
   const prior = priorAttempts.at(-1);
   const expectedOrdinal = closeoutAttemptStreakContinues(
-    state,
+    bindingState,
     ledgerEvents,
     prior,
     payload.blocker_fingerprint,
@@ -154,6 +250,15 @@ function validateCloseoutAttemptBinding(state, origin, payload, eventSeq = null)
     : 1;
   assert(payload.attempt_sequence === priorAttempts.length + 1, code);
   assert(payload.ordinal === expectedOrdinal, code);
+}
+
+function closeoutAttemptBindingState(state, eventSeq, ledgerEvents = parseLedger(state.id).events) {
+  if (eventSeq === null) return { bindingEvents: ledgerEvents, bindingState: state };
+  const bindingEvents = ledgerEvents.filter((event) => event.seq < eventSeq);
+  return {
+    bindingEvents,
+    bindingState: { ...state, ...reconstructClaimControl(bindingEvents) }
+  };
 }
 
 function closeoutAttemptStreakContinues(state, events, prior, fingerprint, eligibleEvidenceFrontier, beforeSeq = null) {
@@ -215,7 +320,6 @@ function pendingProducerIdsFromProjection(projection) {
 function validateCloseoutEnvelopeBinding(state, origin, payload) {
   const code = 'INVALID_CLOSEOUT_ENVELOPE';
   assert(origin === 'runtime_hook', code);
-  assertCurrentCompiledBinding(state, payload, code);
   const required = [
     'envelope_id', 'outcome', 'profile_id', 'requested_state', 'supported_state',
     'scope_ref', 'eligible_evidence_frontier', 'material_control_frontier', 'input_digest',
@@ -223,14 +327,15 @@ function validateCloseoutEnvelopeBinding(state, origin, payload) {
   ];
   assert(required.every((key) => Object.hasOwn(payload, key)), code);
   assert(typeof payload.envelope_id === 'string' && payload.envelope_id.length > 0, code);
-  assert(payload.profile_id === state.claim_contract.profile_id, code);
-  assert(payload.requested_state === state.claim_contract.requested_state, code);
-  assert(payload.supported_state === state.compiled_claim.highest_supported_state, code);
-  assert(payload.scope_ref === state.claim_contract.objective_ref, code);
-  assert(payload.next_verifier === state.compiled_claim.next_verifier, code);
   assert(Array.isArray(payload.blockers) && payload.blockers.every((item) => typeof item === 'string'), code);
   assert(payload.outcome === 'SUPPORTED' || payload.outcome === 'CLOSED_UNSUPPORTED', code);
   if (payload.outcome === 'SUPPORTED') {
+    assertCurrentCompiledBinding(state, payload, code);
+    assert(payload.profile_id === state.claim_contract.profile_id, code);
+    assert(payload.requested_state === state.claim_contract.requested_state, code);
+    assert(payload.supported_state === state.compiled_claim.highest_supported_state, code);
+    assert(payload.scope_ref === state.claim_contract.objective_ref, code);
+    assert(payload.next_verifier === state.compiled_claim.next_verifier, code);
     assert(state.close_requested, code);
     assert(state.compiled_claim.state_results?.[state.claim_contract.requested_state]?.supported === true, code);
     assert(state.compiled_claim.currentness === 'AS_WITNESSED', code);
@@ -242,19 +347,31 @@ function validateCloseoutEnvelopeBinding(state, origin, payload) {
     assert(claimCloseoutBlockers(state, state.compiled_claim).length === 0, code);
     assert(payload.blockers.length === 0, code);
   } else {
-    assert(state.close_requested, code);
-    const blockers = claimCloseoutBlockers(state, state.compiled_claim);
-    assert(blockers.length > 0 && canonicalJson(payload.blockers) === canonicalJson(blockers), code);
     const attempts = parseLedger(state.id).events.filter((event) => (
       event.type === 'closeout_attempted'
       && event.origin === 'runtime_hook'
       && event.payload?.claim_contract_ref === state.claim_contract.claim_contract_ref
     ));
-    const latestAttempt = attempts.at(-1);
-    assert(latestAttempt, code);
-    validateCloseoutAttemptBinding(state, latestAttempt.origin, latestAttempt.payload, latestAttempt.seq);
-    assert(latestAttempt.payload.ordinal === state.claim_contract.caps.max_unsupported_attempts, code);
-    assert(latestAttempt.payload.attempt_sequence === attempts.length, code);
+    const boundAttempt = [...attempts].reverse().find((event) => (
+      event.payload?.ordinal === state.claim_contract.caps.max_unsupported_attempts
+      && event.payload?.input_digest === payload.input_digest
+      && event.payload?.eligible_evidence_frontier === payload.eligible_evidence_frontier
+      && event.payload?.material_control_frontier === payload.material_control_frontier
+      && canonicalJson(event.payload?.blockers) === canonicalJson(payload.blockers)
+    ));
+    assert(boundAttempt, code);
+    validateCloseoutAttemptBinding(state, boundAttempt.origin, boundAttempt.payload, boundAttempt.seq);
+    const { bindingEvents, bindingState } = closeoutAttemptBindingState(state, boundAttempt.seq);
+    assertCurrentCompiledBinding(bindingState, payload, code);
+    assert(payload.profile_id === bindingState.claim_contract.profile_id, code);
+    assert(payload.requested_state === bindingState.claim_contract.requested_state, code);
+    assert(payload.supported_state === bindingState.compiled_claim.highest_supported_state, code);
+    assert(payload.scope_ref === bindingState.claim_contract.objective_ref, code);
+    assert(payload.next_verifier === bindingState.compiled_claim.next_verifier, code);
+    assert(bindingState.close_requested, code);
+    const blockers = claimCloseoutBlockers(bindingState, bindingState.compiled_claim, bindingEvents);
+    assert(blockers.length > 0 && canonicalJson(payload.blockers) === canonicalJson(blockers), code);
+    assert(boundAttempt.payload.ordinal === bindingState.claim_contract.caps.max_unsupported_attempts, code);
   }
 }
 
@@ -589,6 +706,7 @@ export function mintChild({ sessionId, agentId, hookPayload = null, hookDelivery
     recoverClaimControlStateUnlocked(activeRunId, current);
     assert(!current.sealed, 'RUN_SEALED');
     assert(current.parent_capability_hash === sha256(parentCapability), 'CAPABILITY_RUN_MISMATCH');
+    assertTerminalCloseoutMutationAllowed(parseLedger(activeRunId).events, current);
     if (!readJson(capabilityPath(capability), null)) {
       writeCapability(capability, {
         kind: 'child',
@@ -1458,6 +1576,7 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
   const normalizedPayload = normalizeEventPayloadForStorage(type, payload);
   validateEventPayloadStructure(state, type, origin, normalizedPayload);
   const projectedPayload = projectEventPayloadForPrivacy(state, type, normalizedPayload);
+  validateProofIdentityProvenance(state, type, projectedPayload);
   const { events, tip } = parseLedger(runId);
   const latestEnvelope = [...events].reverse().find((event) => event.type === 'closeout_envelope_generated');
   if (latestEnvelope && latestEnvelope.seq !== events.at(-1)?.seq) {
@@ -1487,6 +1606,7 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
     assert(contentHash === duplicate.content_hash, 'IDEMPOTENCY_CONFLICT');
     return duplicate;
   }
+  assertTerminalCloseoutMutationAllowed(events, state, type);
   // No NEW event may follow a terminal run_sealed. The durable ledger seal is authoritative even when
   // the passed state.sealed flag lags it (crash after the seal append, before state was saved), so
   // EVERY mutable tool that reaches this shared append path — record_claim, snapshot_pr,
@@ -1512,10 +1632,60 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
   return event;
 }
 
+const TERMINAL_CLOSEOUT_RECOVERY_EVENTS = new Set([
+  'diagnostic_emitted',
+  'diagnostic_resolved',
+  'closeout_envelope_generated',
+  'run_sealed'
+]);
+
+function pendingTerminalCloseoutAttempt(events, state) {
+  const maximum = Number(state.claim_contract?.caps?.max_unsupported_attempts || 0);
+  if (!maximum) return null;
+  const attempt = [...events].reverse().find((event) => (
+    event.type === 'closeout_attempted'
+    && event.origin === 'runtime_hook'
+    && event.payload?.claim_contract_ref === state.claim_contract.claim_contract_ref
+    && event.payload?.ordinal === maximum
+  ));
+  if (!attempt) return null;
+  const completed = events.some((event) => (
+    event.seq > attempt.seq
+    && event.type === 'closeout_envelope_generated'
+    && event.payload?.outcome === 'CLOSED_UNSUPPORTED'
+    && event.payload?.claim_contract_ref === attempt.payload.claim_contract_ref
+    && event.payload?.input_digest === attempt.payload.input_digest
+    && event.payload?.eligible_evidence_frontier === attempt.payload.eligible_evidence_frontier
+    && event.payload?.material_control_frontier === attempt.payload.material_control_frontier
+  ));
+  return completed ? null : attempt;
+}
+
+function assertTerminalCloseoutMutationAllowed(events, state, type = null) {
+  if (!pendingTerminalCloseoutAttempt(events, state)) return;
+  assert(type && TERMINAL_CLOSEOUT_RECOVERY_EVENTS.has(type), 'CLOSEOUT_TERMINAL_ATTEMPT_PENDING');
+}
+
 export function appendEvent(runId, input) {
   return withLock(lockPath(runId), () => {
     const state = loadState(runId);
     recoverClaimControlStateUnlocked(runId, state);
+    // Supervisor-owned proof families may carry retained structural identities next to withheld
+    // prose. Their provenance is the capability-bound product path that derives those identities,
+    // not a caller label or string shape. The generic adapter writer therefore cannot emit them.
+    if (state.privacy_mode === 'proof') {
+      const supervisorOwned = PROOF_SUPERVISOR_OWNED_EVENTS.has(input?.type)
+        || String(input?.type || '').startsWith('hook_');
+      if (supervisorOwned) {
+        // Keep the closed-schema error boundary ahead of provenance so unknown fields are still
+        // rejected as unknown fields; a structurally valid impersonation reaches this hard stop.
+        const normalized = normalizeEventPayloadForStorage(input.type, input.payload);
+        validateEventPayloadStructure(state, input.type, input.origin, normalized);
+        const projected = projectEventPayloadForPrivacy(state, input.type, normalized);
+        validateProofIdentityProvenance(state, input.type, projected);
+        assert(false, 'PROOF_EVENT_PROVENANCE_REQUIRED');
+      }
+    }
     // This exported writer exists for deterministic adapters/tests. In proof mode its caller key is
     // untrusted text, so derive idempotency only from the already-projected event structure. Internal
     // product paths call appendEventUnlocked with supervisor-issued structural keys.
@@ -1539,6 +1709,7 @@ function requireParent(capability, { mutable = true } = {}) {
       repairSeal(runId);
       assert(false, 'RUN_SEALED');
     }
+    if (mutable) assertTerminalCloseoutMutationAllowed(parseLedger(runId).events, current);
     return current;
   });
   if (mutable) assert(!state.sealed, 'RUN_SEALED');
@@ -1559,6 +1730,7 @@ function requireChild(capability) {
   assert(record.kind === 'child', 'CHILD_CAPABILITY_REQUIRED');
   const state = loadState(record.parent_run_id);
   assert(!state.sealed, 'RUN_SEALED');
+  assertTerminalCloseoutMutationAllowed(parseLedger(record.parent_run_id).events, state);
   return { record, runId: record.parent_run_id, state };
 }
 
@@ -1569,6 +1741,7 @@ function assertChildLeaseUnlocked(runId, state, capability) {
   assert(record.parent_run_id === runId, 'EVALUATOR_PARENT_MISMATCH');
   assert(record.parent_capability_hash === state.parent_capability_hash, 'EVALUATOR_PARENT_MISMATCH');
   assert(!state.sealed, 'RUN_SEALED');
+  assertTerminalCloseoutMutationAllowed(parseLedger(runId).events, state);
   return record;
 }
 
@@ -2434,12 +2607,12 @@ function claimCloseoutBlockers(state, compiled, ledgerEvents = null) {
   ])].sort();
 }
 
-function claimCloseoutBlockerFingerprint(state, gateId, compiled) {
+function claimCloseoutBlockerFingerprint(state, gateId, compiled, ledgerEvents = null) {
   return sha256(canonicalJson({
     contract_id: state.claim_contract.contract_id,
     gate_id: gateId,
     requested_state: state.claim_contract.requested_state,
-    blockers: claimCloseoutBlockers(state, compiled),
+    blockers: claimCloseoutBlockers(state, compiled, ledgerEvents),
     eligible_evidence_frontier: compiled.eligible_evidence_frontier
   }));
 }
@@ -2564,6 +2737,7 @@ export function sealChildByAgent({ sessionId, agentId, hookPayload = null, hookD
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
     recoverClaimControlStateUnlocked(runId, current);
+    assertTerminalCloseoutMutationAllowed(parseLedger(runId).events, current);
     let stopEvent = null;
     if (hookPayload) {
       assert(current.privacy_mode !== 'proof' || /^hook:[^:]+:id_[a-f0-9]{64}$/.test(String(hookDeliveryKey || '')), 'PROOF_HOOK_DELIVERY_ID_REQUIRED');
@@ -2768,6 +2942,85 @@ function finalizeRunSealUnlocked(runId, current, terminalStatus = 'SEALED', seal
   };
 }
 
+function storedStopCheckpointKey(privacyMode, checkpointKey) {
+  return privacyMode === 'proof'
+    ? `idempotency_${sha256(checkpointKey)}`
+    : checkpointKey;
+}
+
+function stopDeliverySlotRef(deliveryKey, slot) {
+  return `stop_slot_${sha256(canonicalJson({ delivery_key: deliveryKey, slot }))}`;
+}
+
+function stopCheckpointForSlot(events, privacyMode, deliveryKey, slot) {
+  const rawKeys = [`checkpoint:${deliveryKey}#${slot}`];
+  // v0.1.33 wrote the first delivery checkpoint without an explicit slot. Recognize that shape as
+  // slot zero so an already-open installed packet advances instead of starting a second slot zero.
+  if (slot === 0) rawKeys.push(`checkpoint:${deliveryKey}`);
+  const storedKeys = new Set(rawKeys.map((key) => storedStopCheckpointKey(privacyMode, key)));
+  const matches = events.filter((event) => (
+    event.type === 'turn_checkpoint' && storedKeys.has(event.idempotency_key)
+  ));
+  assert(matches.length <= 1, 'STOP_CHECKPOINT_SLOT_CONFLICT');
+  return matches[0] || null;
+}
+
+function stopAttemptForSlot(events, privacyMode, deliveryKey, slot, checkpoint = null) {
+  const slotRef = stopDeliverySlotRef(deliveryKey, slot);
+  const matches = events.filter((event) => (
+    event.type === 'closeout_attempted' && event.payload?.delivery_slot_ref === slotRef
+  ));
+  assert(matches.length <= 1, 'STOP_ATTEMPT_SLOT_CONFLICT');
+  if (matches.length === 1) return matches[0];
+  // Pre-slot packets did not carry a delivery_slot_ref. Only slot zero can have that shape, and its
+  // attempt is the first closeout attempt before another Stop checkpoint.
+  if (slot !== 0) return null;
+  const slotCheckpoint = checkpoint || stopCheckpointForSlot(events, privacyMode, deliveryKey, slot);
+  if (!slotCheckpoint) return null;
+  const nextCheckpoint = events.find((event) => (
+    event.seq > slotCheckpoint.seq && event.type === 'turn_checkpoint'
+  ));
+  return events.find((event) => (
+    event.seq > slotCheckpoint.seq
+    && (!nextCheckpoint || event.seq < nextCheckpoint.seq)
+    && event.type === 'closeout_attempted'
+    && !event.payload?.delivery_slot_ref
+  )) || null;
+}
+
+function completedAttemptsUnderDeliveryKey(events, privacyMode, deliveryKey) {
+  let slot = 0;
+  while (slot <= events.length) {
+    const checkpoint = stopCheckpointForSlot(events, privacyMode, deliveryKey, slot);
+    if (!checkpoint) return slot;
+    const attempt = stopAttemptForSlot(events, privacyMode, deliveryKey, slot, checkpoint);
+    const completed = attempt && closeoutAttemptCompleted(events, attempt);
+    // An incomplete slot is replayed in place so torn checkpoint, attempt, and envelope writes keep
+    // their existing recovery semantics. Only a fully published blocked attempt spends the slot.
+    if (!attempt || !completed) return slot;
+    slot += 1;
+  }
+  throw Object.assign(new Error('STOP_CHECKPOINT_SLOT_RANGE'), { code: 'STOP_CHECKPOINT_SLOT_RANGE' });
+}
+
+function closeoutAttemptCompleted(events, attempt) {
+  const slotRef = attempt.payload?.delivery_slot_ref;
+  const nextCheckpoint = events.find((event) => (
+    event.seq > attempt.seq && event.type === 'turn_checkpoint'
+  ));
+  return events.some((event) => {
+    if (event.seq <= attempt.seq) return false;
+    if (event.type === 'checkpoint_anchor') {
+      // New anchors name the exact delivery slot they publish. Older anchors remain readable only
+      // when they occur before another Stop checkpoint, which is the only unambiguous legacy shape.
+      if (event.payload?.delivery_slot_ref) return event.payload.delivery_slot_ref === slotRef;
+      return !nextCheckpoint || event.seq < nextCheckpoint.seq;
+    }
+    return event.type === 'closeout_envelope_generated'
+      && (!nextCheckpoint || event.seq < nextCheckpoint.seq);
+  });
+}
+
 export function checkpointOrSeal(capability, deliveryKey = null) {
   const runId = locateOpenClaimRunForParent(capability);
   if (!runId) return { status: 'NO_ACTIVE_RUN' };
@@ -2839,21 +3092,63 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
     const legacyStopFrontier = [...preEvents].reverse().find((event) => (
       !['turn_checkpoint', 'checkpoint_anchor', 'close_deferred'].includes(event.type)
     ))?.event_hash || ZERO_HASH;
-    const checkpointKey = `checkpoint:${deliveryKey || `auto_${legacyStopFrontier}`}`;
-    const storedCheckpointKey = current.privacy_mode === 'proof'
-      ? `idempotency_${sha256(checkpointKey)}`
-      : checkpointKey;
-    const priorCheckpoint = preEvents.find((event) => event.idempotency_key === storedCheckpointKey);
+    const contractedCloseoutDelivery = Boolean(current.close_requested && current.claim_contract && deliveryKey);
+    const completedDeliveryAttempts = contractedCloseoutDelivery
+      ? completedAttemptsUnderDeliveryKey(preEvents, current.privacy_mode, deliveryKey)
+      : null;
+    const checkpointKey = contractedCloseoutDelivery
+      ? `checkpoint:${deliveryKey}#${completedDeliveryAttempts}`
+      : `checkpoint:${deliveryKey || `auto_${legacyStopFrontier}`}`;
+    const storedCheckpointKey = storedStopCheckpointKey(current.privacy_mode, checkpointKey);
+    const priorCheckpoint = contractedCloseoutDelivery
+      ? stopCheckpointForSlot(preEvents, current.privacy_mode, deliveryKey, completedDeliveryAttempts)
+      : preEvents.find((event) => event.idempotency_key === storedCheckpointKey);
+    if (contractedCloseoutDelivery && completedDeliveryAttempts > 0) {
+      const priorSameDeliveryAttempt = stopAttemptForSlot(
+        preEvents,
+        current.privacy_mode,
+        deliveryKey,
+        completedDeliveryAttempts - 1
+      );
+      assert(priorSameDeliveryAttempt, 'STOP_DELIVERY_ATTEMPT_MISSING');
+      const gateId = current.claim_contract.declared_gate_ids[0];
+      const preview = compileClaim({
+        profile: current.claim_profile,
+        contract: current.claim_contract,
+        events: preEvents
+      });
+      const previewRequestedSupported = preview.state_results?.[current.claim_contract.requested_state]?.supported === true;
+      const previewBlockers = claimCloseoutBlockers(current, preview, preEvents);
+      const wouldSealSuccessfully = previewRequestedSupported && previewBlockers.length === 0;
+      if (wouldSealSuccessfully) {
+        // A completed delivery identity can spend another bounded blocked attempt, but it can never
+        // be reused for a successful seal. Do not append a checkpoint, compile, attempt, or derived
+        // artifact for this ambiguous observation: the existing face remains the prior published
+        // boundary, while this response is computed from the fresh in-memory compile. A fresh host
+        // identity is the only path that may publish and seal the newly successful frontier.
+        return {
+          status: 'CLOSE_DEFERRED',
+          run_id: runId,
+          blockers: previewBlockers,
+          decision: 'block',
+          reason: 'STOP_DELIVERY_FRONTIER_CHANGED: This reused Stop delivery identity would change the closeout decision to a successful seal. The run remains open; continue with a fresh Stop delivery identity.',
+          replayed_delivery: true,
+          compiled: preview
+        };
+      }
+    }
     let resumeCloseoutAfterCheckpoint = false;
     if (priorCheckpoint) {
-      const nextCheckpoint = preEvents.find((event) => event.seq > priorCheckpoint.seq && event.type === 'turn_checkpoint');
-      const deliveryTail = preEvents.filter((event) => (
-        event.seq > priorCheckpoint.seq && (!nextCheckpoint || event.seq < nextCheckpoint.seq)
-      ));
-      const interruptedAttempt = deliveryTail.find((event) => event.type === 'closeout_attempted');
-      const attemptCompleted = deliveryTail.some((event) => (
-        event.type === 'checkpoint_anchor' || event.type === 'closeout_envelope_generated'
-      ));
+      const interruptedAttempt = contractedCloseoutDelivery
+        ? stopAttemptForSlot(
+          preEvents,
+          current.privacy_mode,
+          deliveryKey,
+          completedDeliveryAttempts,
+          priorCheckpoint
+        )
+        : null;
+      const attemptCompleted = interruptedAttempt && closeoutAttemptCompleted(preEvents, interruptedAttempt);
       if (interruptedAttempt) {
         validateCloseoutAttemptBinding(
           current,
@@ -2861,20 +3156,30 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
           interruptedAttempt.payload,
           interruptedAttempt.seq
         );
+        const { bindingState: attemptState } = closeoutAttemptBindingState(
+          current,
+          interruptedAttempt.seq,
+          preEvents
+        );
         const blockers = [...(interruptedAttempt.payload?.blockers || [])];
         const ordinal = Number(interruptedAttempt.payload?.ordinal || 0);
-        const requested = current.claim_contract?.requested_state || 'UNDECLARED_STATE';
-        const nextVerifier = current.compiled_claim?.next_verifier || 'not available';
-        assert(current.claim_contract && ordinal > 0, 'INVALID_CLOSEOUT_ATTEMPT');
-        const reason = `Lyhna ${claimSupportPosition(current.compiled_claim, current.claim_contract)}. Missing or conflicting evidence: ${blockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${nextVerifier}.`;
-        ensureClaimDiagnosticUnlocked(
-          runId,
-          current,
-          current.compiled_claim,
-          interruptedAttempt.payload.blocker_fingerprint,
-          reason
-        );
-        saveState(current);
+        const requested = attemptState.claim_contract?.requested_state || 'UNDECLARED_STATE';
+        const nextVerifier = attemptState.compiled_claim?.next_verifier || 'not available';
+        assert(attemptState.claim_contract && ordinal > 0, 'INVALID_CLOSEOUT_ATTEMPT');
+        const reason = `Lyhna ${claimSupportPosition(attemptState.compiled_claim, attemptState.claim_contract)}. Missing or conflicting evidence: ${blockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${nextVerifier}.`;
+        const currentMatchesAttempt = current.compiled_claim?.input_digest === interruptedAttempt.payload?.input_digest
+          && current.compiled_claim?.eligible_evidence_frontier === interruptedAttempt.payload?.eligible_evidence_frontier
+          && current.compiled_claim?.material_control_frontier === interruptedAttempt.payload?.material_control_frontier;
+        if (currentMatchesAttempt) {
+          ensureClaimDiagnosticUnlocked(
+            runId,
+            current,
+            current.compiled_claim,
+            interruptedAttempt.payload.blocker_fingerprint,
+            reason
+          );
+          saveState(current);
+        }
         if (attemptCompleted) {
           assert(ordinal < current.claim_contract.caps.max_unsupported_attempts, 'CLOSEOUT_ATTEMPT_INCOMPLETE');
           return {
@@ -2885,11 +3190,11 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
             reason,
             closeout_attempt_ordinal: ordinal,
             replayed_delivery: true,
-            compiled: current.compiled_claim
+            compiled: attemptState.compiled_claim
           };
         }
         if (ordinal < current.claim_contract.caps.max_unsupported_attempts) {
-          writeCheckpointArtifacts(runId, current);
+          writeCheckpointArtifacts(runId, current, interruptedAttempt.payload.delivery_slot_ref);
           return {
             status: 'CLOSE_DEFERRED',
             run_id: runId,
@@ -2898,22 +3203,22 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
             reason,
             closeout_attempt_ordinal: ordinal,
             replayed_delivery: true,
-            compiled: current.compiled_claim
+            compiled: attemptState.compiled_claim
           };
         }
-        assert(current.compiled_claim?.input_digest === interruptedAttempt.payload?.input_digest, 'CLOSEOUT_ATTEMPT_STALE');
+        assert(attemptState.compiled_claim?.input_digest === interruptedAttempt.payload?.input_digest, 'CLOSEOUT_ATTEMPT_STALE');
         const fingerprint = interruptedAttempt.payload.blocker_fingerprint;
         const envelope = {
           envelope_id: `closeout_${sha256(canonicalJson({ run_id: runId, fingerprint, ordinal })).slice(0, 24)}`,
           outcome: 'CLOSED_UNSUPPORTED',
-          profile_id: current.claim_contract.profile_id,
+          profile_id: attemptState.claim_contract.profile_id,
           requested_state: requested,
-          supported_state: current.compiled_claim.highest_supported_state,
-          scope_ref: current.claim_contract.objective_ref,
+          supported_state: attemptState.compiled_claim.highest_supported_state,
+          scope_ref: attemptState.claim_contract.objective_ref,
           eligible_evidence_frontier: interruptedAttempt.payload.eligible_evidence_frontier,
           material_control_frontier: interruptedAttempt.payload.material_control_frontier,
           input_digest: interruptedAttempt.payload.input_digest,
-          claim_contract_ref: current.claim_contract.claim_contract_ref,
+          claim_contract_ref: attemptState.claim_contract.claim_contract_ref,
           fold_version: CURRENT_FOLD_VERSION,
           blockers,
           next_verifier: nextVerifier,
@@ -2928,8 +3233,8 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         current.closeout_envelope = { ...envelopeEvent.payload, event_ref: `sha256:${envelopeEvent.event_hash}` };
         saveState(current);
         return finalizeRunSealUnlocked(runId, current, 'CLOSED_UNSUPPORTED', {
-          claim_contract_ref: current.claim_contract.claim_contract_ref,
-          supported_state: current.compiled_claim.highest_supported_state,
+          claim_contract_ref: attemptState.claim_contract.claim_contract_ref,
+          supported_state: attemptState.compiled_claim.highest_supported_state,
           requested_state: requested,
           closeout_envelope_ref: current.closeout_envelope.event_ref
         });
@@ -2938,7 +3243,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       // has not finished the gate. Resume below without appending a second checkpoint; returning a
       // bare CLOSE_DEFERRED here would omit decision:block and let the parent stop through the gate.
       resumeCloseoutAfterCheckpoint = Boolean(
-        current.close_requested && current.claim_contract && !nextCheckpoint && !attemptCompleted
+        current.close_requested && current.claim_contract && !attemptCompleted
       );
       if (!resumeCloseoutAfterCheckpoint) {
         // The Stop was observed. If the original delivery crashed after appending the turn_checkpoint
@@ -2981,13 +3286,13 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       return { status: 'CHECKPOINTED', run_id: runId };
     }
     if (current.claim_contract) {
-      const compiled = compileAndRecordUnlocked(runId, current);
       const gateId = current.claim_contract.declared_gate_ids[0];
+      const compiled = compileAndRecordUnlocked(runId, current);
       const requestedSupported = compiled.state_results?.[current.claim_contract.requested_state]?.supported === true;
       const blockers = claimCloseoutBlockers(current, compiled);
+      const fingerprint = claimCloseoutBlockerFingerprint(current, gateId, compiled);
 
       if (!requestedSupported || blockers.length) {
-        const fingerprint = claimCloseoutBlockerFingerprint(current, gateId, compiled);
         const { events: attemptEvents } = parseLedger(runId);
         const attemptSequence = attemptEvents.filter((event) => event.type === 'closeout_attempted').length + 1;
         const latestAttempt = [...attemptEvents].reverse().find((event) => event.type === 'closeout_attempted');
@@ -3010,6 +3315,9 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
             blocker_fingerprint: fingerprint,
             ordinal,
             attempt_sequence: attemptSequence,
+            delivery_slot_ref: contractedCloseoutDelivery
+              ? stopDeliverySlotRef(deliveryKey, completedDeliveryAttempts)
+              : undefined,
             input_digest: compiled.input_digest,
             eligible_evidence_frontier: compiled.eligible_evidence_frontier,
             material_control_frontier: compiled.material_control_frontier,
@@ -3021,7 +3329,11 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         ensureClaimDiagnosticUnlocked(runId, current, compiled, fingerprint, reason);
         if (ordinal < current.claim_contract.caps.max_unsupported_attempts) {
           saveState(current);
-          writeCheckpointArtifacts(runId, current);
+          writeCheckpointArtifacts(
+            runId,
+            current,
+            contractedCloseoutDelivery ? stopDeliverySlotRef(deliveryKey, completedDeliveryAttempts) : undefined
+          );
           return {
             status: 'CLOSE_DEFERRED',
             run_id: runId,
@@ -3201,14 +3513,17 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
 // receipt covers events 1..covers_seq (everything before its own anchor event); the latest anchor
 // overwrites the file, history lives in the ledger. Called only after the checkpoint/close_deferred
 // event is appended and state saved, so the parsed ledger and the passed state agree.
-function writeCheckpointArtifacts(runId, state) {
-  const { events, tip } = parseLedger(runId);
+function writeCheckpointArtifacts(runId, state, deliverySlotRef = undefined) {
+  let { events, tip } = parseLedger(runId);
   // Nothing happened since the previous anchor (e.g. a redelivered Stop deduped its checkpoint
   // event): the ledger tip IS the anchor; re-anchoring would anchor the anchor. Idempotent no-op —
   // except that the index must still be reconciled. Artifact writes are ordered continuation →
   // handoff → index, so a crash between the capsule and its index leaves a packet whose capsule the
   // successor cannot resolve, and the replayed Stop would otherwise return here and never repair it.
-  if (events.at(-1)?.type === 'checkpoint_anchor') {
+  if (
+    events.at(-1)?.type === 'checkpoint_anchor'
+    && (!deliverySlotRef || events.at(-1).payload?.delivery_slot_ref === deliverySlotRef)
+  ) {
     ensureStopArtifacts(runId, state);
     return;
   }
@@ -3223,7 +3538,26 @@ function writeCheckpointArtifacts(runId, state) {
     state.ledger_count = events.length;
     state.ledger_tip = tip;
   }
+  // A checkpoint publishes one ledger extent, so its claim projection must be compiled from that
+  // same prefix. Refresh here rather than at any of the five callers: otherwise a torn attempt can
+  // append later evidence, enter through a recovery caller, and publish a current ledger tip with a
+  // stale compiled projection. compileAndRecordUnlocked appends a binding event only when the input
+  // digest changed; reparse afterward, then derive the projection from the exact final prefix that
+  // this packet is about to cover.
+  let compiledProjectionExtent = null;
+  if (state.claim_contract) {
+    compileAndRecordUnlocked(runId, state);
+    ({ events, tip } = parseLedger(runId));
+    const compiledEventRef = state.compiled_claim?.compiled_event_ref ?? null;
+    state.compiled_claim = {
+      ...compileClaim({ profile: state.claim_profile, contract: state.claim_contract, events }),
+      claim_contract_ref: state.claim_contract.claim_contract_ref,
+      compiled_event_ref: compiledEventRef
+    };
+    compiledProjectionExtent = events.length;
+  }
   const coversSeq = events.length;
+  assert(compiledProjectionExtent === null || compiledProjectionExtent === coversSeq, 'LOCAL_CHAIN_BROKEN:compiled_projection_extent');
   const receiptJson = renderReceiptJson(state, events);
   const receiptMarkdown = renderReceiptMarkdown(state, events);
   const stateHash = sha256(canonicalJson(state));
@@ -3242,7 +3576,8 @@ function writeCheckpointArtifacts(runId, state) {
       // The fold generation, committed in the chain so the lineage checker can dispatch on it.
       // The capsule also declares it, but the capsule is unanchored — a forged packet could set
       // that copy to whichever reducer verifies. This one it cannot touch.
-      continuation_fold_version: CURRENT_FOLD_VERSION
+      continuation_fold_version: CURRENT_FOLD_VERSION,
+      delivery_slot_ref: deliverySlotRef
     },
     idempotencyKey: `checkpoint-anchor:${coversSeq}`
   });

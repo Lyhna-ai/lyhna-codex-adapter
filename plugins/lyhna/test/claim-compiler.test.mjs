@@ -18,6 +18,7 @@ import {
   markSnapshotRefreshed,
   mintChild,
   mintSession,
+  PROOF_IDENTITY_PROVENANCE,
   readSealedReceipt,
   recordClaim,
   recordEvaluation,
@@ -25,6 +26,7 @@ import {
   requestClaimProducer,
   requestClose,
   sealChildByAgent,
+  verifyRun,
   verifySealedRun
 } from '../src/store.mjs';
 import { isolatedData } from './helpers.mjs';
@@ -137,6 +139,27 @@ const REGISTERED_EVENT_TYPES = [
   'run_sealed',
   'turn_checkpoint'
 ];
+
+function assertNoProseDerivedProofIdentities(events) {
+  const forbidden = Object.entries(PROOF_IDENTITY_PROVENANCE)
+    .filter(([, policy]) => policy === 'prose_derived_forbidden');
+  assert.deepEqual(forbidden.map(([selector]) => selector).sort(), [
+    'builder_claim.statement_ref',
+    'close_requested.reason_ref',
+    'evaluation_finding.statement_ref',
+    'hook_*.payload_ref'
+  ]);
+  for (const event of events) {
+    for (const [selector] of forbidden) {
+      const split = selector.lastIndexOf('.');
+      const eventPattern = selector.slice(0, split);
+      const field = selector.slice(split + 1);
+      if (eventPattern === event.type || (eventPattern === 'hook_*' && event.type.startsWith('hook_'))) {
+        assert.equal(Object.hasOwn(event.payload, field), false, `${selector} entered a proof ledger`);
+      }
+    }
+  }
+}
 
 const REQUIREMENT_SUBJECTS = {
   source_identity: { source_ref: 'sha256:source' },
@@ -567,7 +590,7 @@ test('every closeout lifecycle transition advances the material control frontier
 });
 
 function runHook(input, env) {
-  const result = spawnSync(process.execPath, [join(pluginRoot, 'hooks', 'capture.mjs')], {
+  const result = spawnSync(process.execPath, [join(pluginRoot, 'ai.lyhna.codex', 'hooks', 'capture.mjs')], {
     input: JSON.stringify(input),
     encoding: 'utf8',
     env
@@ -1538,6 +1561,7 @@ test('proof-mode v2 withholds objective, claim, diagnostic, and closeout prose b
   checkpointOrSeal(parent, `id_${sha256('proof-stop-3')}`);
 
   const packet = getRunForTesting(run.id);
+  assertNoProseDerivedProofIdentities(packet.events);
   const files = readTree(packet.directory).join('\n');
   for (const raw of [objective, statement, closeReason, snapshotFailure]) assert.equal(files.includes(raw), false, `withheld prose leaked: ${raw}`);
   assert.equal(packet.events.some((event) => JSON.stringify(event).includes(statement)), false);
@@ -1760,6 +1784,7 @@ test('proof-mode evaluator prose is withheld from state and child receipts, not 
     detached_before: true, detached_after: true
   });
   sealChildByAgent({ sessionId, agentId: 'proof-evaluator-child' });
+  assertNoProseDerivedProofIdentities(getRunForTesting(run.id).events);
   const bytes = readTree(getRunForTesting(run.id).directory).join('\n');
   assert.equal(bytes.includes(secret), false);
   assert.equal(bytes.includes(checkoutSecret), false);
@@ -2205,27 +2230,378 @@ test('a replayed closeout Stop resumes when the checkpoint landed before the att
   assert.equal(final.state.sealed, false);
 });
 
-test('a completed blocked Stop replay reproduces decision:block without incrementing the cap', { concurrency: false }, (t) => {
+test('a completed blocked Stop redelivery spends the next bounded slot and still fails toward unsupported close', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-completed-block-replay', cwd: process.cwd() });
-  const run = beginRun(parent, { mode: 'full', objective: 'Keep a completed blocked response idempotent.' });
+  const run = beginRun(parent, { mode: 'full', objective: 'Fail an ambiguous completed redelivery toward bounded unsupported close.' });
   declareClaimContract(parent, contract());
   requestClose(parent, 'Close only through the declared claim gate.');
 
-  const first = checkpointOrSeal(parent, 'id_'.concat(sha256('completed-block-stop')));
+  const deliveryKey = 'id_'.concat(sha256('completed-block-stop'));
+  const first = checkpointOrSeal(parent, deliveryKey);
   assert.equal(first.status, 'CLOSE_DEFERRED');
   assert.equal(first.decision, 'block');
   assert.equal(first.closeout_attempt_ordinal, 1);
-  const beforeReplay = getRunForTesting(run.id).events;
 
-  const replayed = checkpointOrSeal(parent, 'id_'.concat(sha256('completed-block-stop')));
-  assert.equal(replayed.status, 'CLOSE_DEFERRED');
-  assert.equal(replayed.decision, 'block');
-  assert.equal(replayed.closeout_attempt_ordinal, 1);
-  assert.equal(replayed.replayed_delivery, true);
-  const afterReplay = getRunForTesting(run.id).events;
-  assert.equal(afterReplay.length, beforeReplay.length);
-  assert.equal(afterReplay.filter((event) => event.type === 'closeout_attempted').length, 1);
+  const redelivered = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(redelivered.status, 'CLOSE_DEFERRED');
+  assert.equal(redelivered.decision, 'block');
+  assert.equal(redelivered.closeout_attempt_ordinal, 2);
+  assert.equal(redelivered.replayed_delivery, undefined);
+
+  const third = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(third.status, 'CLOSED_UNSUPPORTED');
+  const final = getRunForTesting(run.id);
+  assert.deepEqual(
+    final.events.filter((event) => event.type === 'closeout_attempted').map((event) => event.payload.ordinal),
+    [1, 2, 3]
+  );
+  assert.equal(final.events.filter((event) => event.type === 'turn_checkpoint').length, 3);
+  assert.equal(final.events.filter((event) => event.type === 'run_sealed').length, 1);
+});
+
+test('a completed same-key Stop cannot turn newly supporting evidence into a successful seal', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-completed-redelivery-success-firewall', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Require a fresh delivery identity for success.' });
+  const declared = declareClaimContract(parent, contract({
+    requested_state: 'BUILT',
+    named_producers: ['software_release/local'],
+    verifier_id: 'software_release/local_verifier'
+  }));
+  requestClose(parent, 'Close only through the declared claim gate.');
+
+  const first = checkpointOrSeal(parent, 'completed-redelivery-success-key');
+  assert.equal(first.decision, 'block');
+  assert.equal(first.closeout_attempt_ordinal, 1);
+  const firstPacket = getRunForTesting(run.id);
+  const publishedFace = readFileSync(join(firstPacket.directory, 'continuation.json'), 'utf8');
+  const publishedAnchor = readFileSync(join(firstPacket.directory, 'checkpoint-anchor.json'), 'utf8');
+  seedBuilt(run.id, declared);
+
+  const eventCountBeforeRejectedDelivery = getRunForTesting(run.id).events.length;
+  const changed = checkpointOrSeal(parent, 'completed-redelivery-success-key');
+  assert.equal(changed.decision, 'block');
+  assert.match(changed.reason, /^STOP_DELIVERY_FRONTIER_CHANGED:/);
+  assert.equal(changed.compiled.highest_supported_state, 'BUILT');
+  assert.deepEqual(changed.blockers, []);
+  const failedPacket = getRunForTesting(run.id);
+  assert.equal(failedPacket.events.some((event) => event.type === 'run_sealed'), false);
+  assert.equal(failedPacket.events.filter((event) => event.type === 'turn_checkpoint').length, 1);
+  assert.equal(failedPacket.events.length, eventCountBeforeRejectedDelivery);
+  assert.equal(readFileSync(join(failedPacket.directory, 'continuation.json'), 'utf8'), publishedFace);
+  assert.equal(readFileSync(join(failedPacket.directory, 'checkpoint-anchor.json'), 'utf8'), publishedAnchor);
+  const failedVerification = verifyRun(run.id);
+  assert.equal(failedVerification.status, 'CHECKPOINT_VERIFIED');
+  assert.equal(failedVerification.ledger_advanced, true);
+  const failedEventCount = failedPacket.events.length;
+  assert.match(checkpointOrSeal(parent, 'completed-redelivery-success-key').reason, /^STOP_DELIVERY_FRONTIER_CHANGED:/);
+  assert.equal(getRunForTesting(run.id).events.length, failedEventCount);
+  assert.equal(checkpointOrSeal(parent, 'fresh-success-key').status, 'SEALED');
+});
+
+test('a supported state with lifecycle blockers follows the same bounded unsupported path', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'compiler-same-key-supported-lifecycle-blocker';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Keep lifecycle blockers inside the bounded closeout rule.' });
+  const declared = declareClaimContract(parent, contract({
+    requested_state: 'BUILT',
+    named_producers: ['software_release/local'],
+    verifier_id: 'software_release/local_verifier'
+  }));
+  seedBuilt(run.id, declared);
+  mintChild({ sessionId, agentId: 'same-key-open-child' });
+  requestClose(parent, 'Close only through the declared claim gate.');
+  const deliveryKey = 'id_'.concat(sha256('same-key-supported-lifecycle-blocker'));
+
+  const first = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(first.closeout_attempt_ordinal, 1);
+  assert(first.blockers.some((item) => /^CHILD_.*_OPEN$/.test(item)));
+  const second = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(second.closeout_attempt_ordinal, 2);
+  assert.doesNotMatch(second.reason, /STOP_DELIVERY_FRONTIER_CHANGED/);
+  const third = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(third.status, 'CLOSED_UNSUPPORTED');
+  assert.equal(getRunForTesting(run.id).state.terminal_status, 'CLOSED_UNSUPPORTED');
+});
+
+test('a changed same-key frontier that remains unsupported starts a new bounded streak', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-completed-redelivery-unsupported-frontier', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Keep an unsupported changed frontier live without permitting success.' });
+  const declared = declareClaimContract(parent, contract());
+  requestClose(parent, 'Close only through the declared claim gate.');
+  const deliveryKey = 'id_'.concat(sha256('completed-redelivery-unsupported-frontier'));
+
+  const first = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(first.closeout_attempt_ordinal, 1);
+  const firstFingerprint = getRunForTesting(run.id).events
+    .filter((event) => event.type === 'closeout_attempted').at(-1).payload.blocker_fingerprint;
+
+  requestClaimProducer(parent, declared.contract_id, 'software_release/local');
+  const changed = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(changed.status, 'CLOSE_DEFERRED');
+  assert.equal(changed.closeout_attempt_ordinal, 1);
+  const changedFingerprint = getRunForTesting(run.id).events
+    .filter((event) => event.type === 'closeout_attempted').at(-1).payload.blocker_fingerprint;
+  assert.notEqual(changedFingerprint, firstFingerprint);
+  assert.equal(checkpointOrSeal(parent, deliveryKey).closeout_attempt_ordinal, 2);
+  assert.equal(checkpointOrSeal(parent, deliveryKey).status, 'CLOSED_UNSUPPORTED');
+
+  const packet = getRunForTesting(run.id);
+  assert.deepEqual(
+    packet.events.filter((event) => event.type === 'closeout_attempted').map((event) => event.payload.ordinal),
+    [1, 1, 2, 3]
+  );
+  assert.equal(packet.events.filter((event) => event.type === 'run_sealed').length, 1);
+  assert.equal(packet.state.terminal_status, 'CLOSED_UNSUPPORTED');
+});
+
+test('a changed completed Stop frontier returns its own hook reason instead of BLOCKED_TRANSPORT', { concurrency: false }, (t) => {
+  const data = isolatedData(t);
+  const env = { ...process.env, LYHNA_CODEX_DATA: data };
+  const sessionId = 'compiler-changed-frontier-hook-reason';
+  const session = runHook({ hook_event_name: 'SessionStart', session_id: sessionId, cwd: process.cwd() }, env);
+  const parent = session.hookSpecificOutput.additionalContext.match(/LYHNA_SESSION_CAPABILITY=([^\s.]+)/)[1];
+  const run = beginRun(parent, { mode: 'full', objective: 'Return a distinct changed-frontier reason.' });
+  const declared = declareClaimContract(parent, contract({
+    requested_state: 'BUILT',
+    named_producers: ['software_release/local'],
+    verifier_id: 'software_release/local_verifier'
+  }));
+  requestClose(parent, 'Close only through the declared claim gate.');
+  const stop = { hook_event_name: 'Stop', session_id: sessionId, event_id: 'shared-stop', turn_id: 'shared-turn' };
+
+  const first = runHook(stop, env);
+  assert.equal(first.decision, 'block');
+  seedBuilt(run.id, declared);
+  const changed = runHook(stop, env);
+  assert.equal(changed.decision, 'block');
+  assert.match(changed.reason, /^STOP_DELIVERY_FRONTIER_CHANGED:/);
+  assert.doesNotMatch(changed.reason, /BLOCKED_TRANSPORT/);
+  assert.match(changed.reason, /fresh Stop delivery identity/);
+  assert.equal(getRunForTesting(run.id).state.sealed, false);
+});
+
+test('an interleaved Stop cannot strand a torn delivery behind another checkpoint', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-interleaved-torn-delivery', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Recover a keyed torn Stop after an interleaved delivery.' });
+  declareClaimContract(parent, contract());
+  requestClose(parent, 'Close only through the declared claim gate.');
+
+  appendEvent(run.id, {
+    type: 'turn_checkpoint',
+    origin: 'runtime_hook',
+    payload: { status: 'OPEN', receipt_renderer: '0.1.33' },
+    idempotencyKey: 'checkpoint:delivery-A#0'
+  });
+  const interleaved = checkpointOrSeal(parent, 'delivery-B');
+  assert.equal(interleaved.decision, 'block');
+  assert.equal(interleaved.closeout_attempt_ordinal, 1);
+
+  const recovered = checkpointOrSeal(parent, 'delivery-A');
+  assert.equal(recovered.decision, 'block');
+  assert.equal(recovered.closeout_attempt_ordinal, 2);
+  const packet = getRunForTesting(run.id);
+  assert.deepEqual(
+    packet.events.filter((event) => event.type === 'closeout_attempted').map((event) => event.payload.ordinal),
+    [1, 2]
+  );
+  assert.equal(packet.state.sealed, false);
+});
+
+test('an interleaved anchor cannot complete another delivery\'s torn attempt', { concurrency: false }, (t) => {
+  isolatedData(t);
+  for (const privacyMode of ['verified_context', 'proof']) {
+    for (const changeFrontier of [false, true]) {
+      const variant = `${privacyMode}-${changeFrontier ? 'changed' : 'unchanged'}`;
+      const parent = mintSession({ sessionId: `compiler-interleaved-attempt-${variant}`, cwd: process.cwd() });
+      const run = beginRun(parent, {
+        mode: 'full',
+        objective: 'Bind closeout completion to the delivery slot that published it.',
+        privacyMode
+      });
+      const declared = declareClaimContract(parent, contract());
+      requestClose(parent, 'Close only after three completed unsupported attempts.');
+      const deliveryA = `id_${sha256(`interleaved-attempt-A:${variant}`)}`;
+      const deliveryB = `id_${sha256(`interleaved-attempt-B:${variant}`)}`;
+
+      const first = checkpointOrSeal(parent, deliveryA);
+      assert.equal(first.closeout_attempt_ordinal, 1);
+      let packet = getRunForTesting(run.id);
+      const attemptA = packet.events.find((event) => event.type === 'closeout_attempted');
+      writeFileSync(
+        join(packet.directory, 'events.jsonl'),
+        `${packet.events.slice(0, attemptA.seq).map((event) => JSON.stringify(event)).join('\n')}\n`
+      );
+      const state = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
+      state.claim_diagnostic = null;
+      state.ledger_count = attemptA.seq;
+      state.ledger_tip = attemptA.event_hash;
+      writeFileSync(join(packet.directory, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
+      for (const name of ['checkpoint-anchor.json', 'receipt.json', 'RECEIPT.md', 'continuation.json', 'HANDOFF.md']) {
+        rmSync(join(packet.directory, name), { force: true });
+      }
+      if (changeFrontier) requestClaimProducer(parent, declared.contract_id, 'software_release/local');
+
+      const interleaved = checkpointOrSeal(parent, deliveryB);
+      const interleavedOrdinal = changeFrontier ? 1 : 2;
+      assert.equal(interleaved.closeout_attempt_ordinal, interleavedOrdinal);
+      const replayed = checkpointOrSeal(parent, deliveryA);
+      assert.equal(replayed.decision, 'block');
+      assert.equal(replayed.closeout_attempt_ordinal, 1);
+      packet = getRunForTesting(run.id);
+      assert.deepEqual(
+        packet.events.filter((event) => event.type === 'closeout_attempted').map((event) => event.payload.ordinal),
+        [1, interleavedOrdinal]
+      );
+      assert(packet.events.some((event) => (
+        event.type === 'checkpoint_anchor'
+        && event.payload?.delivery_slot_ref === attemptA.payload.delivery_slot_ref
+      )));
+      assert.equal(packet.state.sealed, false);
+      assert.equal(verifyRun(run.id).status, 'CHECKPOINT_VERIFIED');
+    }
+  }
+});
+
+test('checkpoint publishing compiles from exactly the covered ledger prefix', { concurrency: false }, (t) => {
+  isolatedData(t);
+  for (const privacyMode of ['verified_context', 'proof']) {
+    const parent = mintSession({ sessionId: `compiler-checkpoint-extent-${privacyMode}`, cwd: process.cwd() });
+    const run = beginRun(parent, {
+      mode: 'full',
+      objective: 'Bind a published compiler projection to its checkpoint extent.',
+      privacyMode
+    });
+    const declared = declareClaimContract(parent, contract());
+    requestClose(parent, 'Close only through the declared claim gate.');
+    const delivery = `id_${sha256(`checkpoint-extent:${privacyMode}`)}`;
+
+    checkpointOrSeal(parent, delivery);
+    let packet = getRunForTesting(run.id);
+    const attempt = packet.events.find((event) => event.type === 'closeout_attempted');
+    writeFileSync(
+      join(packet.directory, 'events.jsonl'),
+      `${packet.events.slice(0, attempt.seq).map((event) => JSON.stringify(event)).join('\n')}\n`
+    );
+    const state = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
+    state.claim_diagnostic = null;
+    state.ledger_count = attempt.seq;
+    state.ledger_tip = attempt.event_hash;
+    writeFileSync(join(packet.directory, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
+    for (const name of ['checkpoint-anchor.json', 'receipt.json', 'RECEIPT.md', 'continuation.json', 'HANDOFF.md']) {
+      rmSync(join(packet.directory, name), { force: true });
+    }
+
+    const staleDigest = state.compiled_claim.input_digest;
+    observe(
+      run.id,
+      declared,
+      'source_identity',
+      'source_identity_observed',
+      'mock_or_test',
+      'software_release/local',
+      { source_ref: 'sha256:extent-source' },
+      `checkpoint-extent-${privacyMode}`
+    );
+    const replayed = checkpointOrSeal(parent, delivery);
+    assert.equal(replayed.closeout_attempt_ordinal, 1);
+
+    packet = getRunForTesting(run.id);
+    const anchor = packet.events.filter((event) => event.type === 'checkpoint_anchor').at(-1);
+    const coveredEvents = packet.events.slice(0, anchor.payload.covers_seq);
+    const expected = compileClaim({
+      profile: packet.state.claim_profile,
+      contract: packet.state.claim_contract,
+      events: coveredEvents
+    });
+    const capsule = JSON.parse(readFileSync(join(packet.directory, 'continuation.json'), 'utf8'));
+    assert.notEqual(expected.input_digest, staleDigest);
+    assert.equal(packet.state.compiled_claim.input_digest, expected.input_digest);
+    assert.equal(packet.state.compiled_claim.eligible_evidence_frontier, expected.eligible_evidence_frontier);
+    assert.equal(packet.state.compiled_claim.material_control_frontier, expected.material_control_frontier);
+    assert.equal(capsule.claim_compiler.compiled_state.input_digest, expected.input_digest);
+    assert.equal(anchor.payload.covers_seq, anchor.seq - 1);
+    assert.equal(verifyRun(run.id).status, 'CHECKPOINT_VERIFIED');
+  }
+});
+
+test('a torn terminal attempt blocks later mutations and seals from its durable frontier', { concurrency: false }, (t) => {
+  isolatedData(t);
+  for (const privacyMode of ['verified_context', 'proof']) {
+    const parent = mintSession({ sessionId: `compiler-interleaved-terminal-${privacyMode}`, cwd: process.cwd() });
+    const run = beginRun(parent, {
+      mode: 'full',
+      objective: 'Finish a durable terminal attempt from its own historical frontier.',
+      privacyMode
+    });
+    const declared = declareClaimContract(parent, contract());
+    requestClose(parent, 'Close only after three completed unsupported attempts.');
+    checkpointOrSeal(parent, `id_${sha256(`terminal-first:${privacyMode}`)}`);
+    checkpointOrSeal(parent, `id_${sha256(`terminal-second:${privacyMode}`)}`);
+    const deliveryA = `id_${sha256(`terminal-torn:${privacyMode}`)}`;
+    checkpointOrSeal(parent, deliveryA);
+
+    let packet = getRunForTesting(run.id);
+    const attemptA = packet.events.filter((event) => event.type === 'closeout_attempted').at(-1);
+    assert.equal(attemptA.payload.ordinal, 3);
+    writeFileSync(
+      join(packet.directory, 'events.jsonl'),
+      `${packet.events.slice(0, attemptA.seq).map((event) => JSON.stringify(event)).join('\n')}\n`
+    );
+    const state = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
+    state.sealed = false;
+    state.terminal_status = null;
+    state.closeout_envelope = null;
+    state.ledger_count = attemptA.seq;
+    state.ledger_tip = attemptA.event_hash;
+    writeFileSync(join(packet.directory, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
+    for (const name of ['seal-anchor.json', 'checkpoint-anchor.json', 'receipt.json', 'RECEIPT.md', 'continuation.json', 'HANDOFF.md']) {
+      rmSync(join(packet.directory, name), { force: true });
+    }
+
+    const eventCountAtBarrier = getRunForTesting(run.id).events.length;
+    assert.throws(
+      () => requestClaimProducer(parent, declared.contract_id, 'software_release/local'),
+      /CLOSEOUT_TERMINAL_ATTEMPT_PENDING/
+    );
+    assert.throws(
+      () => mintChild({ sessionId: `compiler-interleaved-terminal-${privacyMode}`, agentId: 'too-late-child' }),
+      /CLOSEOUT_TERMINAL_ATTEMPT_PENDING/
+    );
+    assert.equal(getRunForTesting(run.id).events.length, eventCountAtBarrier);
+    const replayed = checkpointOrSeal(parent, deliveryA);
+    assert.equal(replayed.status, 'CLOSED_UNSUPPORTED');
+    packet = getRunForTesting(run.id);
+    assert.equal(packet.state.terminal_status, 'CLOSED_UNSUPPORTED');
+    assert.equal(packet.events.filter((event) => event.type === 'run_sealed').length, 1);
+    assert.equal(verifyRun(run.id).status, 'ALREADY_SEALED');
+  }
+});
+
+test('the generic proof writer cannot claim supervisor provenance for retained identities', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-proof-supervisor-provenance', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Reject caller-labeled supervisor identities.', privacyMode: 'proof' });
+  const marker = 'MODEL_PROSE_SMUGGLED_AS_SUPERVISOR_ID_7E21';
+  assert.throws(
+    () => appendEvent(run.id, {
+      type: 'builder_claim',
+      origin: 'agent_reported',
+      payload: {
+        builder_claim_id: marker,
+        builder_claim_ordinal: 1,
+        evidence_refs: [],
+        statement: 'Caller-authored identity marker.'
+      },
+      idempotencyKey: 'caller-supervisor:builder_claim'
+    }),
+    /PROOF_EVENT_PROVENANCE_REQUIRED/
+  );
+  assert.equal(readTree(getRunForTesting(run.id).directory).join('\n').includes(marker), false);
 });
 
 test('a contracted Stop without a host delivery identity fails closed before recording an attempt', { concurrency: false }, (t) => {

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "lyhna-codex-adapter",
+  "version": "0.1.34",
+  "description": "Package Lyhna's Codex witnessed-run adapter as an Agent Skill and MCP server.",
+  "author": {
+    "name": "Lyhna AI",
+    "url": "https://lyhna-ai.github.io/lyhna-witness/"
+  },
+  "homepage": "https://lyhna-ai.github.io/lyhna-witness/",
+  "repository": "https://github.com/Lyhna-ai/lyhna-codex-adapter",
+  "keywords": [
+    "witness",
+    "receipts",
+    "codex",
+    "agent-skills",
+    "mcp"
+  ]
+}

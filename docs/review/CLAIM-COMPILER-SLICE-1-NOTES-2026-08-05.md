@@ -18,7 +18,7 @@ Known limitations carried forward deliberately:
   restarts. This is a liveness limitation, not permission to seal above the evidence ceiling.
 - The bundled profile is locally registered. Local hash integrity and a profile's own producer
   allowlist do not establish who was authorized to register that profile or probe. Registration
-  provenance is a post-0.1.36 trust-root problem, not something Slice 1 claims to solve.
+  provenance is a post-0.1.37 trust-root problem, not something Slice 1 claims to solve.
 - Slice 1 compiles evidence and persists producer requests, but it does not require every named
   producer to have been requested and terminal before a supported seal. Exact producer joins,
   findings-aware terminal verdicts, and the two-sample quiet barrier are Slice 2 gates.
