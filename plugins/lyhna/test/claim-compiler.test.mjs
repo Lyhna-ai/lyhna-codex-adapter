@@ -2467,6 +2467,68 @@ test('an interleaved anchor cannot complete another delivery\'s torn attempt', {
   }
 });
 
+test('checkpoint publishing compiles from exactly the covered ledger prefix', { concurrency: false }, (t) => {
+  isolatedData(t);
+  for (const privacyMode of ['verified_context', 'proof']) {
+    const parent = mintSession({ sessionId: `compiler-checkpoint-extent-${privacyMode}`, cwd: process.cwd() });
+    const run = beginRun(parent, {
+      mode: 'full',
+      objective: 'Bind a published compiler projection to its checkpoint extent.',
+      privacyMode
+    });
+    const declared = declareClaimContract(parent, contract());
+    requestClose(parent, 'Close only through the declared claim gate.');
+    const delivery = `id_${sha256(`checkpoint-extent:${privacyMode}`)}`;
+
+    checkpointOrSeal(parent, delivery);
+    let packet = getRunForTesting(run.id);
+    const attempt = packet.events.find((event) => event.type === 'closeout_attempted');
+    writeFileSync(
+      join(packet.directory, 'events.jsonl'),
+      `${packet.events.slice(0, attempt.seq).map((event) => JSON.stringify(event)).join('\n')}\n`
+    );
+    const state = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
+    state.claim_diagnostic = null;
+    state.ledger_count = attempt.seq;
+    state.ledger_tip = attempt.event_hash;
+    writeFileSync(join(packet.directory, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
+    for (const name of ['checkpoint-anchor.json', 'receipt.json', 'RECEIPT.md', 'continuation.json', 'HANDOFF.md']) {
+      rmSync(join(packet.directory, name), { force: true });
+    }
+
+    const staleDigest = state.compiled_claim.input_digest;
+    observe(
+      run.id,
+      declared,
+      'source_identity',
+      'source_identity_observed',
+      'mock_or_test',
+      'software_release/local',
+      { source_ref: 'sha256:extent-source' },
+      `checkpoint-extent-${privacyMode}`
+    );
+    const replayed = checkpointOrSeal(parent, delivery);
+    assert.equal(replayed.closeout_attempt_ordinal, 1);
+
+    packet = getRunForTesting(run.id);
+    const anchor = packet.events.filter((event) => event.type === 'checkpoint_anchor').at(-1);
+    const coveredEvents = packet.events.slice(0, anchor.payload.covers_seq);
+    const expected = compileClaim({
+      profile: packet.state.claim_profile,
+      contract: packet.state.claim_contract,
+      events: coveredEvents
+    });
+    const capsule = JSON.parse(readFileSync(join(packet.directory, 'continuation.json'), 'utf8'));
+    assert.notEqual(expected.input_digest, staleDigest);
+    assert.equal(packet.state.compiled_claim.input_digest, expected.input_digest);
+    assert.equal(packet.state.compiled_claim.eligible_evidence_frontier, expected.eligible_evidence_frontier);
+    assert.equal(packet.state.compiled_claim.material_control_frontier, expected.material_control_frontier);
+    assert.equal(capsule.claim_compiler.compiled_state.input_digest, expected.input_digest);
+    assert.equal(anchor.payload.covers_seq, anchor.seq - 1);
+    assert.equal(verifyRun(run.id).status, 'CHECKPOINT_VERIFIED');
+  }
+});
+
 test('a torn terminal attempt blocks later mutations and seals from its durable frontier', { concurrency: false }, (t) => {
   isolatedData(t);
   for (const privacyMode of ['verified_context', 'proof']) {

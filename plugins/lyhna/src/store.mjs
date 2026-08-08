@@ -3514,7 +3514,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
 // overwrites the file, history lives in the ledger. Called only after the checkpoint/close_deferred
 // event is appended and state saved, so the parsed ledger and the passed state agree.
 function writeCheckpointArtifacts(runId, state, deliverySlotRef = undefined) {
-  const { events, tip } = parseLedger(runId);
+  let { events, tip } = parseLedger(runId);
   // Nothing happened since the previous anchor (e.g. a redelivered Stop deduped its checkpoint
   // event): the ledger tip IS the anchor; re-anchoring would anchor the anchor. Idempotent no-op —
   // except that the index must still be reconciled. Artifact writes are ordered continuation →
@@ -3538,7 +3538,26 @@ function writeCheckpointArtifacts(runId, state, deliverySlotRef = undefined) {
     state.ledger_count = events.length;
     state.ledger_tip = tip;
   }
+  // A checkpoint publishes one ledger extent, so its claim projection must be compiled from that
+  // same prefix. Refresh here rather than at any of the five callers: otherwise a torn attempt can
+  // append later evidence, enter through a recovery caller, and publish a current ledger tip with a
+  // stale compiled projection. compileAndRecordUnlocked appends a binding event only when the input
+  // digest changed; reparse afterward, then derive the projection from the exact final prefix that
+  // this packet is about to cover.
+  let compiledProjectionExtent = null;
+  if (state.claim_contract) {
+    compileAndRecordUnlocked(runId, state);
+    ({ events, tip } = parseLedger(runId));
+    const compiledEventRef = state.compiled_claim?.compiled_event_ref ?? null;
+    state.compiled_claim = {
+      ...compileClaim({ profile: state.claim_profile, contract: state.claim_contract, events }),
+      claim_contract_ref: state.claim_contract.claim_contract_ref,
+      compiled_event_ref: compiledEventRef
+    };
+    compiledProjectionExtent = events.length;
+  }
   const coversSeq = events.length;
+  assert(compiledProjectionExtent === null || compiledProjectionExtent === coversSeq, 'LOCAL_CHAIN_BROKEN:compiled_projection_extent');
   const receiptJson = renderReceiptJson(state, events);
   const receiptMarkdown = renderReceiptMarkdown(state, events);
   const stateHash = sha256(canonicalJson(state));
