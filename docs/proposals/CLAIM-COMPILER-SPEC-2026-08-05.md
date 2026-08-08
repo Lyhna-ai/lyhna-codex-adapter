@@ -356,7 +356,10 @@ interleaved checkpoint from another key cannot steal or strand an incomplete del
 anchor without that ref completes an attempt only when no later Stop checkpoint intervenes. An
 incomplete attempt is validated and finished from its durable attempt-time ledger prefix; later
 compiler or lifecycle projections cannot complete it, invalidate it, or convert its replay into a
-transport failure. A spent delivery slot follows one rule: if the fresh compile still has any unsupported-state or
+transport failure. Once a durable attempt reaches the declared unsupported cap, it is a pending
+terminal barrier: no new MCP or lifecycle mutation, child capability, or evidence event may enter
+the run before its diagnostic, unsupported envelope, and seal recovery finish. A spent delivery
+slot follows one rule: if the fresh compile still has any unsupported-state or
 lifecycle blocker, it follows the normal bounded blocked-attempt path; if every successful-seal
 condition is now satisfied, the reused identity returns a distinct block computed from that fresh
 compile without appending a checkpoint, compile, attempt, or derived artifact. Only a fresh host

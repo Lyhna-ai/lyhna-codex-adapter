@@ -2467,7 +2467,7 @@ test('an interleaved anchor cannot complete another delivery\'s torn attempt', {
   }
 });
 
-test('a torn terminal attempt seals from its durable frontier after an interleaved change', { concurrency: false }, (t) => {
+test('a torn terminal attempt blocks later mutations and seals from its durable frontier', { concurrency: false }, (t) => {
   isolatedData(t);
   for (const privacyMode of ['verified_context', 'proof']) {
     const parent = mintSession({ sessionId: `compiler-interleaved-terminal-${privacyMode}`, cwd: process.cwd() });
@@ -2501,9 +2501,16 @@ test('a torn terminal attempt seals from its durable frontier after an interleav
       rmSync(join(packet.directory, name), { force: true });
     }
 
-    requestClaimProducer(parent, declared.contract_id, 'software_release/local');
-    const interleaved = checkpointOrSeal(parent, `id_${sha256(`terminal-interleaved:${privacyMode}`)}`);
-    assert.equal(interleaved.closeout_attempt_ordinal, 1);
+    const eventCountAtBarrier = getRunForTesting(run.id).events.length;
+    assert.throws(
+      () => requestClaimProducer(parent, declared.contract_id, 'software_release/local'),
+      /CLOSEOUT_TERMINAL_ATTEMPT_PENDING/
+    );
+    assert.throws(
+      () => mintChild({ sessionId: `compiler-interleaved-terminal-${privacyMode}`, agentId: 'too-late-child' }),
+      /CLOSEOUT_TERMINAL_ATTEMPT_PENDING/
+    );
+    assert.equal(getRunForTesting(run.id).events.length, eventCountAtBarrier);
     const replayed = checkpointOrSeal(parent, deliveryA);
     assert.equal(replayed.status, 'CLOSED_UNSUPPORTED');
     packet = getRunForTesting(run.id);

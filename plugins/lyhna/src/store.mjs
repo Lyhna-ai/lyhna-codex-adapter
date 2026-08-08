@@ -706,6 +706,7 @@ export function mintChild({ sessionId, agentId, hookPayload = null, hookDelivery
     recoverClaimControlStateUnlocked(activeRunId, current);
     assert(!current.sealed, 'RUN_SEALED');
     assert(current.parent_capability_hash === sha256(parentCapability), 'CAPABILITY_RUN_MISMATCH');
+    assertTerminalCloseoutMutationAllowed(parseLedger(activeRunId).events, current);
     if (!readJson(capabilityPath(capability), null)) {
       writeCapability(capability, {
         kind: 'child',
@@ -1605,6 +1606,7 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
     assert(contentHash === duplicate.content_hash, 'IDEMPOTENCY_CONFLICT');
     return duplicate;
   }
+  assertTerminalCloseoutMutationAllowed(events, state, type);
   // No NEW event may follow a terminal run_sealed. The durable ledger seal is authoritative even when
   // the passed state.sealed flag lags it (crash after the seal append, before state was saved), so
   // EVERY mutable tool that reaches this shared append path — record_claim, snapshot_pr,
@@ -1628,6 +1630,40 @@ function appendEventUnlocked(runId, state, { type, origin, payload, idempotencyK
   state.ledger_count = event.seq;
   state.ledger_tip = event.event_hash;
   return event;
+}
+
+const TERMINAL_CLOSEOUT_RECOVERY_EVENTS = new Set([
+  'diagnostic_emitted',
+  'diagnostic_resolved',
+  'closeout_envelope_generated',
+  'run_sealed'
+]);
+
+function pendingTerminalCloseoutAttempt(events, state) {
+  const maximum = Number(state.claim_contract?.caps?.max_unsupported_attempts || 0);
+  if (!maximum) return null;
+  const attempt = [...events].reverse().find((event) => (
+    event.type === 'closeout_attempted'
+    && event.origin === 'runtime_hook'
+    && event.payload?.claim_contract_ref === state.claim_contract.claim_contract_ref
+    && event.payload?.ordinal === maximum
+  ));
+  if (!attempt) return null;
+  const completed = events.some((event) => (
+    event.seq > attempt.seq
+    && event.type === 'closeout_envelope_generated'
+    && event.payload?.outcome === 'CLOSED_UNSUPPORTED'
+    && event.payload?.claim_contract_ref === attempt.payload.claim_contract_ref
+    && event.payload?.input_digest === attempt.payload.input_digest
+    && event.payload?.eligible_evidence_frontier === attempt.payload.eligible_evidence_frontier
+    && event.payload?.material_control_frontier === attempt.payload.material_control_frontier
+  ));
+  return completed ? null : attempt;
+}
+
+function assertTerminalCloseoutMutationAllowed(events, state, type = null) {
+  if (!pendingTerminalCloseoutAttempt(events, state)) return;
+  assert(type && TERMINAL_CLOSEOUT_RECOVERY_EVENTS.has(type), 'CLOSEOUT_TERMINAL_ATTEMPT_PENDING');
 }
 
 export function appendEvent(runId, input) {
@@ -1673,6 +1709,7 @@ function requireParent(capability, { mutable = true } = {}) {
       repairSeal(runId);
       assert(false, 'RUN_SEALED');
     }
+    if (mutable) assertTerminalCloseoutMutationAllowed(parseLedger(runId).events, current);
     return current;
   });
   if (mutable) assert(!state.sealed, 'RUN_SEALED');
@@ -1693,6 +1730,7 @@ function requireChild(capability) {
   assert(record.kind === 'child', 'CHILD_CAPABILITY_REQUIRED');
   const state = loadState(record.parent_run_id);
   assert(!state.sealed, 'RUN_SEALED');
+  assertTerminalCloseoutMutationAllowed(parseLedger(record.parent_run_id).events, state);
   return { record, runId: record.parent_run_id, state };
 }
 
@@ -1703,6 +1741,7 @@ function assertChildLeaseUnlocked(runId, state, capability) {
   assert(record.parent_run_id === runId, 'EVALUATOR_PARENT_MISMATCH');
   assert(record.parent_capability_hash === state.parent_capability_hash, 'EVALUATOR_PARENT_MISMATCH');
   assert(!state.sealed, 'RUN_SEALED');
+  assertTerminalCloseoutMutationAllowed(parseLedger(runId).events, state);
   return record;
 }
 
@@ -2698,6 +2737,7 @@ export function sealChildByAgent({ sessionId, agentId, hookPayload = null, hookD
   return withLock(lockPath(runId), () => {
     const current = loadState(runId);
     recoverClaimControlStateUnlocked(runId, current);
+    assertTerminalCloseoutMutationAllowed(parseLedger(runId).events, current);
     let stopEvent = null;
     if (hookPayload) {
       assert(current.privacy_mode !== 'proof' || /^hook:[^:]+:id_[a-f0-9]{64}$/.test(String(hookDeliveryKey || '')), 'PROOF_HOOK_DELIVERY_ID_REQUIRED');
