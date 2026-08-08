@@ -2412,6 +2412,56 @@ test('an interleaved Stop cannot strand a torn delivery behind another checkpoin
   assert.equal(packet.state.sealed, false);
 });
 
+test('an interleaved anchor cannot complete another delivery\'s torn attempt', { concurrency: false }, (t) => {
+  isolatedData(t);
+  for (const privacyMode of ['verified_context', 'proof']) {
+    const parent = mintSession({ sessionId: `compiler-interleaved-attempt-${privacyMode}`, cwd: process.cwd() });
+    const run = beginRun(parent, {
+      mode: 'full',
+      objective: 'Bind closeout completion to the delivery slot that published it.',
+      privacyMode
+    });
+    declareClaimContract(parent, contract());
+    requestClose(parent, 'Close only after three completed unsupported attempts.');
+    const deliveryA = `id_${sha256(`interleaved-attempt-A:${privacyMode}`)}`;
+    const deliveryB = `id_${sha256(`interleaved-attempt-B:${privacyMode}`)}`;
+
+    const first = checkpointOrSeal(parent, deliveryA);
+    assert.equal(first.closeout_attempt_ordinal, 1);
+    let packet = getRunForTesting(run.id);
+    const attemptA = packet.events.find((event) => event.type === 'closeout_attempted');
+    writeFileSync(
+      join(packet.directory, 'events.jsonl'),
+      `${packet.events.slice(0, attemptA.seq).map((event) => JSON.stringify(event)).join('\n')}\n`
+    );
+    const state = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
+    state.claim_diagnostic = null;
+    state.ledger_count = attemptA.seq;
+    state.ledger_tip = attemptA.event_hash;
+    writeFileSync(join(packet.directory, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
+    for (const name of ['checkpoint-anchor.json', 'receipt.json', 'RECEIPT.md', 'continuation.json', 'HANDOFF.md']) {
+      rmSync(join(packet.directory, name), { force: true });
+    }
+
+    const interleaved = checkpointOrSeal(parent, deliveryB);
+    assert.equal(interleaved.closeout_attempt_ordinal, 2);
+    const replayed = checkpointOrSeal(parent, deliveryA);
+    assert.equal(replayed.decision, 'block');
+    assert.equal(replayed.closeout_attempt_ordinal, 1);
+    packet = getRunForTesting(run.id);
+    assert.deepEqual(
+      packet.events.filter((event) => event.type === 'closeout_attempted').map((event) => event.payload.ordinal),
+      [1, 2]
+    );
+    assert(packet.events.some((event) => (
+      event.type === 'checkpoint_anchor'
+      && event.payload?.delivery_slot_ref === attemptA.payload.delivery_slot_ref
+    )));
+    assert.equal(packet.state.sealed, false);
+    assert.equal(verifyRun(run.id).status, 'CHECKPOINT_VERIFIED');
+  }
+});
+
 test('the generic proof writer cannot claim supervisor provenance for retained identities', { concurrency: false }, (t) => {
   isolatedData(t);
   const parent = mintSession({ sessionId: 'compiler-proof-supervisor-provenance', cwd: process.cwd() });

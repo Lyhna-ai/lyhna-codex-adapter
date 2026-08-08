@@ -46,7 +46,7 @@ const HOOK_PROOF_FIELDS = ['event', 'event_id', 'model', 'tool_name', 'cwd_ref',
 // structural.
 const EVENT_PAYLOAD_FIELDS = new Map([
   ['builder_claim', ['builder_claim_id', 'builder_claim_ordinal', 'evidence_refs', 'statement', 'statement_ref', 'statement_text', 'text_withheld']],
-  ['checkpoint_anchor', ['covers_seq', 'tip_hash', 'state_hash', 'receipt_json_hash', 'receipt_markdown_hash', 'receipt_renderer', 'continuation_fold_version']],
+  ['checkpoint_anchor', ['covers_seq', 'tip_hash', 'state_hash', 'receipt_json_hash', 'receipt_markdown_hash', 'receipt_renderer', 'continuation_fold_version', 'delivery_slot_ref']],
   ['child_receipt_retrieved', ['receipt_id', 'content_ref']],
   ['child_receipt_sealed', ['receipt_id', 'role', 'status', 'content_ref']],
   ['child_started', ['child_id', 'role', 'status']],
@@ -114,6 +114,7 @@ export const PROOF_IDENTITY_PROVENANCE = Object.freeze({
   'closeout_attempted.eligible_evidence_frontier': 'compiler_structural',
   'closeout_attempted.material_control_frontier': 'compiler_structural',
   'closeout_attempted.blocker_fingerprint': 'compiler_structural',
+  'checkpoint_anchor.delivery_slot_ref': 'host_ledger_structural',
   'closeout_envelope_generated.envelope_id': 'supervisor_structural',
   'closeout_envelope_generated.profile_id': 'supervisor_structural',
   'closeout_envelope_generated.scope_ref': 'supervisor_structural',
@@ -2930,16 +2931,31 @@ function completedAttemptsUnderDeliveryKey(events, privacyMode, deliveryKey) {
     const checkpoint = stopCheckpointForSlot(events, privacyMode, deliveryKey, slot);
     if (!checkpoint) return slot;
     const attempt = stopAttemptForSlot(events, privacyMode, deliveryKey, slot, checkpoint);
-    const completed = attempt && events.some((event) => (
-      event.seq > attempt.seq
-      && (event.type === 'checkpoint_anchor' || event.type === 'closeout_envelope_generated')
-    ));
+    const completed = attempt && closeoutAttemptCompleted(events, attempt);
     // An incomplete slot is replayed in place so torn checkpoint, attempt, and envelope writes keep
     // their existing recovery semantics. Only a fully published blocked attempt spends the slot.
     if (!attempt || !completed) return slot;
     slot += 1;
   }
   throw Object.assign(new Error('STOP_CHECKPOINT_SLOT_RANGE'), { code: 'STOP_CHECKPOINT_SLOT_RANGE' });
+}
+
+function closeoutAttemptCompleted(events, attempt) {
+  const slotRef = attempt.payload?.delivery_slot_ref;
+  const nextCheckpoint = events.find((event) => (
+    event.seq > attempt.seq && event.type === 'turn_checkpoint'
+  ));
+  return events.some((event) => {
+    if (event.seq <= attempt.seq) return false;
+    if (event.type === 'checkpoint_anchor') {
+      // New anchors name the exact delivery slot they publish. Older anchors remain readable only
+      // when they occur before another Stop checkpoint, which is the only unambiguous legacy shape.
+      if (event.payload?.delivery_slot_ref) return event.payload.delivery_slot_ref === slotRef;
+      return !nextCheckpoint || event.seq < nextCheckpoint.seq;
+    }
+    return event.type === 'closeout_envelope_generated'
+      && (!nextCheckpoint || event.seq < nextCheckpoint.seq);
+  });
 }
 
 export function checkpointOrSeal(capability, deliveryKey = null) {
@@ -3069,10 +3085,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
           priorCheckpoint
         )
         : null;
-      const attemptCompleted = interruptedAttempt && preEvents.some((event) => (
-        event.seq > interruptedAttempt.seq
-        && (event.type === 'checkpoint_anchor' || event.type === 'closeout_envelope_generated')
-      ));
+      const attemptCompleted = interruptedAttempt && closeoutAttemptCompleted(preEvents, interruptedAttempt);
       if (interruptedAttempt) {
         validateCloseoutAttemptBinding(
           current,
@@ -3108,7 +3121,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
           };
         }
         if (ordinal < current.claim_contract.caps.max_unsupported_attempts) {
-          writeCheckpointArtifacts(runId, current);
+          writeCheckpointArtifacts(runId, current, interruptedAttempt.payload.delivery_slot_ref);
           return {
             status: 'CLOSE_DEFERRED',
             run_id: runId,
@@ -3243,7 +3256,11 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         ensureClaimDiagnosticUnlocked(runId, current, compiled, fingerprint, reason);
         if (ordinal < current.claim_contract.caps.max_unsupported_attempts) {
           saveState(current);
-          writeCheckpointArtifacts(runId, current);
+          writeCheckpointArtifacts(
+            runId,
+            current,
+            contractedCloseoutDelivery ? stopDeliverySlotRef(deliveryKey, completedDeliveryAttempts) : undefined
+          );
           return {
             status: 'CLOSE_DEFERRED',
             run_id: runId,
@@ -3423,14 +3440,17 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
 // receipt covers events 1..covers_seq (everything before its own anchor event); the latest anchor
 // overwrites the file, history lives in the ledger. Called only after the checkpoint/close_deferred
 // event is appended and state saved, so the parsed ledger and the passed state agree.
-function writeCheckpointArtifacts(runId, state) {
+function writeCheckpointArtifacts(runId, state, deliverySlotRef = undefined) {
   const { events, tip } = parseLedger(runId);
   // Nothing happened since the previous anchor (e.g. a redelivered Stop deduped its checkpoint
   // event): the ledger tip IS the anchor; re-anchoring would anchor the anchor. Idempotent no-op —
   // except that the index must still be reconciled. Artifact writes are ordered continuation →
   // handoff → index, so a crash between the capsule and its index leaves a packet whose capsule the
   // successor cannot resolve, and the replayed Stop would otherwise return here and never repair it.
-  if (events.at(-1)?.type === 'checkpoint_anchor') {
+  if (
+    events.at(-1)?.type === 'checkpoint_anchor'
+    && (!deliverySlotRef || events.at(-1).payload?.delivery_slot_ref === deliverySlotRef)
+  ) {
     ensureStopArtifacts(runId, state);
     return;
   }
@@ -3464,7 +3484,8 @@ function writeCheckpointArtifacts(runId, state) {
       // The fold generation, committed in the chain so the lineage checker can dispatch on it.
       // The capsule also declares it, but the capsule is unanchored — a forged packet could set
       // that copy to whichever reducer verifies. This one it cannot touch.
-      continuation_fold_version: CURRENT_FOLD_VERSION
+      continuation_fold_version: CURRENT_FOLD_VERSION,
+      delivery_slot_ref: deliverySlotRef
     },
     idempotencyKey: `checkpoint-anchor:${coversSeq}`
   });
