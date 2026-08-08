@@ -209,35 +209,37 @@ function assertCurrentCompiledBinding(state, payload, code) {
 
 function validateCloseoutAttemptBinding(state, origin, payload, eventSeq = null) {
   const code = 'INVALID_CLOSEOUT_ATTEMPT';
-  assert(origin === 'runtime_hook' && state.close_requested, code);
-  assert(state.claim_contract && state.compiled_claim, code);
-  assert(payload.claim_contract_ref === state.claim_contract.claim_contract_ref, code);
-  assert(payload.input_digest === state.compiled_claim.input_digest, code);
-  assert(payload.eligible_evidence_frontier === state.compiled_claim.eligible_evidence_frontier, code);
-  assert(payload.material_control_frontier === state.compiled_claim.material_control_frontier, code);
+  const ledgerEvents = parseLedger(state.id).events;
+  const { bindingEvents, bindingState } = closeoutAttemptBindingState(state, eventSeq, ledgerEvents);
+  assert(origin === 'runtime_hook' && bindingState.close_requested, code);
+  assert(bindingState.claim_contract && bindingState.compiled_claim, code);
+  assert(payload.claim_contract_ref === bindingState.claim_contract.claim_contract_ref, code);
+  assert(payload.input_digest === bindingState.compiled_claim.input_digest, code);
+  assert(payload.eligible_evidence_frontier === bindingState.compiled_claim.eligible_evidence_frontier, code);
+  assert(payload.material_control_frontier === bindingState.compiled_claim.material_control_frontier, code);
   assert(
     payload.delivery_slot_ref === undefined || /^stop_slot_[a-f0-9]{64}$/.test(payload.delivery_slot_ref),
     code
   );
-  assert(state.claim_contract.declared_gate_ids.includes(payload.gate_id), code);
-  const blockers = claimCloseoutBlockers(state, state.compiled_claim);
+  assert(bindingState.claim_contract.declared_gate_ids.includes(payload.gate_id), code);
+  const blockers = claimCloseoutBlockers(bindingState, bindingState.compiled_claim, bindingEvents);
   assert(blockers.length > 0, code);
   assert(canonicalJson(payload.blockers) === canonicalJson(blockers), code);
   assert(payload.blocker_fingerprint === claimCloseoutBlockerFingerprint(
-    state,
+    bindingState,
     payload.gate_id,
-    state.compiled_claim
+    bindingState.compiled_claim,
+    bindingEvents
   ), code);
-  const ledgerEvents = parseLedger(state.id).events;
   const priorAttempts = ledgerEvents.filter((event) => (
     event.type === 'closeout_attempted'
     && event.origin === 'runtime_hook'
-    && event.payload?.claim_contract_ref === state.claim_contract.claim_contract_ref
+    && event.payload?.claim_contract_ref === bindingState.claim_contract.claim_contract_ref
     && (eventSeq === null || event.seq < eventSeq)
   ));
   const prior = priorAttempts.at(-1);
   const expectedOrdinal = closeoutAttemptStreakContinues(
-    state,
+    bindingState,
     ledgerEvents,
     prior,
     payload.blocker_fingerprint,
@@ -248,6 +250,15 @@ function validateCloseoutAttemptBinding(state, origin, payload, eventSeq = null)
     : 1;
   assert(payload.attempt_sequence === priorAttempts.length + 1, code);
   assert(payload.ordinal === expectedOrdinal, code);
+}
+
+function closeoutAttemptBindingState(state, eventSeq, ledgerEvents = parseLedger(state.id).events) {
+  if (eventSeq === null) return { bindingEvents: ledgerEvents, bindingState: state };
+  const bindingEvents = ledgerEvents.filter((event) => event.seq < eventSeq);
+  return {
+    bindingEvents,
+    bindingState: { ...state, ...reconstructClaimControl(bindingEvents) }
+  };
 }
 
 function closeoutAttemptStreakContinues(state, events, prior, fingerprint, eligibleEvidenceFrontier, beforeSeq = null) {
@@ -309,7 +320,6 @@ function pendingProducerIdsFromProjection(projection) {
 function validateCloseoutEnvelopeBinding(state, origin, payload) {
   const code = 'INVALID_CLOSEOUT_ENVELOPE';
   assert(origin === 'runtime_hook', code);
-  assertCurrentCompiledBinding(state, payload, code);
   const required = [
     'envelope_id', 'outcome', 'profile_id', 'requested_state', 'supported_state',
     'scope_ref', 'eligible_evidence_frontier', 'material_control_frontier', 'input_digest',
@@ -317,14 +327,15 @@ function validateCloseoutEnvelopeBinding(state, origin, payload) {
   ];
   assert(required.every((key) => Object.hasOwn(payload, key)), code);
   assert(typeof payload.envelope_id === 'string' && payload.envelope_id.length > 0, code);
-  assert(payload.profile_id === state.claim_contract.profile_id, code);
-  assert(payload.requested_state === state.claim_contract.requested_state, code);
-  assert(payload.supported_state === state.compiled_claim.highest_supported_state, code);
-  assert(payload.scope_ref === state.claim_contract.objective_ref, code);
-  assert(payload.next_verifier === state.compiled_claim.next_verifier, code);
   assert(Array.isArray(payload.blockers) && payload.blockers.every((item) => typeof item === 'string'), code);
   assert(payload.outcome === 'SUPPORTED' || payload.outcome === 'CLOSED_UNSUPPORTED', code);
   if (payload.outcome === 'SUPPORTED') {
+    assertCurrentCompiledBinding(state, payload, code);
+    assert(payload.profile_id === state.claim_contract.profile_id, code);
+    assert(payload.requested_state === state.claim_contract.requested_state, code);
+    assert(payload.supported_state === state.compiled_claim.highest_supported_state, code);
+    assert(payload.scope_ref === state.claim_contract.objective_ref, code);
+    assert(payload.next_verifier === state.compiled_claim.next_verifier, code);
     assert(state.close_requested, code);
     assert(state.compiled_claim.state_results?.[state.claim_contract.requested_state]?.supported === true, code);
     assert(state.compiled_claim.currentness === 'AS_WITNESSED', code);
@@ -336,19 +347,31 @@ function validateCloseoutEnvelopeBinding(state, origin, payload) {
     assert(claimCloseoutBlockers(state, state.compiled_claim).length === 0, code);
     assert(payload.blockers.length === 0, code);
   } else {
-    assert(state.close_requested, code);
-    const blockers = claimCloseoutBlockers(state, state.compiled_claim);
-    assert(blockers.length > 0 && canonicalJson(payload.blockers) === canonicalJson(blockers), code);
     const attempts = parseLedger(state.id).events.filter((event) => (
       event.type === 'closeout_attempted'
       && event.origin === 'runtime_hook'
       && event.payload?.claim_contract_ref === state.claim_contract.claim_contract_ref
     ));
-    const latestAttempt = attempts.at(-1);
-    assert(latestAttempt, code);
-    validateCloseoutAttemptBinding(state, latestAttempt.origin, latestAttempt.payload, latestAttempt.seq);
-    assert(latestAttempt.payload.ordinal === state.claim_contract.caps.max_unsupported_attempts, code);
-    assert(latestAttempt.payload.attempt_sequence === attempts.length, code);
+    const boundAttempt = [...attempts].reverse().find((event) => (
+      event.payload?.ordinal === state.claim_contract.caps.max_unsupported_attempts
+      && event.payload?.input_digest === payload.input_digest
+      && event.payload?.eligible_evidence_frontier === payload.eligible_evidence_frontier
+      && event.payload?.material_control_frontier === payload.material_control_frontier
+      && canonicalJson(event.payload?.blockers) === canonicalJson(payload.blockers)
+    ));
+    assert(boundAttempt, code);
+    validateCloseoutAttemptBinding(state, boundAttempt.origin, boundAttempt.payload, boundAttempt.seq);
+    const { bindingEvents, bindingState } = closeoutAttemptBindingState(state, boundAttempt.seq);
+    assertCurrentCompiledBinding(bindingState, payload, code);
+    assert(payload.profile_id === bindingState.claim_contract.profile_id, code);
+    assert(payload.requested_state === bindingState.claim_contract.requested_state, code);
+    assert(payload.supported_state === bindingState.compiled_claim.highest_supported_state, code);
+    assert(payload.scope_ref === bindingState.claim_contract.objective_ref, code);
+    assert(payload.next_verifier === bindingState.compiled_claim.next_verifier, code);
+    assert(bindingState.close_requested, code);
+    const blockers = claimCloseoutBlockers(bindingState, bindingState.compiled_claim, bindingEvents);
+    assert(blockers.length > 0 && canonicalJson(payload.blockers) === canonicalJson(blockers), code);
+    assert(boundAttempt.payload.ordinal === bindingState.claim_contract.caps.max_unsupported_attempts, code);
   }
 }
 
@@ -2545,12 +2568,12 @@ function claimCloseoutBlockers(state, compiled, ledgerEvents = null) {
   ])].sort();
 }
 
-function claimCloseoutBlockerFingerprint(state, gateId, compiled) {
+function claimCloseoutBlockerFingerprint(state, gateId, compiled, ledgerEvents = null) {
   return sha256(canonicalJson({
     contract_id: state.claim_contract.contract_id,
     gate_id: gateId,
     requested_state: state.claim_contract.requested_state,
-    blockers: claimCloseoutBlockers(state, compiled),
+    blockers: claimCloseoutBlockers(state, compiled, ledgerEvents),
     eligible_evidence_frontier: compiled.eligible_evidence_frontier
   }));
 }
@@ -3093,20 +3116,30 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
           interruptedAttempt.payload,
           interruptedAttempt.seq
         );
+        const { bindingState: attemptState } = closeoutAttemptBindingState(
+          current,
+          interruptedAttempt.seq,
+          preEvents
+        );
         const blockers = [...(interruptedAttempt.payload?.blockers || [])];
         const ordinal = Number(interruptedAttempt.payload?.ordinal || 0);
-        const requested = current.claim_contract?.requested_state || 'UNDECLARED_STATE';
-        const nextVerifier = current.compiled_claim?.next_verifier || 'not available';
-        assert(current.claim_contract && ordinal > 0, 'INVALID_CLOSEOUT_ATTEMPT');
-        const reason = `Lyhna ${claimSupportPosition(current.compiled_claim, current.claim_contract)}. Missing or conflicting evidence: ${blockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${nextVerifier}.`;
-        ensureClaimDiagnosticUnlocked(
-          runId,
-          current,
-          current.compiled_claim,
-          interruptedAttempt.payload.blocker_fingerprint,
-          reason
-        );
-        saveState(current);
+        const requested = attemptState.claim_contract?.requested_state || 'UNDECLARED_STATE';
+        const nextVerifier = attemptState.compiled_claim?.next_verifier || 'not available';
+        assert(attemptState.claim_contract && ordinal > 0, 'INVALID_CLOSEOUT_ATTEMPT');
+        const reason = `Lyhna ${claimSupportPosition(attemptState.compiled_claim, attemptState.claim_contract)}. Missing or conflicting evidence: ${blockers.join(', ') || 'REQUESTED_STATE_UNSUPPORTED'}. Next verifier: ${nextVerifier}.`;
+        const currentMatchesAttempt = current.compiled_claim?.input_digest === interruptedAttempt.payload?.input_digest
+          && current.compiled_claim?.eligible_evidence_frontier === interruptedAttempt.payload?.eligible_evidence_frontier
+          && current.compiled_claim?.material_control_frontier === interruptedAttempt.payload?.material_control_frontier;
+        if (currentMatchesAttempt) {
+          ensureClaimDiagnosticUnlocked(
+            runId,
+            current,
+            current.compiled_claim,
+            interruptedAttempt.payload.blocker_fingerprint,
+            reason
+          );
+          saveState(current);
+        }
         if (attemptCompleted) {
           assert(ordinal < current.claim_contract.caps.max_unsupported_attempts, 'CLOSEOUT_ATTEMPT_INCOMPLETE');
           return {
@@ -3117,7 +3150,7 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
             reason,
             closeout_attempt_ordinal: ordinal,
             replayed_delivery: true,
-            compiled: current.compiled_claim
+            compiled: attemptState.compiled_claim
           };
         }
         if (ordinal < current.claim_contract.caps.max_unsupported_attempts) {
@@ -3130,22 +3163,22 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
             reason,
             closeout_attempt_ordinal: ordinal,
             replayed_delivery: true,
-            compiled: current.compiled_claim
+            compiled: attemptState.compiled_claim
           };
         }
-        assert(current.compiled_claim?.input_digest === interruptedAttempt.payload?.input_digest, 'CLOSEOUT_ATTEMPT_STALE');
+        assert(attemptState.compiled_claim?.input_digest === interruptedAttempt.payload?.input_digest, 'CLOSEOUT_ATTEMPT_STALE');
         const fingerprint = interruptedAttempt.payload.blocker_fingerprint;
         const envelope = {
           envelope_id: `closeout_${sha256(canonicalJson({ run_id: runId, fingerprint, ordinal })).slice(0, 24)}`,
           outcome: 'CLOSED_UNSUPPORTED',
-          profile_id: current.claim_contract.profile_id,
+          profile_id: attemptState.claim_contract.profile_id,
           requested_state: requested,
-          supported_state: current.compiled_claim.highest_supported_state,
-          scope_ref: current.claim_contract.objective_ref,
+          supported_state: attemptState.compiled_claim.highest_supported_state,
+          scope_ref: attemptState.claim_contract.objective_ref,
           eligible_evidence_frontier: interruptedAttempt.payload.eligible_evidence_frontier,
           material_control_frontier: interruptedAttempt.payload.material_control_frontier,
           input_digest: interruptedAttempt.payload.input_digest,
-          claim_contract_ref: current.claim_contract.claim_contract_ref,
+          claim_contract_ref: attemptState.claim_contract.claim_contract_ref,
           fold_version: CURRENT_FOLD_VERSION,
           blockers,
           next_verifier: nextVerifier,
@@ -3160,8 +3193,8 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
         current.closeout_envelope = { ...envelopeEvent.payload, event_ref: `sha256:${envelopeEvent.event_hash}` };
         saveState(current);
         return finalizeRunSealUnlocked(runId, current, 'CLOSED_UNSUPPORTED', {
-          claim_contract_ref: current.claim_contract.claim_contract_ref,
-          supported_state: current.compiled_claim.highest_supported_state,
+          claim_contract_ref: attemptState.claim_contract.claim_contract_ref,
+          supported_state: attemptState.compiled_claim.highest_supported_state,
           requested_state: requested,
           closeout_envelope_ref: current.closeout_envelope.event_ref
         });

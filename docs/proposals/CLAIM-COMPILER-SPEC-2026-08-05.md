@@ -353,8 +353,10 @@ hook-delivery idempotency; it cannot produce a successful seal or alter the bloc
 Each new closeout attempt binds a structural `delivery_slot_ref` to the host delivery key and slot,
 and the checkpoint anchor that completes that blocked attempt carries the same ref, so an
 interleaved checkpoint from another key cannot steal or strand an incomplete delivery. A legacy
-anchor without that ref completes an attempt only when no later Stop checkpoint intervenes. A
-spent delivery slot follows one rule: if the fresh compile still has any unsupported-state or
+anchor without that ref completes an attempt only when no later Stop checkpoint intervenes. An
+incomplete attempt is validated and finished from its durable attempt-time ledger prefix; later
+compiler or lifecycle projections cannot complete it, invalidate it, or convert its replay into a
+transport failure. A spent delivery slot follows one rule: if the fresh compile still has any unsupported-state or
 lifecycle blocker, it follows the normal bounded blocked-attempt path; if every successful-seal
 condition is now satisfied, the reused identity returns a distinct block computed from that fresh
 compile without appending a checkpoint, compile, attempt, or derived artifact. Only a fresh host

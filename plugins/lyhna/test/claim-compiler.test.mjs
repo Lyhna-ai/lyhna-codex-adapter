@@ -2415,50 +2415,101 @@ test('an interleaved Stop cannot strand a torn delivery behind another checkpoin
 test('an interleaved anchor cannot complete another delivery\'s torn attempt', { concurrency: false }, (t) => {
   isolatedData(t);
   for (const privacyMode of ['verified_context', 'proof']) {
-    const parent = mintSession({ sessionId: `compiler-interleaved-attempt-${privacyMode}`, cwd: process.cwd() });
+    for (const changeFrontier of [false, true]) {
+      const variant = `${privacyMode}-${changeFrontier ? 'changed' : 'unchanged'}`;
+      const parent = mintSession({ sessionId: `compiler-interleaved-attempt-${variant}`, cwd: process.cwd() });
+      const run = beginRun(parent, {
+        mode: 'full',
+        objective: 'Bind closeout completion to the delivery slot that published it.',
+        privacyMode
+      });
+      const declared = declareClaimContract(parent, contract());
+      requestClose(parent, 'Close only after three completed unsupported attempts.');
+      const deliveryA = `id_${sha256(`interleaved-attempt-A:${variant}`)}`;
+      const deliveryB = `id_${sha256(`interleaved-attempt-B:${variant}`)}`;
+
+      const first = checkpointOrSeal(parent, deliveryA);
+      assert.equal(first.closeout_attempt_ordinal, 1);
+      let packet = getRunForTesting(run.id);
+      const attemptA = packet.events.find((event) => event.type === 'closeout_attempted');
+      writeFileSync(
+        join(packet.directory, 'events.jsonl'),
+        `${packet.events.slice(0, attemptA.seq).map((event) => JSON.stringify(event)).join('\n')}\n`
+      );
+      const state = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
+      state.claim_diagnostic = null;
+      state.ledger_count = attemptA.seq;
+      state.ledger_tip = attemptA.event_hash;
+      writeFileSync(join(packet.directory, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
+      for (const name of ['checkpoint-anchor.json', 'receipt.json', 'RECEIPT.md', 'continuation.json', 'HANDOFF.md']) {
+        rmSync(join(packet.directory, name), { force: true });
+      }
+      if (changeFrontier) requestClaimProducer(parent, declared.contract_id, 'software_release/local');
+
+      const interleaved = checkpointOrSeal(parent, deliveryB);
+      const interleavedOrdinal = changeFrontier ? 1 : 2;
+      assert.equal(interleaved.closeout_attempt_ordinal, interleavedOrdinal);
+      const replayed = checkpointOrSeal(parent, deliveryA);
+      assert.equal(replayed.decision, 'block');
+      assert.equal(replayed.closeout_attempt_ordinal, 1);
+      packet = getRunForTesting(run.id);
+      assert.deepEqual(
+        packet.events.filter((event) => event.type === 'closeout_attempted').map((event) => event.payload.ordinal),
+        [1, interleavedOrdinal]
+      );
+      assert(packet.events.some((event) => (
+        event.type === 'checkpoint_anchor'
+        && event.payload?.delivery_slot_ref === attemptA.payload.delivery_slot_ref
+      )));
+      assert.equal(packet.state.sealed, false);
+      assert.equal(verifyRun(run.id).status, 'CHECKPOINT_VERIFIED');
+    }
+  }
+});
+
+test('a torn terminal attempt seals from its durable frontier after an interleaved change', { concurrency: false }, (t) => {
+  isolatedData(t);
+  for (const privacyMode of ['verified_context', 'proof']) {
+    const parent = mintSession({ sessionId: `compiler-interleaved-terminal-${privacyMode}`, cwd: process.cwd() });
     const run = beginRun(parent, {
       mode: 'full',
-      objective: 'Bind closeout completion to the delivery slot that published it.',
+      objective: 'Finish a durable terminal attempt from its own historical frontier.',
       privacyMode
     });
-    declareClaimContract(parent, contract());
+    const declared = declareClaimContract(parent, contract());
     requestClose(parent, 'Close only after three completed unsupported attempts.');
-    const deliveryA = `id_${sha256(`interleaved-attempt-A:${privacyMode}`)}`;
-    const deliveryB = `id_${sha256(`interleaved-attempt-B:${privacyMode}`)}`;
+    checkpointOrSeal(parent, `id_${sha256(`terminal-first:${privacyMode}`)}`);
+    checkpointOrSeal(parent, `id_${sha256(`terminal-second:${privacyMode}`)}`);
+    const deliveryA = `id_${sha256(`terminal-torn:${privacyMode}`)}`;
+    checkpointOrSeal(parent, deliveryA);
 
-    const first = checkpointOrSeal(parent, deliveryA);
-    assert.equal(first.closeout_attempt_ordinal, 1);
     let packet = getRunForTesting(run.id);
-    const attemptA = packet.events.find((event) => event.type === 'closeout_attempted');
+    const attemptA = packet.events.filter((event) => event.type === 'closeout_attempted').at(-1);
+    assert.equal(attemptA.payload.ordinal, 3);
     writeFileSync(
       join(packet.directory, 'events.jsonl'),
       `${packet.events.slice(0, attemptA.seq).map((event) => JSON.stringify(event)).join('\n')}\n`
     );
     const state = JSON.parse(readFileSync(join(packet.directory, 'state.json'), 'utf8'));
-    state.claim_diagnostic = null;
+    state.sealed = false;
+    state.terminal_status = null;
+    state.closeout_envelope = null;
     state.ledger_count = attemptA.seq;
     state.ledger_tip = attemptA.event_hash;
     writeFileSync(join(packet.directory, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
-    for (const name of ['checkpoint-anchor.json', 'receipt.json', 'RECEIPT.md', 'continuation.json', 'HANDOFF.md']) {
+    for (const name of ['seal-anchor.json', 'checkpoint-anchor.json', 'receipt.json', 'RECEIPT.md', 'continuation.json', 'HANDOFF.md']) {
       rmSync(join(packet.directory, name), { force: true });
     }
 
-    const interleaved = checkpointOrSeal(parent, deliveryB);
-    assert.equal(interleaved.closeout_attempt_ordinal, 2);
+    requestClaimProducer(parent, declared.contract_id, 'software_release/local');
+    const interleaved = checkpointOrSeal(parent, `id_${sha256(`terminal-interleaved:${privacyMode}`)}`);
+    assert.equal(interleaved.closeout_attempt_ordinal, 1);
     const replayed = checkpointOrSeal(parent, deliveryA);
-    assert.equal(replayed.decision, 'block');
-    assert.equal(replayed.closeout_attempt_ordinal, 1);
+    assert.equal(replayed.status, 'CLOSED_UNSUPPORTED');
     packet = getRunForTesting(run.id);
-    assert.deepEqual(
-      packet.events.filter((event) => event.type === 'closeout_attempted').map((event) => event.payload.ordinal),
-      [1, 2]
-    );
-    assert(packet.events.some((event) => (
-      event.type === 'checkpoint_anchor'
-      && event.payload?.delivery_slot_ref === attemptA.payload.delivery_slot_ref
-    )));
-    assert.equal(packet.state.sealed, false);
-    assert.equal(verifyRun(run.id).status, 'CHECKPOINT_VERIFIED');
+    assert.equal(packet.state.terminal_status, 'CLOSED_UNSUPPORTED');
+    assert.equal(packet.events.filter((event) => event.type === 'run_sealed').length, 1);
+    assert.equal(verifyRun(run.id).status, 'ALREADY_SEALED');
   }
 });
 
