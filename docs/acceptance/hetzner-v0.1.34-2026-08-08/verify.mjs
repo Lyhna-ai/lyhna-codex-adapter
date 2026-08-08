@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const packetDirectory = dirname(fileURLToPath(import.meta.url));
@@ -11,6 +10,23 @@ const runDirectory = join(packetDirectory, 'run');
 const sourceCommit = '6faa65a2540b30cecf0af243df58ce889b958a18';
 const expectedRunId = 'run_24cd4b2e-8328-46c6-ac37-7f1bab7c471b';
 const expectedPublicKey = 'b66636f9ea8a58effc254f6a68df35762e8ce7b561b98f57debc35380bccaf6b';
+const sourceDirectory = join(repositoryRoot, 'plugins', 'lyhna', 'src');
+
+const expectedSourceFiles = new Map([
+  ['claim-compiler.mjs', 'cb6ebc9ee527d7aeea7cfced8c0b979f7df18c673c6af78d2e3e6de8bff1a1f7'],
+  ['continuation.mjs', 'c2db1496c4bea45d10db2db1fd652249b16e9bf4b3bb2d4120ce080e74e4297e'],
+  ['github.mjs', '26b256816a467e3776c8c254fcdf9520d94558377f7ae820904488d1c0ae5b0f'],
+  ['handoff.mjs', '3aa11cfaacbfa22b671f7f3f7a5b1990a4d6e3c38d036985a977344d63330bf1'],
+  ['lineage.mjs', 'a19e521672a499a5875e6c05228e01ab2dd8b5e3b36254217630ced57f88b145'],
+  ['mcp-server.mjs', 'ac2af70bcca55ea46701d47a978dda698d96d91bec9ff1a9d3d35e9c5d6119db'],
+  ['receipt.mjs', '1c376759c258282a82765b068882222faa5688801204a346843a33b4a8a3c99d'],
+  ['redact.mjs', 'f4aa36d0ecbbd85ea0283e99ae0f7d2ff60752b27693230ce05ef1fd568d39b2'],
+  ['service.mjs', 'c4a7501b5a93777d600f67a5a4f3fe43901cea2472b70f8e9d3e7a896e22fbb2'],
+  ['signing.mjs', '90e7621d7e36c3c48d51bad776d8cb5522e0c2bee3c390ff81550234c88fc57d'],
+  ['store.mjs', '783d488e0402928870760e8a411c978f11fb68547d042618076711bb3238c39a'],
+  ['util.mjs', 'd9817af5be59d7499df12cbc101714adae079b8aeb11894d7b06c0add320115c'],
+  ['version.mjs', '49af349125e422b66a483c60c14ed7a926ca68de95959f4696eb562b8420922c']
+]);
 
 const expectedFiles = new Map([
   ['capsules/026cfb7877d03ed89d324b018cd89d61c990d5c8d3eff1bdca4155c2b81eff57.json', 'f059c5f09e0d13abbae346944cfd579b82593403f35de2089bb9ed60ef251974'],
@@ -34,24 +50,22 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-function git(args) {
-  return spawnSync('git', args, {
-    cwd: repositoryRoot,
-    encoding: 'utf8',
-    windowsHide: true
-  });
+function canonicalSourceHash(bytes) {
+  return sha256(bytes.toString('utf8').replaceAll('\r\n', '\n'));
 }
 
-const sourceExists = git(['cat-file', '-e', `${sourceCommit}^{commit}`]);
-assert.equal(sourceExists.status, 0, sourceExists.stderr || `source commit ${sourceCommit} is unavailable`);
-const sourceDiff = git(['diff', '--quiet', sourceCommit, '--', 'plugins/lyhna/src']);
-assert.equal(
-  sourceDiff.status,
-  0,
-  sourceDiff.status === 1
-    ? `plugins/lyhna/src differs from pinned v0.1.34 source ${sourceCommit}`
-    : sourceDiff.stderr
+assert.deepEqual(
+  listFiles(sourceDirectory),
+  [...expectedSourceFiles.keys()].sort(),
+  `plugins/lyhna/src file set differs from pinned v0.1.34 source ${sourceCommit}`
 );
+for (const [relativePath, expectedHash] of expectedSourceFiles) {
+  assert.equal(
+    canonicalSourceHash(readFileSync(join(sourceDirectory, relativePath))),
+    expectedHash,
+    `plugins/lyhna/src/${relativePath} differs from pinned v0.1.34 source ${sourceCommit}`
+  );
+}
 
 const [continuationModule, handoffModule, lineageModule, receiptModule, signingModule, utilModule] = await Promise.all([
   import('../../../plugins/lyhna/src/continuation.mjs'),

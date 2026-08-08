@@ -8,11 +8,11 @@ Run from the repository root:
 node docs/acceptance/hetzner-v0.1.34-2026-08-08/verify.mjs
 ```
 
-With Node and Git available, this checkout is the only evidence input. Success exits `0` and prints `PASS` for the integrity, refold, signature, and privacy gates plus the expected terminal values; any mismatch exits nonzero with the failed assertion.
+With Node available, this checkout is the only evidence input. Success exits `0` and prints `PASS` for the integrity, refold, signature, and privacy gates plus the expected terminal values; any mismatch exits nonzero with the failed assertion.
 
 The verifier checks:
 
-- the checkout's verifier implementation matches the pinned v0.1.34 source tree;
+- the checkout's exact `plugins/lyhna/src` file set and line-ending-normalized SHA-256 hashes match the pinned v0.1.34 source tree;
 - the packet contains exactly the 11 expected files and no extras;
 - every captured file's SHA-256;
 - all 22 event hashes and predecessor links;
