@@ -1,28 +1,28 @@
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/capture.mjs\"", "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\capture.mjs\"" }] }
+      { "hooks": [{ "type": "command", "command": "LYHNA_CODEX_DATA=\"${PLUGIN_DATA}\" node \"${PLUGIN_ROOT}/ai.lyhna.codex/hooks/capture.mjs\"", "commandWindows": "$env:LYHNA_CODEX_DATA=$env:PLUGIN_DATA; node \"$env:PLUGIN_ROOT\\ai.lyhna.codex\\hooks\\capture.mjs\"" }] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/capture.mjs\"", "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\capture.mjs\"" }] }
+      { "hooks": [{ "type": "command", "command": "LYHNA_CODEX_DATA=\"${PLUGIN_DATA}\" node \"${PLUGIN_ROOT}/ai.lyhna.codex/hooks/capture.mjs\"", "commandWindows": "$env:LYHNA_CODEX_DATA=$env:PLUGIN_DATA; node \"$env:PLUGIN_ROOT\\ai.lyhna.codex\\hooks\\capture.mjs\"" }] }
     ],
     "PreToolUse": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/capture.mjs\"", "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\capture.mjs\"" }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "LYHNA_CODEX_DATA=\"${PLUGIN_DATA}\" node \"${PLUGIN_ROOT}/ai.lyhna.codex/hooks/capture.mjs\"", "commandWindows": "$env:LYHNA_CODEX_DATA=$env:PLUGIN_DATA; node \"$env:PLUGIN_ROOT\\ai.lyhna.codex\\hooks\\capture.mjs\"" }] }
     ],
     "PermissionRequest": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/capture.mjs\"", "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\capture.mjs\"" }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "LYHNA_CODEX_DATA=\"${PLUGIN_DATA}\" node \"${PLUGIN_ROOT}/ai.lyhna.codex/hooks/capture.mjs\"", "commandWindows": "$env:LYHNA_CODEX_DATA=$env:PLUGIN_DATA; node \"$env:PLUGIN_ROOT\\ai.lyhna.codex\\hooks\\capture.mjs\"" }] }
     ],
     "PostToolUse": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/capture.mjs\"", "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\capture.mjs\"" }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "LYHNA_CODEX_DATA=\"${PLUGIN_DATA}\" node \"${PLUGIN_ROOT}/ai.lyhna.codex/hooks/capture.mjs\"", "commandWindows": "$env:LYHNA_CODEX_DATA=$env:PLUGIN_DATA; node \"$env:PLUGIN_ROOT\\ai.lyhna.codex\\hooks\\capture.mjs\"" }] }
     ],
     "SubagentStart": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/capture.mjs\"", "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\capture.mjs\"" }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "LYHNA_CODEX_DATA=\"${PLUGIN_DATA}\" node \"${PLUGIN_ROOT}/ai.lyhna.codex/hooks/capture.mjs\"", "commandWindows": "$env:LYHNA_CODEX_DATA=$env:PLUGIN_DATA; node \"$env:PLUGIN_ROOT\\ai.lyhna.codex\\hooks\\capture.mjs\"" }] }
     ],
     "SubagentStop": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/capture.mjs\"", "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\capture.mjs\"" }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "LYHNA_CODEX_DATA=\"${PLUGIN_DATA}\" node \"${PLUGIN_ROOT}/ai.lyhna.codex/hooks/capture.mjs\"", "commandWindows": "$env:LYHNA_CODEX_DATA=$env:PLUGIN_DATA; node \"$env:PLUGIN_ROOT\\ai.lyhna.codex\\hooks\\capture.mjs\"" }] }
     ],
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "node \"${PLUGIN_ROOT}/hooks/capture.mjs\"", "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\capture.mjs\"" }] }
+      { "hooks": [{ "type": "command", "command": "LYHNA_CODEX_DATA=\"${PLUGIN_DATA}\" node \"${PLUGIN_ROOT}/ai.lyhna.codex/hooks/capture.mjs\"", "commandWindows": "$env:LYHNA_CODEX_DATA=$env:PLUGIN_DATA; node \"$env:PLUGIN_ROOT\\ai.lyhna.codex\\hooks\\capture.mjs\"" }] }
     ]
   }
 }

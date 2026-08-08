@@ -6,6 +6,8 @@
     "name": "Lyhna AI"
   },
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Lyhna",
     "shortDescription": "Witness a Codex run and exact PR head.",
@@ -18,6 +20,5 @@
       "Continue this Lyhna run from its capsule reference.",
       "Examine this pull request with Lyhna."
     ]
-  },
-  "mcpServers": "./.mcp.json"
+  }
 }

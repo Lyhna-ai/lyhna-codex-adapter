@@ -590,7 +590,7 @@ test('every closeout lifecycle transition advances the material control frontier
 });
 
 function runHook(input, env) {
-  const result = spawnSync(process.execPath, [join(pluginRoot, 'hooks', 'capture.mjs')], {
+  const result = spawnSync(process.execPath, [join(pluginRoot, 'ai.lyhna.codex', 'hooks', 'capture.mjs')], {
     input: JSON.stringify(input),
     encoding: 'utf8',
     env
@@ -2274,26 +2274,56 @@ test('a completed same-key Stop cannot turn newly supporting evidence into a suc
   const first = checkpointOrSeal(parent, 'completed-redelivery-success-key');
   assert.equal(first.decision, 'block');
   assert.equal(first.closeout_attempt_ordinal, 1);
+  const firstPacket = getRunForTesting(run.id);
+  const publishedFace = readFileSync(join(firstPacket.directory, 'continuation.json'), 'utf8');
+  const publishedAnchor = readFileSync(join(firstPacket.directory, 'checkpoint-anchor.json'), 'utf8');
   seedBuilt(run.id, declared);
 
-  assert.throws(
-    () => checkpointOrSeal(parent, 'completed-redelivery-success-key'),
-    /STOP_DELIVERY_FRONTIER_CHANGED/
-  );
+  const eventCountBeforeRejectedDelivery = getRunForTesting(run.id).events.length;
+  const changed = checkpointOrSeal(parent, 'completed-redelivery-success-key');
+  assert.equal(changed.decision, 'block');
+  assert.match(changed.reason, /^STOP_DELIVERY_FRONTIER_CHANGED:/);
+  assert.equal(changed.compiled.highest_supported_state, 'BUILT');
+  assert.deepEqual(changed.blockers, []);
   const failedPacket = getRunForTesting(run.id);
   assert.equal(failedPacket.events.some((event) => event.type === 'run_sealed'), false);
   assert.equal(failedPacket.events.filter((event) => event.type === 'turn_checkpoint').length, 1);
-  assert.equal(failedPacket.events.at(-1).type, 'checkpoint_anchor');
+  assert.equal(failedPacket.events.length, eventCountBeforeRejectedDelivery);
+  assert.equal(readFileSync(join(failedPacket.directory, 'continuation.json'), 'utf8'), publishedFace);
+  assert.equal(readFileSync(join(failedPacket.directory, 'checkpoint-anchor.json'), 'utf8'), publishedAnchor);
   const failedVerification = verifyRun(run.id);
   assert.equal(failedVerification.status, 'CHECKPOINT_VERIFIED');
-  assert.equal(failedVerification.ledger_advanced, false);
+  assert.equal(failedVerification.ledger_advanced, true);
   const failedEventCount = failedPacket.events.length;
-  assert.throws(
-    () => checkpointOrSeal(parent, 'completed-redelivery-success-key'),
-    /STOP_DELIVERY_FRONTIER_CHANGED/
-  );
+  assert.match(checkpointOrSeal(parent, 'completed-redelivery-success-key').reason, /^STOP_DELIVERY_FRONTIER_CHANGED:/);
   assert.equal(getRunForTesting(run.id).events.length, failedEventCount);
   assert.equal(checkpointOrSeal(parent, 'fresh-success-key').status, 'SEALED');
+});
+
+test('a supported state with lifecycle blockers follows the same bounded unsupported path', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const sessionId = 'compiler-same-key-supported-lifecycle-blocker';
+  const parent = mintSession({ sessionId, cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Keep lifecycle blockers inside the bounded closeout rule.' });
+  const declared = declareClaimContract(parent, contract({
+    requested_state: 'BUILT',
+    named_producers: ['software_release/local'],
+    verifier_id: 'software_release/local_verifier'
+  }));
+  seedBuilt(run.id, declared);
+  mintChild({ sessionId, agentId: 'same-key-open-child' });
+  requestClose(parent, 'Close only through the declared claim gate.');
+  const deliveryKey = 'id_'.concat(sha256('same-key-supported-lifecycle-blocker'));
+
+  const first = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(first.closeout_attempt_ordinal, 1);
+  assert(first.blockers.some((item) => /^CHILD_.*_OPEN$/.test(item)));
+  const second = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(second.closeout_attempt_ordinal, 2);
+  assert.doesNotMatch(second.reason, /STOP_DELIVERY_FRONTIER_CHANGED/);
+  const third = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(third.status, 'CLOSED_UNSUPPORTED');
+  assert.equal(getRunForTesting(run.id).state.terminal_status, 'CLOSED_UNSUPPORTED');
 });
 
 test('a changed same-key frontier that remains unsupported starts a new bounded streak', { concurrency: false }, (t) => {

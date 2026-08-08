@@ -12,7 +12,7 @@ The plugin carries a schema-valid Agent Plugins 1.0.0 Working Draft core and a c
 - `plugins/lyhna/skills/` contains the Agent Skill.
 - `plugins/lyhna/mcp.json` is the portable MCP configuration and stores state in `${PLUGIN_DATA}`.
 - `plugins/lyhna/ai.lyhna.codex/` contains Codex-specific lifecycle hooks under a reverse-domain extension namespace.
-- `plugins/lyhna/.codex-plugin/plugin.json`, `.mcp.json`, and the default `hooks/` bridge remain the compatibility entrypoints required by the current Codex loader.
+- The package exposes both current representations over one implementation: OpenAI loads `.codex-plugin/plugin.json` plus `.mcp.json`, while Agent Plugins v1 clients load root `plugin.json` plus `mcp.json`. Both point to the same `skills/`, namespaced `ai.lyhna.codex/` hook implementation, MCP server, and data-root resolver.
 
 The portable files are forward-looking interoperability packaging, not a claim that a shipped non-Codex client has loaded or accepted Lyhna. The complete witnessed-run flow remains Codex-specific because it depends on Codex lifecycle hooks and hook-issued capabilities. Current Codex loads the compatibility manifest, which points at the same skill, server implementation, and namespaced hook entrypoint; the install instructions below describe only that live-tested path.
 

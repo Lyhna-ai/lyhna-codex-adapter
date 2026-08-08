@@ -351,12 +351,14 @@ redelivery spends one additional bounded attempt and still returns `decision: "b
 third unchanged attempt seals only `CLOSED_UNSUPPORTED`. This is the sole exception to completed
 hook-delivery idempotency; it cannot produce a successful seal or alter the blocker fingerprint.
 Each new closeout attempt binds a structural `delivery_slot_ref` to the host delivery key and slot,
-so an interleaved checkpoint from another key cannot steal or strand an incomplete delivery. If the
-changed frontier would support success after a completed same-key attempt, that redelivery fails
-closed at transport; only a fresh host delivery identity may evaluate it for a successful seal. A
-changed frontier that remains unsupported starts a new fingerprint streak in the next ledger-derived
-slot. The same-key ambiguity may therefore spend another bounded blocked attempt, but it can only
-block or seal `CLOSED_UNSUPPORTED`.
+so an interleaved checkpoint from another key cannot steal or strand an incomplete delivery. A
+spent delivery slot follows one rule: if the fresh compile still has any unsupported-state or
+lifecycle blocker, it follows the normal bounded blocked-attempt path; if every successful-seal
+condition is now satisfied, the reused identity returns a distinct block computed from that fresh
+compile without appending a checkpoint, compile, attempt, or derived artifact. Only a fresh host
+delivery identity may publish and seal that newly successful frontier. The same-key ambiguity can
+therefore only block or seal `CLOSED_UNSUPPORTED`; it cannot create a successful seal or publish a
+stale compiler projection.
 
 ## Privacy projection
 
@@ -586,12 +588,14 @@ free-form completion narration,
 full backward-compatible `tools/list`,
 privacy-mode override rejection, and three distinct recurrence incidents.
 
-Adam authorizes Codex to squash-merge this ratification PR #13 and four future slices only when
-their declared gates are terminal and clean. The future targets are fixed as repository
-`Lyhna-ai/lyhna-codex-adapter`, base `main`, and branches:
+Adam authorizes Codex to squash-merge this ratification PR #13, the four versioned slices, and the
+backward-readable Slice 1 follow-up only when their declared gates are terminal and clean. The
+implementation targets are fixed as repository `Lyhna-ai/lyhna-codex-adapter`, base `main`, and
+branches:
 
 ```text
 codex/claim-compiler-contract   -> Slice 1 / 0.1.33
+codex/agent-plugins-v1          -> Slice 1 follow-up / 0.1.34
 codex/claim-compiler-join       -> Slice 2 / 0.1.35
 codex/claim-compiler-evidence   -> Slice 3 / 0.1.36
 codex/claim-compiler-recurrence -> Slice 4 / 0.1.37
@@ -604,7 +608,8 @@ acceptance check that previously required the final PR to remain unmerged. It is
 authorization for unrelated merges, releases, package publication, deployment, credentials, or
 production mutation.
 
-PR #13 is spec-only and does not change the package version. Version bumps begin with Slice 1.
+PR #13 is spec-only and does not change the package version. Version bumps begin with Slice 1; the
+follow-up is its own normative `0.1.34` target rather than part of the `0.1.33` mapping.
 
 ## Loop contract
 

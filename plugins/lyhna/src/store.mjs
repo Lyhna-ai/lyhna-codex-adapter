@@ -3040,16 +3040,22 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       });
       const previewRequestedSupported = preview.state_results?.[current.claim_contract.requested_state]?.supported === true;
       const previewBlockers = claimCloseoutBlockers(current, preview, preEvents);
-      const previewFingerprint = claimCloseoutBlockerFingerprint(current, gateId, preview);
-      const couldSealSuccessfully = previewRequestedSupported || previewBlockers.length === 0;
-      if (couldSealSuccessfully) {
-        // Do not append a new Stop checkpoint for the rejected slot. Publish the already-durable
-        // evidence/torn observation once so the visible packet is current, then keep repeat failures
-        // byte-stable while a fresh delivery identity is required. A changed frontier that remains
-        // unsupported is safe to evaluate in the next bounded ledger slot: its changed fingerprint
-        // resets the ordinal, and same-key ambiguity can still only block or seal CLOSED_UNSUPPORTED.
-        if (preEvents.at(-1)?.type !== 'checkpoint_anchor') writeCheckpointArtifacts(runId, current);
-        assert(false, 'STOP_DELIVERY_FRONTIER_CHANGED');
+      const wouldSealSuccessfully = previewRequestedSupported && previewBlockers.length === 0;
+      if (wouldSealSuccessfully) {
+        // A completed delivery identity can spend another bounded blocked attempt, but it can never
+        // be reused for a successful seal. Do not append a checkpoint, compile, attempt, or derived
+        // artifact for this ambiguous observation: the existing face remains the prior published
+        // boundary, while this response is computed from the fresh in-memory compile. A fresh host
+        // identity is the only path that may publish and seal the newly successful frontier.
+        return {
+          status: 'CLOSE_DEFERRED',
+          run_id: runId,
+          blockers: previewBlockers,
+          decision: 'block',
+          reason: 'STOP_DELIVERY_FRONTIER_CHANGED: This reused Stop delivery identity would change the closeout decision to a successful seal. The run remains open; continue with a fresh Stop delivery identity.',
+          replayed_delivery: true,
+          compiled: preview
+        };
       }
     }
     let resumeCloseoutAfterCheckpoint = false;
