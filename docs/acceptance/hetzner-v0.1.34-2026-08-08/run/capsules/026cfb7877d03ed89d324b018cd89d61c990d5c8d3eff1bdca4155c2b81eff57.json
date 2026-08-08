@@ -1,0 +1,444 @@
+{
+  "capsule_ref": "026cfb7877d03ed89d324b018cd89d61c990d5c8d3eff1bdca4155c2b81eff57",
+  "claim_compiler": {
+    "attempt_frontier": {
+      "attempt_sequence": 2,
+      "blocker_fingerprint": "2557bc1711ca3c387c5c0d72cf6e7fe2b3bc697340e2b18a61eba298201fbd06",
+      "blockers": [
+        "CURRENTNESS_UNPROVEN",
+        "MISSING_checks_terminal",
+        "MISSING_configuration_present",
+        "MISSING_deployment_identity",
+        "MISSING_merge_identity",
+        "MISSING_registered_canary",
+        "MISSING_source_identity",
+        "MISSING_terminal_canary_state",
+        "PENDING_software_release/local"
+      ],
+      "claim_contract_ref": "sha256:26c43d5a78424428e107bd34c70e7c4b7f8a29dbc7dcfcd0e3448d3d1d75fbe2",
+      "delivery_slot_ref": "stop_slot_54240b8ff47644d5598f7f6b5ac005a0969c9267b2a2b0eb47ee963364a30982",
+      "eligible_evidence_frontier": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "gate_id": "closeout",
+      "input_digest": "01dc089679412d209deb6987ed622dbafa9bb03786387ece3989d3068484de2e",
+      "material_control_frontier": "32e1998338b73a88fe40d49d4c131424f6899783ea5169fcff0c617aad795865",
+      "ordinal": 1
+    },
+    "claim_contract_ref": "sha256:26c43d5a78424428e107bd34c70e7c4b7f8a29dbc7dcfcd0e3448d3d1d75fbe2",
+    "compiled_state": {
+      "claim_contract_ref": "sha256:26c43d5a78424428e107bd34c70e7c4b7f8a29dbc7dcfcd0e3448d3d1d75fbe2",
+      "contract_id": "contract_c96ead463ef365af1c3843921261cf26",
+      "contradictions": [],
+      "currentness": "CURRENTNESS_UNPROVEN",
+      "eligible_evidence_frontier": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "fold_version": "v2",
+      "highest_supported_state": null,
+      "input_digest": "01dc089679412d209deb6987ed622dbafa9bb03786387ece3989d3068484de2e",
+      "material_control_frontier": "32e1998338b73a88fe40d49d4c131424f6899783ea5169fcff0c617aad795865",
+      "maximal_supported_nodes": [],
+      "missing": [
+        "source_identity",
+        "checks_terminal",
+        "merge_identity",
+        "deployment_identity",
+        "configuration_present",
+        "registered_canary",
+        "terminal_canary_state"
+      ],
+      "next_verifier": "software_release/local_verifier",
+      "pending_producers": [
+        "software_release/local"
+      ],
+      "profile_ref": "6349ca6a254f42bbc3ca7e8e89e3d70da94d355200c4d32eb1ee0f0df73fc082",
+      "requested_state": "LIVE_PROVEN",
+      "state_results": {
+        "BUILT": {
+          "missing_prerequisite_nodes": [],
+          "missing_requirement_ids": [
+            "source_identity",
+            "checks_terminal"
+          ],
+          "supported": false
+        },
+        "DEPLOYED": {
+          "missing_prerequisite_nodes": [
+            "MERGED"
+          ],
+          "missing_requirement_ids": [
+            "deployment_identity",
+            "configuration_present"
+          ],
+          "supported": false
+        },
+        "LIVE_PROVEN": {
+          "missing_prerequisite_nodes": [
+            "DEPLOYED"
+          ],
+          "missing_requirement_ids": [
+            "registered_canary",
+            "terminal_canary_state"
+          ],
+          "supported": false
+        },
+        "MERGED": {
+          "missing_prerequisite_nodes": [
+            "BUILT"
+          ],
+          "missing_requirement_ids": [
+            "merge_identity"
+          ],
+          "supported": false
+        }
+      }
+    },
+    "contract": {
+      "caps": {
+        "max_unsupported_attempts": 3
+      },
+      "contract_id": "contract_c96ead463ef365af1c3843921261cf26",
+      "declared_gate_ids": [
+        "closeout"
+      ],
+      "named_producers": [
+        "software_release/canary",
+        "software_release/deployment",
+        "software_release/local",
+        "software_release/repository"
+      ],
+      "objective_ref": "objective_edf94b406eeedc69662402d79f6cb0be89809cfb672d2bb7114fc1187328fbb6",
+      "profile_id": "software_release/v1",
+      "profile_requirements_hash": "6349ca6a254f42bbc3ca7e8e89e3d70da94d355200c4d32eb1ee0f0df73fc082",
+      "requested_state": "LIVE_PROVEN",
+      "run_privacy_mode_ref": "privacy:proof",
+      "verifier_id": "software_release/canary_verifier"
+    },
+    "diagnostics": [
+      {
+        "blocker_fingerprint": "29df65d9bcc5c60ece3a125f77a6dc4dc033742a73bfd35edd9877c3e6efa70d",
+        "claim_contract_ref": "sha256:26c43d5a78424428e107bd34c70e7c4b7f8a29dbc7dcfcd0e3448d3d1d75fbe2",
+        "diagnostic_id": "diag_5cd8353405470a3b4c10f8fb",
+        "diagnostic_status": "OPEN",
+        "eligible_evidence_frontier": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "event_ref": "sha256:f8849419207aa1171a83404c4f6c3b3115442eb6af60045efd2530fc7884b062",
+        "fold_version": "v2",
+        "input_digest": "2d548f19d797283d73ae051792dbedb1c9922fc0ab6d0d2b7c0223617ea3f6a1",
+        "material_control_frontier": "9e004d36f7f2bd2ff7d3ee4c352dd45f773b56fea4ba2fc7bfa746576081c8c4",
+        "missing": [
+          "source_identity",
+          "checks_terminal",
+          "merge_identity",
+          "deployment_identity",
+          "configuration_present",
+          "registered_canary",
+          "terminal_canary_state"
+        ],
+        "next_verifier": "software_release/local_verifier",
+        "requested_state": "LIVE_PROVEN",
+        "resolved_ref": "sha256:8d1cd6df22744e8116a1768738312aad855658998a0ba39fb81a08353828769b",
+        "status": "RESOLVED",
+        "supported_state": null,
+        "text_withheld": true
+      },
+      {
+        "blocker_fingerprint": "2557bc1711ca3c387c5c0d72cf6e7fe2b3bc697340e2b18a61eba298201fbd06",
+        "claim_contract_ref": "sha256:26c43d5a78424428e107bd34c70e7c4b7f8a29dbc7dcfcd0e3448d3d1d75fbe2",
+        "diagnostic_id": "diag_a1f363a406fa4fe8389fa006",
+        "diagnostic_status": "OPEN",
+        "eligible_evidence_frontier": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "event_ref": "sha256:f54b02a897b2dec6cd95b6a6988adb5e0160d95a0074bf9b1a4f305e573a95dd",
+        "fold_version": "v2",
+        "input_digest": "01dc089679412d209deb6987ed622dbafa9bb03786387ece3989d3068484de2e",
+        "material_control_frontier": "32e1998338b73a88fe40d49d4c131424f6899783ea5169fcff0c617aad795865",
+        "missing": [
+          "source_identity",
+          "checks_terminal",
+          "merge_identity",
+          "deployment_identity",
+          "configuration_present",
+          "registered_canary",
+          "terminal_canary_state"
+        ],
+        "next_verifier": "software_release/local_verifier",
+        "requested_state": "LIVE_PROVEN",
+        "supported_state": null,
+        "text_withheld": true
+      }
+    ],
+    "gate_samples": [],
+    "pending_producers": [
+      "software_release/local"
+    ],
+    "profile_requirements_hash": "6349ca6a254f42bbc3ca7e8e89e3d70da94d355200c4d32eb1ee0f0df73fc082",
+    "profile_structural": {
+      "gate_ids": [
+        "closeout"
+      ],
+      "identity_edges": [
+        {
+          "left_field": "source_ref",
+          "left_requirement": "source_identity",
+          "right_field": "source_ref",
+          "right_requirement": "checks_terminal"
+        },
+        {
+          "left_field": "source_ref",
+          "left_requirement": "source_identity",
+          "right_field": "source_ref",
+          "right_requirement": "merge_identity"
+        },
+        {
+          "left_field": "merge_ref",
+          "left_requirement": "merge_identity",
+          "right_field": "merge_ref",
+          "right_requirement": "deployment_identity"
+        },
+        {
+          "left_field": "artifact_ref",
+          "left_requirement": "deployment_identity",
+          "right_field": "artifact_ref",
+          "right_requirement": "configuration_present"
+        },
+        {
+          "left_field": "artifact_ref",
+          "left_requirement": "deployment_identity",
+          "right_field": "artifact_ref",
+          "right_requirement": "registered_canary"
+        },
+        {
+          "left_field": "canary_ref",
+          "left_requirement": "registered_canary",
+          "right_field": "canary_ref",
+          "right_requirement": "terminal_canary_state"
+        }
+      ],
+      "nodes": {
+        "BUILT": {
+          "prerequisite_nodes": [],
+          "requirement_ids": [
+            "source_identity",
+            "checks_terminal"
+          ]
+        },
+        "DEPLOYED": {
+          "prerequisite_nodes": [
+            "MERGED"
+          ],
+          "requirement_ids": [
+            "deployment_identity",
+            "configuration_present"
+          ]
+        },
+        "LIVE_PROVEN": {
+          "prerequisite_nodes": [
+            "DEPLOYED"
+          ],
+          "requirement_ids": [
+            "registered_canary",
+            "terminal_canary_state"
+          ]
+        },
+        "MERGED": {
+          "prerequisite_nodes": [
+            "BUILT"
+          ],
+          "requirement_ids": [
+            "merge_identity"
+          ]
+        }
+      },
+      "producers": {
+        "software_release/canary": {
+          "expected_identity": "registered_canary_probe"
+        },
+        "software_release/deployment": {
+          "expected_identity": "registered_deployment_probe"
+        },
+        "software_release/local": {
+          "expected_identity": "local_verifier"
+        },
+        "software_release/repository": {
+          "expected_identity": "github_observer"
+        }
+      },
+      "profile_id": "software_release/v1",
+      "requirements": [
+        {
+          "assurance_class": "local",
+          "eligible_origins": [
+            "mock_or_test",
+            "runtime_hook"
+          ],
+          "event_kind": "source_identity_observed",
+          "producer_id": "software_release/local",
+          "requirement_id": "source_identity",
+          "subject_fields": [
+            "source_ref"
+          ],
+          "verifier_id": "software_release/local_verifier"
+        },
+        {
+          "assurance_class": "local",
+          "eligible_origins": [
+            "mock_or_test",
+            "runtime_hook"
+          ],
+          "event_kind": "checks_terminal_observed",
+          "producer_id": "software_release/local",
+          "requirement_id": "checks_terminal",
+          "subject_fields": [
+            "source_ref",
+            "checks_ref"
+          ],
+          "verifier_id": "software_release/local_verifier"
+        },
+        {
+          "assurance_class": "repository",
+          "eligible_origins": [
+            "github_observed",
+            "mock_or_test"
+          ],
+          "event_kind": "merge_identity_observed",
+          "producer_id": "software_release/repository",
+          "requirement_id": "merge_identity",
+          "subject_fields": [
+            "source_ref",
+            "base_ref",
+            "merge_ref"
+          ],
+          "verifier_id": "software_release/repository_verifier"
+        },
+        {
+          "assurance_class": "production",
+          "eligible_origins": [
+            "registered_probe"
+          ],
+          "event_kind": "deployment_identity_observed",
+          "producer_id": "software_release/deployment",
+          "requirement_id": "deployment_identity",
+          "subject_fields": [
+            "merge_ref",
+            "artifact_ref"
+          ],
+          "verifier_id": "software_release/deployment_verifier"
+        },
+        {
+          "assurance_class": "production",
+          "eligible_origins": [
+            "registered_probe"
+          ],
+          "event_kind": "configuration_presence_observed",
+          "producer_id": "software_release/deployment",
+          "requirement_id": "configuration_present",
+          "subject_fields": [
+            "artifact_ref",
+            "configuration_ref"
+          ],
+          "verifier_id": "software_release/deployment_verifier"
+        },
+        {
+          "assurance_class": "production",
+          "eligible_origins": [
+            "registered_probe"
+          ],
+          "event_kind": "registered_canary_observed",
+          "producer_id": "software_release/canary",
+          "requirement_id": "registered_canary",
+          "subject_fields": [
+            "artifact_ref",
+            "canary_ref"
+          ],
+          "verifier_id": "software_release/canary_verifier"
+        },
+        {
+          "assurance_class": "production",
+          "eligible_origins": [
+            "registered_probe"
+          ],
+          "event_kind": "terminal_canary_state_observed",
+          "producer_id": "software_release/canary",
+          "requirement_id": "terminal_canary_state",
+          "subject_fields": [
+            "canary_ref",
+            "terminal_state_ref"
+          ],
+          "verifier_id": "software_release/canary_verifier"
+        }
+      ],
+      "schema": "lyhna.claim-profile.v1",
+      "surface_projection": [
+        "BUILT",
+        "MERGED",
+        "DEPLOYED",
+        "LIVE_PROVEN"
+      ],
+      "verifier_ids": [
+        "software_release/local_verifier",
+        "software_release/repository_verifier",
+        "software_release/deployment_verifier",
+        "software_release/canary_verifier"
+      ]
+    }
+  },
+  "claims": [],
+  "continuation_fold_version": "v2",
+  "inherits": null,
+  "limitations": [
+    "This capsule was folded from the run ledger by the supervisor hook path; the agent did not author it.",
+    "Settled, open, and next are derived from structural observations, not from agent narration.",
+    "Absence inside configured coverage means not observed; it does not prove an action did not occur.",
+    "Nothing here approves, certifies, or judges correctness; a declared Lyhna claim gate may refuse only an unsupported Lyhna seal."
+  ],
+  "mode": "full",
+  "next": [
+    {
+      "ref": "sha256:13941a2c56c72d675a00ecfa3acc19030abd285ef1f43f4524b924b7ae701ac4",
+      "statement": "Resolve this closeout condition before treating the run as complete."
+    }
+  ],
+  "objective": "Objective withheld.",
+  "objective_origin": "agent_reported",
+  "open": [
+    {
+      "ref": "sha256:13941a2c56c72d675a00ecfa3acc19030abd285ef1f43f4524b924b7ae701ac4",
+      "statement": "Close was requested; this run had not sealed as of this fold."
+    }
+  ],
+  "privacy_mode": "proof",
+  "run_id": "run_24cd4b2e-8328-46c6-ac37-7f1bab7c471b",
+  "schema": "lyhna.codex.continuation.v0",
+  "settled": [],
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "default",
+    "public_key": "b66636f9ea8a58effc254f6a68df35762e8ce7b561b98f57debc35380bccaf6b",
+    "signature": "bcb3f9724472aa0e8b5ad04346872e0567b9d9e03c5e724ee03b20dbcb94cb520dcf8d47bb8871756edea3d86962406cc109e0d0b7ddb5fbd67ed1a71287c40a"
+  },
+  "state_hash": "8a3b3ce54b1dd777cbd6ca237a6c39534083e761501c3b9e70bed0b5fca98481",
+  "status": "CLOSE_REQUESTED_NOT_SEALED",
+  "witnessed": {
+    "child_receipts_retrieved": 0,
+    "child_receipts_sealed": 0,
+    "children_started": 0,
+    "evaluations_observed": 0,
+    "event_count": 15,
+    "ledger_tip": "c54febedbca904d3ae8e652453ccc155702278f495c7345b92a827054514e0f0",
+    "origin_counts": {
+      "mcp_routed": 4,
+      "runtime_hook": 11
+    },
+    "pr_snapshots_observed": 0,
+    "tool_attempts_observed": 0,
+    "tool_returns_observed": 0,
+    "type_counts": {
+      "checkpoint_anchor": 2,
+      "claim_compiled": 2,
+      "claim_contract_declared": 1,
+      "close_requested": 1,
+      "closeout_attempted": 2,
+      "diagnostic_emitted": 2,
+      "diagnostic_resolved": 1,
+      "producer_requested": 1,
+      "run_begun": 1,
+      "turn_checkpoint": 2
+    }
+  }
+}
