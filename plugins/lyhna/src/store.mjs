@@ -3041,13 +3041,13 @@ export function checkpointOrSeal(capability, deliveryKey = null) {
       const previewRequestedSupported = preview.state_results?.[current.claim_contract.requested_state]?.supported === true;
       const previewBlockers = claimCloseoutBlockers(current, preview, preEvents);
       const previewFingerprint = claimCloseoutBlockerFingerprint(current, gateId, preview);
-      const frontierChanged = previewRequestedSupported
-        || previewBlockers.length === 0
-        || priorSameDeliveryAttempt.payload?.blocker_fingerprint !== previewFingerprint;
-      if (frontierChanged) {
+      const couldSealSuccessfully = previewRequestedSupported || previewBlockers.length === 0;
+      if (couldSealSuccessfully) {
         // Do not append a new Stop checkpoint for the rejected slot. Publish the already-durable
         // evidence/torn observation once so the visible packet is current, then keep repeat failures
-        // byte-stable while a fresh delivery identity is required.
+        // byte-stable while a fresh delivery identity is required. A changed frontier that remains
+        // unsupported is safe to evaluate in the next bounded ledger slot: its changed fingerprint
+        // resets the ordinal, and same-key ambiguity can still only block or seal CLOSED_UNSUPPORTED.
         if (preEvents.at(-1)?.type !== 'checkpoint_anchor') writeCheckpointArtifacts(runId, current);
         assert(false, 'STOP_DELIVERY_FRONTIER_CHANGED');
       }

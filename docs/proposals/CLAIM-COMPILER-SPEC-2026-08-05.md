@@ -351,10 +351,12 @@ redelivery spends one additional bounded attempt and still returns `decision: "b
 third unchanged attempt seals only `CLOSED_UNSUPPORTED`. This is the sole exception to completed
 hook-delivery idempotency; it cannot produce a successful seal or alter the blocker fingerprint.
 Each new closeout attempt binds a structural `delivery_slot_ref` to the host delivery key and slot,
-so an interleaved checkpoint from another key cannot steal or strand an incomplete delivery. If
-evidence changes the fingerprint or would support success after a completed same-key attempt, that
-redelivery fails closed at transport; only a fresh host delivery identity may evaluate the changed
-frontier for a successful seal.
+so an interleaved checkpoint from another key cannot steal or strand an incomplete delivery. If the
+changed frontier would support success after a completed same-key attempt, that redelivery fails
+closed at transport; only a fresh host delivery identity may evaluate it for a successful seal. A
+changed frontier that remains unsupported starts a new fingerprint streak in the next ledger-derived
+slot. The same-key ambiguity may therefore spend another bounded blocked attempt, but it can only
+block or seal `CLOSED_UNSUPPORTED`.
 
 ## Privacy projection
 

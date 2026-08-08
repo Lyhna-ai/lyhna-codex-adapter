@@ -2296,6 +2296,38 @@ test('a completed same-key Stop cannot turn newly supporting evidence into a suc
   assert.equal(checkpointOrSeal(parent, 'fresh-success-key').status, 'SEALED');
 });
 
+test('a changed same-key frontier that remains unsupported starts a new bounded streak', { concurrency: false }, (t) => {
+  isolatedData(t);
+  const parent = mintSession({ sessionId: 'compiler-completed-redelivery-unsupported-frontier', cwd: process.cwd() });
+  const run = beginRun(parent, { mode: 'full', objective: 'Keep an unsupported changed frontier live without permitting success.' });
+  const declared = declareClaimContract(parent, contract());
+  requestClose(parent, 'Close only through the declared claim gate.');
+  const deliveryKey = 'id_'.concat(sha256('completed-redelivery-unsupported-frontier'));
+
+  const first = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(first.closeout_attempt_ordinal, 1);
+  const firstFingerprint = getRunForTesting(run.id).events
+    .filter((event) => event.type === 'closeout_attempted').at(-1).payload.blocker_fingerprint;
+
+  requestClaimProducer(parent, declared.contract_id, 'software_release/local');
+  const changed = checkpointOrSeal(parent, deliveryKey);
+  assert.equal(changed.status, 'CLOSE_DEFERRED');
+  assert.equal(changed.closeout_attempt_ordinal, 1);
+  const changedFingerprint = getRunForTesting(run.id).events
+    .filter((event) => event.type === 'closeout_attempted').at(-1).payload.blocker_fingerprint;
+  assert.notEqual(changedFingerprint, firstFingerprint);
+  assert.equal(checkpointOrSeal(parent, deliveryKey).closeout_attempt_ordinal, 2);
+  assert.equal(checkpointOrSeal(parent, deliveryKey).status, 'CLOSED_UNSUPPORTED');
+
+  const packet = getRunForTesting(run.id);
+  assert.deepEqual(
+    packet.events.filter((event) => event.type === 'closeout_attempted').map((event) => event.payload.ordinal),
+    [1, 1, 2, 3]
+  );
+  assert.equal(packet.events.filter((event) => event.type === 'run_sealed').length, 1);
+  assert.equal(packet.state.terminal_status, 'CLOSED_UNSUPPORTED');
+});
+
 test('a changed completed Stop frontier returns its own hook reason instead of BLOCKED_TRANSPORT', { concurrency: false }, (t) => {
   const data = isolatedData(t);
   const env = { ...process.env, LYHNA_CODEX_DATA: data };
